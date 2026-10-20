@@ -144,6 +144,9 @@ pub fn main(init: std.process.Init) !void {
             .quad => |q| try out.print("  quad  [{d:.0},{d:.0} {d:.0}x{d:.0}] {s}\n", .{
                 q.rect.x, q.rect.y, q.rect.w, q.rect.h, fillDesc(q.fill, &dbuf),
             }),
+            .halo => |q| try out.print("  halo  [{d:.0},{d:.0} {d:.0}x{d:.0}] blur={d:.0} spread={d:.0}\n", .{
+                q.rect.x, q.rect.y, q.rect.w, q.rect.h, q.halo.blur, q.halo.spread,
+            }),
             .rrect => |q| try out.print("  rrect [{d:.0},{d:.0} {d:.0}x{d:.0}] r={d:.0} {s}\n", .{
                 q.rect.x, q.rect.y, q.rect.w, q.rect.h, q.radius, fillDesc(q.fill, &dbuf),
             }),

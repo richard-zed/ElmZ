@@ -272,6 +272,10 @@ fn lowestEdge(prims: []const elmz.Primitive) f32 {
         .quad => |q| maxy = @max(maxy, q.rect.y + q.rect.h),
         .rrect => |q| maxy = @max(maxy, q.rect.y + q.rect.h),
         .text => |t| maxy = @max(maxy, t.y + t.size * 1.3),
+        // A halo is not drawn content for this check: it is deliberately
+        // allowed outside the element, so counting it would fail the layout
+        // assertion for the one feature that is supposed to overflow.
+        .halo => {},
     };
     return maxy;
 }

@@ -284,11 +284,52 @@ pub const Region = struct {
 
 /// Renderer-agnostic draw commands. A backend either rasterises these directly
 /// (software) or feeds them to a GPU pipeline (triangles + glyph quads).
+/// A glow or a shadow: one shape, one colour, a ramp on the same signed
+/// distance the rounded rect is already computed from.
+///
+/// `mode` is intent, not a rendering switch -- both are a ramp around the
+/// silhouette, and `offset` is what separates them in practice (a shadow
+/// usually sits down and right of the thing casting it; a glow usually
+/// centres). Keeping the tag means a backend that CAN afford a real blur can
+/// tell the two apart later without the API changing.
+pub const Halo = struct {
+    color: Color,
+    /// How far the ramp runs, in pixels, straddling the silhouette: fully
+    /// opaque `blur / 2` inside the edge, gone `blur / 2` outside. That
+    /// straddle is what stops a shadow reading as a hard outline.
+    blur: f32 = 12,
+    /// Pixels the silhouette is pushed outward before the ramp starts. Without
+    /// it a blurred shadow of a filled shape is barely visible.
+    spread: f32 = 0,
+    offset: [2]f32 = .{ 0, 0 },
+    mode: Mode = .glow,
+    /// How the halo is computed. An explicit `sdf` or `baked` is a REQUEST and
+    /// takes priority over anything the renderer would have picked -- it is an
+    /// escape hatch, and an escape hatch that a heuristic can overrule is not
+    /// one.
+    ///
+    /// `auto` is the only value that consults a size threshold, and the
+    /// threshold is a quality/cost tradeoff, not a correctness one: both paths
+    /// must land within tolerance of each other, which is what the crossover
+    /// test pins.
+    ///
+    /// KNOWN GAP: there is no baked path yet, so `baked` currently renders
+    /// exactly as `sdf` does. It is accepted rather than rejected so a caller
+    /// can write the code they mean, but nothing should claim fidelity it does
+    /// not have -- the bake cache has to land before that value means anything.
+    quality: Quality = .auto,
+
+    pub const Mode = enum { glow, shadow };
+    pub const Quality = enum { auto, sdf, baked };
+};
+
 pub const Primitive = union(enum) {
     quad: struct { rect: Rect, fill: Fill, clip: Rect },
     /// rounded rect: `stroke` draws a 1px outline instead of a fill
     rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect },
     text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect },
+    /// Drawn BEFORE the element it belongs to, so it composites behind it.
+    halo: struct { rect: Rect, corner: f32, halo: Halo, clip: Rect },
 
     /// `clip` is repeated in each prong because a Zig union has no common
     /// fields. It is the scissor rect resolved at record time, so a primitive
@@ -298,6 +339,7 @@ pub const Primitive = union(enum) {
             .quad => |q| q.clip,
             .rrect => |q| q.clip,
             .text => |t| t.clip,
+            .halo => |h| h.clip,
         };
     }
 };
@@ -345,6 +387,9 @@ pub const Renderer = struct {
         /// draws a rounded rect, or its 1px outline when `stroke` is set
         rrect: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void,
         text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void,
+        /// A glow or shadow behind `rect`. `corner` is the element's own radius
+        /// so the halo follows its shape rather than boxing it.
+        halo: *const fn (ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void,
         measure_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32) TextMetrics,
         /// Splits into lines no wider than `max_width`. Returns the count.
         /// Kept on the renderer because only the backend knows the glyph
@@ -376,6 +421,15 @@ pub const Renderer = struct {
     pub fn text(self: Renderer, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
         if (bytes.len == 0) return;
         self.vtable.text(self.ptr, x, y, size, fill, bytes, clip);
+    }
+
+    /// A glow or shadow, drawn where the caller asked for it. The backend
+    /// decides fidelity: one that cannot afford a blur is free to draw a
+    /// sharp offset instead of nothing at all.
+    pub fn halo(self: Renderer, rect: Rect, corner: f32, h: Halo, clip: Rect) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        if (h.color.a == 0) return;
+        self.vtable.halo(self.ptr, rect, corner, h, clip);
     }
 
     pub fn measureText(self: Renderer, bytes: []const u8, size: f32) TextMetrics {
@@ -551,6 +605,9 @@ pub const Style = struct {
     /// a square corner with `radius = 0`.
     radius: ?f32 = null,
     pad: ?f32 = null,
+    /// Appearance, not layout: an app can set a glow on any element, and a
+    /// widget that wants a shadow by default can put one here.
+    halo: ?Halo = null,
 
     pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
         return resolveFill(self.bg, self.bg_grad, fallback);
@@ -602,6 +659,15 @@ pub fn Element(comptime M: type) type {
         /// per look.
         fg: ?Color = null,
         fg_grad: ?Fill = null,
+        /// A glow or shadow behind this element, following its corner radius.
+        /// Appearance only: no layout cost, no hit region, no children moved.
+        halo: ?Halo = null,
+        /// A halo drawn only while the pointer is over this element, merged
+        /// over `halo`. Kept separate from `halo` for the same reason
+        /// `hover_bg` is separate from `bg`: the hovered state is derived
+        /// during paint, so an app cannot compute it in `view`, and it must
+        /// not have to keep a copy of the resting look to restore later.
+        hover_halo: ?Halo = null,
         /// 1px inset outline, drawn inside the rect so it costs no layout
         border: ?Color = null,
         border_grad: ?Fill = null,
@@ -663,6 +729,7 @@ pub fn Element(comptime M: type) type {
                 .border_grad = self.border_grad,
                 .radius = self.radius,
                 .pad = self.pad,
+                .halo = self.halo,
             };
         }
 
@@ -684,6 +751,7 @@ pub fn Element(comptime M: type) type {
             self.border_grad = s.border_grad;
             self.radius = s.radius orelse 0;
             self.pad = s.pad orelse 0;
+            self.halo = s.halo;
         }
 
         /// Overlay `s` on what this element already has: only the fields the
@@ -703,6 +771,7 @@ pub fn Element(comptime M: type) type {
             if (s.border_grad) |v| self.border_grad = v;
             if (s.radius) |v| self.radius = v;
             if (s.pad) |v| self.pad = v;
+            if (s.halo) |v| self.halo = v;
         }
 
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Size {
@@ -827,6 +896,20 @@ pub fn Element(comptime M: type) type {
                 .button, .bar => .{ .solid = th.control },
                 else => null,
             };
+            // Halos composite BEHIND the element: a shadow is the silhouette
+            // of the thing, a glow is light around it, and either one drawn on
+            // top would cover the element it belongs to. Clipped to the
+            // INHERITED clip, never to the element's own rect -- a halo that
+            // could not leave the box would be a border.
+            const hovered = blk: {
+                if (self.disabled) break :blk false;
+                if (ptr.held) |held| break :blk held.eql(rect, clip) or (self.key != null and held.key == self.key);
+                if (hov.target) |target| break :blk target.eql(rect, clip);
+                if (ptr.pos) |p| break :blk rect.contains(p) and clip.contains(p);
+                break :blk false;
+            };
+            const halo_now: ?Halo = if (hovered) self.hover_halo orelse self.halo else self.halo;
+            if (halo_now) |h| r.halo(rect, self.radius, h, clip);
             if (self.radius > 0) {
                 if (fill_now) |c| r.roundedRect(rect, self.radius, c, false, clip);
                 if (border_now) |c| r.roundedRect(rect, self.radius, c, true, clip);
@@ -1067,6 +1150,7 @@ pub fn Ui(comptime M: type) type {
             if (o.on_press) |msg| e.on_press = msg;
             if (o.clips) e.clips = true;
             if (o.hover_bg) |v| e.hover_bg = v;
+            if (o.hover_halo) |v| e.hover_halo = v;
             if (o.press_bg) |v| e.press_bg = v;
             // Caller last: a caller who set a field meant it, and `mergeStyle`
             // writes only the fields they actually set.
@@ -1082,6 +1166,11 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over
+            /// the element. Its own field rather than a colour on `halo`
+            /// because a glow and a shadow are the same type with different
+            /// geometry: hover usually swaps the geometry, not just the tint.
+            hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
@@ -1098,6 +1187,11 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over
+            /// the element. Its own field rather than a colour on `halo`
+            /// because a glow and a shadow are the same type with different
+            /// geometry: hover usually swaps the geometry, not just the tint.
+            hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
@@ -1119,6 +1213,11 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over
+            /// the element. Its own field rather than a colour on `halo`
+            /// because a glow and a shadow are the same type with different
+            /// geometry: hover usually swaps the geometry, not just the tint.
+            hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
@@ -1134,6 +1233,11 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over
+            /// the element. Its own field rather than a colour on `halo`
+            /// because a glow and a shadow are the same type with different
+            /// geometry: hover usually swaps the geometry, not just the tint.
+            hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
@@ -1150,6 +1254,11 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over
+            /// the element. Its own field rather than a colour on `halo`
+            /// because a glow and a shadow are the same type with different
+            /// geometry: hover usually swaps the geometry, not just the tint.
+            hover_halo: ?Halo = null,
             style: Style = .{},
             space_before: f32 = 0,
             space_after: f32 = 0,
@@ -1397,6 +1506,7 @@ pub fn Collector(comptime M: type) type {
             .quad = vtQuad,
             .rrect = vtRrect,
             .text = vtText,
+            .halo = vtHalo,
             .measure_text = vtMeasure,
             .wrap_text = vtWrap,
         };
@@ -1419,6 +1529,21 @@ pub fn Collector(comptime M: type) type {
             } }) catch {};
         }
 
+        fn vtHalo(ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // The halo reaches past the element, so it is pruned against the
+            // grown box -- pruning on `rect` would drop a shadow that is
+            // entirely outside the shape it belongs to.
+            const grow = h.spread + h.blur + 1;
+            const box = Rect{
+                .x = rect.x + h.offset[0] - grow,
+                .y = rect.y + h.offset[1] - grow,
+                .w = rect.w + grow * 2,
+                .h = rect.h + grow * 2,
+            };
+            if (box.intersect(clip).isEmpty()) return;
+            self.prims.append(self.gpa, .{ .halo = .{ .rect = rect, .corner = corner, .halo = h, .clip = clip } }) catch {};
+        }
         fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             // Text has no rect of its own, so the prune needs the metrics that
@@ -1469,6 +1594,7 @@ pub fn nominalRenderer() Renderer {
         .quad = nominalQuad,
         .rrect = nominalRrect,
         .text = nominalText,
+        .halo = nominalHalo,
         .measure_text = nominalMeasure,
         .wrap_text = nominalWrap,
     } };
@@ -1505,6 +1631,7 @@ fn nominalMeasure(_: *anyopaque, bytes: []const u8, size: f32) TextMetrics {
 fn nominalQuad(_: *anyopaque, _: Rect, _: Fill, _: Rect) void {}
 fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: bool, _: Rect) void {}
 fn nominalText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: Rect) void {}
+fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
 // ---------------------------------------------------------------------------
 // messages / runtime
 // ---------------------------------------------------------------------------
@@ -2604,6 +2731,9 @@ test "a gradient override paints instead of the flat colour" {
         .text => |t| if (!t.fill.isSolid()) {
             grads += 1;
         },
+        // A halo has one flat colour by design; it is a ramp in ALPHA, not a
+        // gradient fill, so it must not count toward the gradient census.
+        .halo => {},
     };
     try std.testing.expect(grads >= 3);
 
@@ -2616,6 +2746,7 @@ test "a gradient override paints instead of the flat colour" {
         .quad => |q| try std.testing.expect(q.fill.isSolid()),
         .rrect => |q| try std.testing.expect(q.fill.isSolid()),
         .text => |t| try std.testing.expect(t.fill.isSolid()),
+        .halo => {},
     };
 }
 
@@ -2647,4 +2778,49 @@ test "modifier flags pack into one byte with no padding" {
     try std.testing.expectEqual(@as(u4, 0b1111), @as(u4, @bitCast(held)));
     try std.testing.expectEqual(@as(Mods, .{ .ctrl = true }), Mods{ .ctrl = true });
     try std.testing.expect(Mods{ .ctrl = true } != Mods{ .shift = true });
+}
+
+test "every Style field is honoured by applyStyle and mergeStyle" {
+    // A field-by-field merge is a list that a new field can be left off, and
+    // the omission is invisible: the element simply keeps its default and
+    // nothing reports it. `halo` was dropped exactly that way -- a card asked
+    // for a shadow, the frame said "0 halo(s)", and no test complained.
+    // Iterating the fields makes the next one fail to compile instead.
+    const S = Style;
+    var full: S = .{};
+    inline for (@typeInfo(S).@"struct".fields) |f| {
+        const Child = @typeInfo(f.type).optional.child;
+        const v: f.type = switch (Child) {
+            Color => .{ .r = 1, .g = 2, .b = 3, .a = 4 },
+            Fill => .{ .solid = .{ .r = 5, .g = 6, .b = 7, .a = 8 } },
+            f32 => 7,
+            Halo => .{ .color = .{ .r = 9, .g = 10, .b = 11, .a = 12 }, .blur = 3, .spread = 1, .offset = .{ 1, 2 } },
+            else => @compileError("new Style field '" ++ f.name ++ "' of type " ++ @typeName(Child) ++
+                " needs a value here, and a matching line in applyStyle and mergeStyle"),
+        };
+        @field(full, f.name) = v;
+    }
+
+    // applyStyle: a wholesale set
+    var a: Element(void) = .{ .kind = .{ .rect = {} } };
+    a.applyStyle(full);
+    inline for (@typeInfo(S).@"struct".fields) |f| {
+        if (@typeInfo(f.type).optional.child == f32) {
+            // applyStyle defaults an absent radius/pad, so compare as optional
+            try std.testing.expect(@field(a, f.name) == @field(full, f.name).?);
+        } else {
+            try std.testing.expect(std.meta.eql(@field(a, f.name), @field(full, f.name).?));
+        }
+    }
+
+    // mergeStyle: only the fields the caller set, all of which are set here
+    var m: Element(void) = .{ .kind = .{ .rect = {} } };
+    m.mergeStyle(full);
+    inline for (@typeInfo(S).@"struct".fields) |f| {
+        if (@typeInfo(f.type).optional.child == f32) {
+            try std.testing.expect(@field(m, f.name) == @field(full, f.name).?);
+        } else {
+            try std.testing.expect(std.meta.eql(@field(m, f.name), @field(full, f.name).?));
+        }
+    }
 }

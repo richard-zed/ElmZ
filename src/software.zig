@@ -244,12 +244,69 @@ pub const Canvas = struct {
         }
     }
 
+    /// A glow or shadow: the same signed distance the rounded rect is built
+    /// from, with the coverage term swapped for a falloff that straddles the
+    /// edge -- solid `blur / 2` inside it, gone `blur / 2` outside.
+    ///
+    /// Only the ring is walked. The interior is fully opaque by construction
+    /// and the element paints over it, so looping over it would be work whose
+    /// result is never seen. That keeps a glow's cost proportional to its
+    /// circumference rather than to the area it wraps.
+    pub fn halo(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+        if (h.color.a == 0) return;
+        const blur = @max(h.blur, 0);
+        // The silhouette the ramp runs away from, after spread and offset.
+        const shape = elmz.Rect{
+            .x = rect.x + h.offset[0] - h.spread,
+            .y = rect.y + h.offset[1] - h.spread,
+            .w = rect.w + h.spread * 2,
+            .h = rect.h + h.spread * 2,
+        };
+        if (shape.w <= 0 or shape.h <= 0) return;
+        const r = @min(@max(corner + h.spread, 0), @min(shape.w, shape.h) * 0.5);
+        const hx = shape.w * 0.5 - r;
+        const hy = shape.h * 0.5 - r;
+        const cx = shape.x + shape.w * 0.5;
+        const cy = shape.y + shape.h * 0.5;
+
+        // Ring bounds: the shape grown by the falloff, plus one pixel for the
+        // antialiased edge itself.
+        const grow = blur * 0.5 + 1;
+        const ring = elmz.Rect{
+            .x = shape.x - grow,
+            .y = shape.y - grow,
+            .w = shape.w + grow * 2,
+            .h = shape.h + grow * 2,
+        };
+        const sp = self.clipSpan(ring, clip) orelse return;
+
+        var y = sp.y0;
+        while (y < sp.y1) : (y += 1) {
+            const py = @as(f32, @floatFromInt(y)) + 0.5 - cy;
+            const qy = @abs(py) - hy;
+            const ay = @max(qy, 0);
+            var x = sp.x0;
+            while (x < sp.x1) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5 - cx;
+                const qx = @abs(px) - hx;
+                const ax = @max(qx, 0);
+                const d = @sqrt(ax * ax + ay * ay) + @min(@max(qx, qy), 0) - r;
+                // Nothing to draw once the ramp has run out, and nothing to
+                // draw deep inside: the shape is opaque there.
+                if (d > blur * 0.5 or d < -blur * 0.5) continue;
+                const cov = if (blur <= 0) 1 else std.math.clamp(0.5 - d / blur, 0, 1);
+                if (cov > 0) self.blendCoverage(x, y, h.color, cov);
+            }
+        }
+    }
+
     /// Replay a recorded frame onto the pixels. `Runtime.frame` only records
     /// primitives; nothing is rasterised until this runs.
     pub fn paintFrame(self: *Self, prims: []const elmz.Primitive) void {
         const r = self.renderer();
         for (prims) |p| switch (p) {
             .quad => |q| r.quad(q.rect, q.fill, q.clip),
+            .halo => |q| r.halo(q.rect, q.corner, q.halo, q.clip),
             .rrect => |q| r.roundedRect(q.rect, q.radius, q.fill, q.stroke, q.clip),
             .text => |t| r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip),
         };
@@ -375,9 +432,15 @@ pub const Canvas = struct {
         .quad = vtQuad,
         .rrect = vtRrect,
         .text = vtText,
+        .halo = vtHalo,
         .measure_text = vtMeasure,
         .wrap_text = vtWrap,
     };
+
+    fn vtHalo(ptr: *anyopaque, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.halo(rect, corner, h, clip);
+    }
 
     fn vtQuad(ptr: *anyopaque, rect: elmz.Rect, fill: elmz.Fill, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));

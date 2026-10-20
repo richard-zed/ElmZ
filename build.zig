@@ -209,6 +209,24 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const glow_exe = b.addExecutable(.{
+        .name = "glow",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/glow.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    glow_exe.root_module.addImport("elmz", elmz_mod);
+    glow_exe.root_module.addImport("runner", runner_mod);
+    glow_exe.root_module.addImport("software", software_mod);
+    const glow_exe_install = b.addInstallArtifact(glow_exe, .{});
+    b.getInstallStep().dependOn(&glow_exe_install.step);
+    b.step("glow", "build the glow/shadow demo").dependOn(&glow_exe_install.step);
+    b.step("run-glow", "render glow.png and glow-hover.png (headless)").dependOn(
+        &runExample(b, glow_exe).step,
+    );
+
     const showcase_exe_install = b.addInstallArtifact(showcase_exe, .{});
     b.getInstallStep().dependOn(&showcase_exe_install.step);
     b.step("showcase", "build the headless showcase").dependOn(&showcase_exe_install.step);
