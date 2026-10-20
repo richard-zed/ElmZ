@@ -87,6 +87,13 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // one hides the shape it is supposedly lighting.
     const glow_color = elmz.Color{ .r = th.accent.r, .g = th.accent.g, .b = th.accent.b, .a = 130 };
 
+    // Hover for the renderer pair changes the TINT and never the geometry.
+    // Growing the halo on hover is a fine thing to demo, but not here: it would
+    // make one of the two renderers look larger for a reason that has nothing
+    // to do with rendering, and a size difference is exactly what someone
+    // comparing the two paths would read as "the stencil is bigger".
+    const glow_hot = elmz.Color{ .r = th.accent.r, .g = th.accent.g, .b = th.accent.b, .a = 210 };
+
     const title = ui.text(.{ .label = "glow + shadow", .size = m.title_size, .tone = .normal });
 
     const note = ui.text(.{
@@ -119,7 +126,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         // hover REPLACES the halo rather than adding one: a shadow sits under a
         // thing, a glow spreads around it, and the same element does not want
         // both at once.
-        .hover_halo = .{ .color = glow_color, .blur = 20, .spread = 3, .mode = .glow },
+        .hover_halo = .{ .color = glow_hot, .blur = 14, .spread = 2, .mode = .glow },
     });
 
     const baked_button = ui.button(.{
@@ -135,7 +142,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             // instead of a distance field evaluated per pixel every frame.
             .halo = .{ .color = glow_color, .blur = 14, .spread = 2, .mode = .glow, .quality = .baked },
         },
-        .hover_halo = .{ .color = glow_color, .blur = 20, .spread = 3, .mode = .glow },
+        .hover_halo = .{ .color = glow_hot, .blur = 14, .spread = 2, .mode = .glow },
     });
 
     // 24px apart: two 14px halos at an 8px gap overlap each other and read as one
@@ -169,9 +176,10 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // Same blur, same spread, same colour; only the light moves. 0 is overhead
     // and is the one a UI wants almost always. Labelled by side rather than by
     // angle: a number cannot say which way the light comes from, which is what
-    // made this fan unreadable when it said "270", "45", "90".
+    // made this fan unreadable when it said "270", "45", "90" -- and worse, the
+    // labels had stopped matching the lights they sat on.
     const lights = [_]f32{ 0, 90, 135, 180, 270 };
-    const light_names = [_][]const u8{ "270", "0", "45", "90", "180" };
+    const light_names = [_][]const u8{ "above", "right", "lower-right", "below", "left" };
     var cards: [lights.len]*elmz.Element(Msg) = undefined;
     for (lights, 0..) |deg, i| {
         const label = ui.text(.{ .label = light_names[i], .size = 12, .tone = .muted });

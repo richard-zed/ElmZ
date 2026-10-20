@@ -94,6 +94,12 @@ pub const Windows = struct {
         };
         errdefer c.SDL_DestroyWindow(win);
 
+        // Must be started before any SDL_EVENT_TEXT_INPUT arrives: without this
+        // call the backend never emits text at all, so a field would receive
+        // keys and no characters -- the exact failure that looks like "text
+        // input is broken" when the seam was never opened.
+        _ = c.SDL_StartTextInput(win);
+
         // null = let SDL choose (Vulkan/GLES on Wayland); fall back to the
         // software renderer on machines with no usable driver.
         const ren = c.SDL_CreateRenderer(win, null) orelse
@@ -201,6 +207,12 @@ pub const Windows = struct {
                 return .{ .key = keyEvent(ev.key) };
             },
             c.SDL_EVENT_KEY_UP => return .{ .key_up = keyEvent(ev.key) },
+            // Typed text, not a keysym: this is the only event that survives a
+            // dead key, a compose sequence or an IME commit. `SDL_EVENT_TEXT_EDITING`
+            // (pre-edit, underlined composition) is deliberately not forwarded
+            // yet -- that is a candidate list, and a field that cannot draw one
+            // would be lying about what it supports.
+            c.SDL_EVENT_TEXT_INPUT => return .{ .text = std.mem.span(ev.text.text) },
             else => return null,
         }
     }

@@ -40,20 +40,37 @@ fn lightWidth(blur: f32, px: f32, py: f32, hx: f32, hy: f32, cast: [2]f32) f32 {
 /// meant two things depending on which path drew it would be two features wearing
 /// one name.
 fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32) f32 {
-    const s: f32 = switch (mode) {
+    if (blur <= 0) return 1;
+    return switch (mode) {
         // Both halves. `.outer_glow` is the same ramp: what makes it outer is
         // being cut against the ELEMENT's silhouette (see `haloSdf`), not against
         // the shape the ramp was built from. Cutting against the shape leaves a
         // hole exactly where an offset shadow should be visible -- the strip of
         // backdrop between the element's edge and the offset silhouette.
-        .glow, .outer_glow => d,
-        // Mirrored: the falloff counts inward from the edge, so the distance to
-        // the OUTSIDE is what it measures. Distances past the edge are cut, or an
-        // "inner" glow would spill out of the shape it lives in.
-        .inner_glow => if (d > 0) return 0 else -d,
+        .glow, .outer_glow => std.math.clamp(0.5 - d / blur, 0, 1),
+        // Its own curve, not the shared one mirrored. Mirrored it cannot exceed
+        // HALF, because the shared ramp is half-opaque AT the silhouette by
+        // construction -- right for a glow straddling an edge, wrong for a rim
+        // light that lives entirely inside it. That ceiling, not the falloff, is
+        // why the mirrored version read as a smudge.
+        //
+        // Full at the edge, gone a whole `blur` inward: twice the peak and twice
+        // the reach of the mirrored form.
+        .inner_glow => if (d > 0) 0 else std.math.clamp(1.0 + d / blur, 0, 1),
     };
-    if (blur <= 0) return 1;
-    return std.math.clamp(0.5 - s / blur, 0, 1);
+}
+
+/// How far a ramp reaches from the silhouette, in pixels, WITHOUT the extra
+/// pixel that covers the antialiased edge.
+///
+/// The shared ramp dies `blur / 2` either side of the edge; a lit one reaches
+/// `blur` on the side it is thrown toward; an inner glow dies a full `blur` in.
+/// Every walk band and every mask is sized from this, because a band narrower
+/// than the ramp silently clips its own falloff -- which is exactly what a
+/// longer inner ramp would do at the old `blur / 2`.
+fn falloffReach(mode: elmz.Halo.Mode, blur: f32, lit: bool) f32 {
+    if (mode == .inner_glow) return blur;
+    return blur * (if (lit) @as(f32, 1.0) else 0.5);
 }
 
 /// One separable box pass over an RGBA buffer, in place. `rad` is the half-width
@@ -608,7 +625,7 @@ pub const Canvas = struct {
 
         // Ring bounds: the shape grown by the falloff, plus one pixel for the
         // antialiased edge itself. A lit ramp reaches further on the cast side.
-        const grow: f32 = blur * (if (h.light != null) @as(f32, 1.0) else 0.5) + 1;
+        const grow: f32 = falloffReach(h.mode, blur, h.light != null) + 1;
         const ring = elmz.Rect{
             .x = shape.x - grow,
             .y = shape.y - grow,
@@ -797,7 +814,7 @@ pub const Canvas = struct {
         const shi: i32 = @intFromFloat(@round(shape.h));
         const m = self.maskFor(swi, shi, r, blur, h.mode) orelse return self.haloSdf(rect, corner, h, clip);
 
-        const grow = blur * 0.5 + 1;
+        const grow = falloffReach(h.mode, blur, false) + 1;
         // A template describes any size, so the target ring is computed here;
         // a whole stencil already knows how big it is.
         const rw: u32 = if (m.sw == 0)
@@ -871,10 +888,19 @@ pub const Canvas = struct {
     /// two shapes of entry.
     fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32, mode: elmz.Halo.Mode) ?*Mask {
         if (sw <= 0 or sh <= 0) return null;
-        const grow = blur * 0.5 + 1;
+        const grow = falloffReach(mode, blur, false) + 1;
         const corner: u32 = @intFromFloat(@ceil(grow + r) + 1);
 
-        if (sw >= @as(i32, @intCast(corner * 2)) and sh >= @as(i32, @intCast(corner * 2))) {
+        // The template's centre column is the value `corner` pixels in, and the
+        // blit stretches it across the whole interior. That is only sound where
+        // the interior is SATURATED -- true for a glow and for a shadow, whose
+        // ramp is fully opaque well inside the edge. An `.inner_glow` ramps the
+        // other way and is fully TRANSPARENT in the interior, so `corner` lands
+        // mid-ramp and stretching it pins the inside to a constant ~0.32: the
+        // rim stops falling off and the middle of the shape never goes empty.
+        // Inner glows are therefore never sliced.
+        const sliceable = mode != .inner_glow and sw >= @as(i32, @intCast(corner * 2)) and sh >= @as(i32, @intCast(corner * 2));
+        if (sliceable) {
             for (self.masks.items) |*m| {
                 if (m.sw == 0 and m.r == r and m.blur == blur and m.corner == corner and m.mode == mode) return m;
             }
@@ -1821,6 +1847,120 @@ fn testPx(c: *Canvas, x: usize, y: usize) [4]u8 {
 fn testRgb(c: *Canvas, x: usize, y: usize) [3]u8 {
     const p = testPx(c, x, y);
     return .{ p[0], p[1], p[2] };
+}
+
+test "the stencil and the distance field put the ramp in the same place" {
+    const gpa = std.testing.allocator;
+
+    // Where does coverage cross half, scanning inward from outside the shape?
+    // Interpolated between samples, so the answer is not quantised to a pixel.
+    const Spot = struct {
+        fn cross(c: *Canvas, sx: i32, sy: i32, dx: i32, dy: i32, steps: usize) f32 {
+            var prev: f32 = -1;
+            var i: usize = 0;
+            while (i < steps) : (i += 1) {
+                const k: i32 = @intCast(i);
+                const x: usize = @intCast(sx + dx * k);
+                const y: usize = @intCast(sy + dy * k);
+                if (x >= 260 or y >= 200) return -1;
+                const v: f32 = @floatFromInt(testRgb(c, x, y)[0]);
+                if (v >= 128) {
+                    if (prev < 0) return @floatFromInt(i);
+                    return @as(f32, @floatFromInt(i - 1)) + (128 - prev) / (v - prev);
+                }
+                prev = v;
+            }
+            return -1;
+        }
+        fn edges(w: f32, h: f32, spread: f32, q: elmz.Halo.Quality) ![4]f32 {
+            const clip = elmz.Rect{ .x = 0, .y = 0, .w = 260, .h = 200 };
+            const rect = elmz.Rect{ .x = 40, .y = 40, .w = w, .h = h };
+            var c = try Canvas.init(gpa, 260, 200);
+            defer c.deinit();
+            const r = c.renderer();
+            r.quad(clip, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
+            r.halo(rect, 10, .{
+                .color = .{ .r = 255, .g = 255, .b = 255, .a = 255 },
+                .blur = 14,
+                .spread = spread,
+                .mode = .glow,
+                .quality = q,
+            }, clip);
+            const midy: i32 = @intFromFloat(40 + h * 0.5);
+            const midx: i32 = @intFromFloat(40 + w * 0.5);
+            const rx: i32 = @intFromFloat(40 + w);
+            const by: i32 = @intFromFloat(40 + h);
+            const l = @This().cross(&c, 10, midy, 1, 0, 45);
+            const rr = @This().cross(&c, rx + 30, midy, -1, 0, 45);
+            const t = @This().cross(&c, midx, 15, 0, 1, 40);
+            const bb = @This().cross(&c, midx, by + 25, 0, -1, 40);
+            if (l < 0 or rr < 0 or t < 0 or bb < 0) return error.NoCrossing;
+            return .{ 10 + l, @as(f32, @floatFromInt(rx + 30)) - rr, 15 + t, @as(f32, @floatFromInt(by + 25)) - bb };
+        }
+    };
+
+    // 74x34 is under 2*corner at blur 14 / radius 10, so it takes the whole-mask
+    // bake; 120x80 is over it and takes the nine-slice template. A 34px button
+    // is what the examples actually draw, so both branches need covering.
+    inline for (.{ .{ 74, 34 }, .{ 120, 80 } }) |sz| {
+        inline for (.{ 0, 2, 4 }) |sp| {
+            const sdf = try Spot.edges(sz[0], sz[1], sp, .sdf);
+            const baked = try Spot.edges(sz[0], sz[1], sp, .baked);
+            for (sdf, baked) |a, b| {
+                // One pixel of slack, on a ramp that spans blur = 14. The
+                // measured disagreement is 0.03px -- the coverage byte's own
+                // rounding -- so this catches a displaced silhouette while
+                // tolerating the quantisation that will never be removed.
+                try std.testing.expectApproxEqAbs(a, b, 1.0);
+            }
+        }
+    }
+}
+
+test "an inner glow starts at full strength and reaches a whole blur inward" {
+    const gpa = std.testing.allocator;
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
+
+    inline for (.{ .sdf, .baked }) |q| {
+        var c = try Canvas.init(gpa, 200, 160);
+        defer c.deinit();
+        const r = c.renderer();
+        r.quad(clip, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
+        // Opaque white on black, so the red channel IS the coverage.
+        r.halo(rect, 8, .{
+            .color = .{ .r = 255, .g = 255, .b = 255, .a = 255 },
+            .blur = 14,
+            .mode = .inner_glow,
+            .quality = q,
+        }, clip);
+
+        const y: usize = 70; // mid-height, clear of the corners
+        const edge: f32 = @floatFromInt(testRgb(&c, 41, y)[0]);
+        const half: f32 = @floatFromInt(testRgb(&c, 47, y)[0]);
+        const deep: f32 = @floatFromInt(testRgb(&c, 53, y)[0]);
+        const gone: f32 = @floatFromInt(testRgb(&c, 55, y)[0]);
+        const outside: f32 = @floatFromInt(testRgb(&c, 39, y)[0]);
+
+        // The CEILING is the point: mirrored, this ramp could never exceed 128
+        // at the edge, and died 7px in. Full strength at the edge, half at
+        // blur / 2, gone at blur.
+        try std.testing.expectApproxEqAbs(@as(f32, 227.7), edge, 10);
+        try std.testing.expectApproxEqAbs(@as(f32, 118.4), half, 10);
+        try std.testing.expect(deep < 20);
+        try std.testing.expect(gone == 0);
+        // An inner glow must not spill out of the shape it lives in.
+        try std.testing.expect(outside == 0);
+
+        // Monotone: a longer ramp must not bump somewhere along the way.
+        var x: usize = 41;
+        var prev: f32 = edge;
+        while (x < 55) : (x += 1) {
+            const v: f32 = @floatFromInt(testRgb(&c, x, y)[0]);
+            try std.testing.expect(v <= prev + 1);
+            prev = v;
+        }
+    }
 }
 
 test "a cast shadow fills the strip under its element and never tints the face" {

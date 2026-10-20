@@ -345,9 +345,10 @@ pub const Region = struct {
 /// as light around the shape; a translucent fill lets it tint the face, which is
 /// the only case where `.glow` and `.outer_glow` differ.
 /// `.outer_glow` keeps the outside half only.
-/// `.inner_glow` is the same ramp MIRRORED and kept inside -- full at the edge,
-/// gone `blur / 2` inward -- and is recorded AFTER the element's fill, because
-/// light inside a shape would otherwise be covered by it. Clipping `.glow` to
+/// `.inner_glow` is its own curve, not the shared one mirrored: full at the edge
+/// and gone a whole `blur` inward, where the mirrored ramp would peak at half
+/// strength and fade in `blur / 2`. It is recorded AFTER the element's fill,
+/// because light inside a shape would otherwise be covered by it. Clipping `.glow` to
 /// the inside is NOT an inner glow: that washes the whole face, since the ramp is
 /// fully opaque once it is far enough inside.
 ///
@@ -358,7 +359,9 @@ pub const Halo = struct {
     color: Color,
     /// How far the ramp runs, in pixels, straddling the silhouette: fully
     /// opaque `blur / 2` inside the edge, gone `blur / 2` outside. That
-    /// straddle is what stops a shadow reading as a hard outline.
+    /// straddle is what stops a shadow reading as a hard outline. An
+    /// `.inner_glow` runs the longer way -- full at the edge, gone `blur`
+    /// inside -- so its `blur` reads as a radius, not a half-width.
     blur: f32 = 12,
     /// Pixels the silhouette is pushed outward before the ramp starts. Without
     /// it a blurred shadow of a filled shape is barely visible.
@@ -1990,7 +1993,22 @@ pub const Event = union(enum) {
     key: Key,
     /// The release matching one `key`. Never repeats.
     key_up: Key,
+    /// Text the user actually typed, as UTF-8 bytes.
+    ///
+    /// This is NOT derivable from `Key`, which is why it is its own event: a
+    /// dead key, a compose sequence or an IME commit produces text with no
+    /// single key to blame, and a Ctrl chord produces none at all. Reading
+    /// `Key.code` and calling it a character is how a text field ends up
+    /// wrong on every layout but QWERTY.
+    ///
+    /// The bytes are BORROWED from the backend and are only valid until the
+    /// dispatch that carries them returns. Copy anything kept past `update`.
+    text: []const u8,
 };
+
+/// Which half of a keystroke an `on_key` hook is being told about. `repeat`
+/// lives on `Key`, not here: a repeat is still a press.
+pub const Phase = enum { down, up };
 
 /// What the platform has told us about the pointer. Nothing here says who
 /// owns a press: that lives in `Press`, and giving it a second home is how
@@ -2074,6 +2092,21 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// press belongs to the region it started on, not to wherever the
         /// pointer happens to be when the button comes back up.
         press: Press(M) = .{},
+        /// Optional keystroke hooks, wired by `runApp` from the app declaration.
+        ///
+        /// The app owns FOCUS -- which element a keystroke belongs to -- because
+        /// focus is widget state, and widget state lives in the Model until it
+        /// hurts. The runtime has no focus ring to consult, so it cannot pick a
+        /// destination, and inventing one would mean putting a closure on
+        /// `Element`, which the tree deliberately does not carry: a button
+        /// carries a Msg so the whole tree stays a value.
+        ///
+        /// Returning null means "not mine": no message and NO repaint. That is
+        /// what keeps a keystroke nobody wants from forcing a frame.
+        on_key: ?*const fn (*S, Key, Phase) ?M = null,
+        /// Same contract for typed text; see `Event.text` for why it is not
+        /// derivable from keys and why the slice is borrowed.
+        on_text: ?*const fn (*S, []const u8) ?M = null,
 
         pub fn init(
             gpa: Allocator,

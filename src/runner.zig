@@ -400,6 +400,13 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     defer rt.deinit();
 
     var opts: Options = .{ .io = io, .gpa = gpa, .overlay = default_overlay };
+    // Keystrokes and typed text, same optional-field trick as `state`: an app
+    // that declares `on_key` / `on_text` gets them, one that does not never
+    // hears about them and pays nothing. Focus stays in the app's Model -- the
+    // runtime has no focus ring, so it cannot pick a destination.
+    if (@hasField(@TypeOf(app), "on_key")) rt.on_key = app.on_key;
+    if (@hasField(@TypeOf(app), "on_text")) rt.on_text = app.on_text;
+
     // Same optional-field trick as `state`: an app that wants a theme file
     // declares `theme_path` in its struct, and one that does not never sees it.
     if (@hasField(@TypeOf(app), "theme_path")) opts.theme_path = app.theme_path;
@@ -635,12 +642,42 @@ pub fn run(
                 dirty = true;
             },
 
-            // Keys have no destination yet: `Event` carries them, and nothing
-            // dispatches. Focus is what gives them one -- a key event belongs
-            // to the focused element, and there is no focus ring to consult
-            // until that lands. Deliberately not marked dirty: an unhandled
-            // key must not force a repaint.
-            .key, .key_up => {},
+            // A keystroke belongs to whatever the APP says it belongs to; there
+            // is no focus ring in the runtime to consult. An app with no
+            // `on_key` gets nothing, and a hook that returns null is "not mine":
+            // no message, no repaint. Marking dirty unconditionally here would
+            // bill a full frame to every keypress nobody handled.
+            .key => |k| if (rt.on_key) |hook| {
+                if (hook(&rt.state, k, .down)) |msg| {
+                    const action = rt.dispatch(msg);
+                    stats.messages += 1;
+                    if (action.quit) running = false;
+                    dirty = dirty or action.repaint;
+                }
+            },
+            // Releases share the hook rather than getting a second one: an app
+            // that needs press/release asymmetry reads `phase`, and one that
+            // does not stays a single switch arm.
+            .key_up => |k| if (rt.on_key) |hook| {
+                if (hook(&rt.state, k, .up)) |msg| {
+                    const action = rt.dispatch(msg);
+                    stats.messages += 1;
+                    if (action.quit) running = false;
+                    dirty = dirty or action.repaint;
+                }
+            },
+
+            // Typed text, not keysyms. Borrowed for this dispatch only, which is
+            // fine here because the app sees it before the backend reuses the
+            // buffer; `update` copies anything it keeps.
+            .text => |bytes| if (rt.on_text) |hook| {
+                if (hook(&rt.state, bytes)) |msg| {
+                    const action = rt.dispatch(msg);
+                    stats.messages += 1;
+                    if (action.quit) running = false;
+                    dirty = dirty or action.repaint;
+                }
+            },
         }
 
         if (opts.max_events) |max| {
@@ -1970,4 +2007,65 @@ test "the overlay paints inside its panel and nowhere else" {
     try std.testing.expectEqual(@as(usize, 0), outside);
     // It is wedged in the corner rather than merely near it.
     try std.testing.expect(corner > 40);
+}
+
+test "keystrokes and typed text reach the app's hooks, and null does not repaint" {
+    const gpa = std.testing.allocator;
+    const KMsg = enum { keyed, typed };
+    const KState = struct { downs: i32 = 0, ups: i32 = 0, typed_len: usize = 0, first: u8 = 0 };
+
+    const Hooks = struct {
+        fn update(s: *KState, m: KMsg) elmz.Action(KMsg) {
+            switch (m) {
+                .keyed => s.downs += 1,
+                .typed => {},
+            }
+            return .{};
+        }
+        fn view(s: *KState, ui: *elmz.Ui(KMsg)) *elmz.Element(KMsg) {
+            return ui.textFmt("{d}", .{s.downs}, 20);
+        }
+        // 'a' is ours, everything else is not. The null path is half the
+        // contract, so the test proves that half too.
+        fn onKey(s: *KState, k: elmz.Key, p: elmz.Phase) ?KMsg {
+            if (p == .up) {
+                s.ups += 1;
+                return null;
+            }
+            if (k.code != 'a') return null;
+            return .keyed;
+        }
+        fn onText(s: *KState, bytes: []const u8) ?KMsg {
+            if (bytes.len == 0) return null;
+            s.typed_len += bytes.len;
+            s.first = bytes[0];
+            return .typed;
+        }
+    };
+
+    var canvas = try software.Canvas.init(gpa, 200, 120);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(KState, KMsg).init(gpa, .{}, Hooks.update, Hooks.view);
+    defer rt.deinit();
+    rt.on_key = Hooks.onKey;
+    rt.on_text = Hooks.onText;
+
+    var fake = Fake{
+        .events = &.{
+            .{ .key = .{ .code = 'a' } },
+            .{ .key = .{ .code = 'q' } }, // unhandled: no message, no repaint
+            .{ .key_up = .{ .code = 'a' } },
+            .{ .text = "he" },
+            .quit,
+        },
+        .idle = 2,
+    };
+    const stats = try run(struct {}, KState, KMsg, &rt, &canvas, fake.window(), .{});
+
+    try std.testing.expectEqual(@as(i32, 1), rt.state.downs); // 'a' only, not 'q'
+    try std.testing.expectEqual(@as(i32, 1), rt.state.ups); // release was seen
+    try std.testing.expectEqual(@as(usize, 2), rt.state.typed_len); // borrowed slice read in time
+    try std.testing.expectEqual(@as(u8, 'h'), rt.state.first);
+    // Two messages, not four: the unhandled key and the release returned null.
+    try std.testing.expectEqual(@as(u32, 2), stats.messages);
 }
