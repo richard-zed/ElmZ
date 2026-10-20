@@ -14,6 +14,7 @@ const runner = @import("runner");
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var canvas = try software.Canvas.init(gpa, 460, 200);
+    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer canvas.deinit();
 
     const theme: elmz.Theme = .{};

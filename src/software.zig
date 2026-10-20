@@ -6,6 +6,38 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const ttf = @import("ttf.zig");
+/// A canvas with the test face already attached.
+fn testCanvas(gpa: Allocator, w: u32, h: u32) !Canvas {
+    var cv = try Canvas.init(gpa, w, h);
+    cv.setFont(@embedFile("font.ttf"));
+    return cv;
+}
+
+const builtin = @import("builtin");
+
+/// Tests measure and draw with real glyph data, but the library must not embed
+/// a face -- so this decl is unreachable outside a test build.
+/// Read a font file, trying `path` as given and then the same name beside the
+/// executable -- so a binary in `zig-out/bin` finds its font without relying on
+/// the working directory. Caller owns the bytes; they must outlive the canvas.
+pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
+    if (std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 * 1024 * 1024))) |b| {
+        return b;
+    } else |_| {}
+    const exe = try std.process.executablePathAlloc(io, gpa);
+    defer gpa.free(exe);
+    const dir = std.fs.path.dirname(exe) orelse return error.FontNotFound;
+    const full = try std.fs.path.join(gpa, &.{ dir, std.fs.path.basename(path) });
+    defer gpa.free(full);
+    return std.Io.Dir.cwd().readFileAlloc(io, full, gpa, .limited(16 * 1024 * 1024));
+}
+
+pub const testing_font = struct {
+    pub fn get() ttf.Font {
+        if (!builtin.is_test) @compileError("testing_font exists only for tests");
+        return ttf.Font.init(@embedFile("font.ttf"));
+    }
+};
 const Allocator = std.mem.Allocator;
 
 /// Falloff width at a pixel, given a light direction.
@@ -211,6 +243,11 @@ pub const Canvas = struct {
     /// and neither is a timing.
     bakes: usize = 0,
 
+    /// The face this canvas measures and draws with. `Font.none` means no
+    /// glyph data: text measures at zero and draws nothing. The caller supplies
+    /// the bytes -- the library ships no typeface.
+    font: ttf.Font = .none,
+
     const Mask = struct {
         /// Shape size this stencil was baked at. `sw == 0` marks a SLICE
         /// TEMPLATE, which stands in for every size at its radius and blur.
@@ -227,6 +264,11 @@ pub const Canvas = struct {
         rh: u32,
         px: []u8 = &.{}, // coverage, one byte per pixel; set by `admit`
     };
+
+    /// Point the canvas at a face. `bytes` must outlive the canvas.
+    pub fn setFont(self: *Self, bytes: []const u8) void {
+        self.font = ttf.Font.init(bytes);
+    }
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
@@ -495,7 +537,7 @@ pub const Canvas = struct {
     }
 
     pub fn drawTextClip(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
-        ttf.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
+        self.font.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
     }
 
     /// The original 5x7 bitmap renderer, kept for tests and as the "no font"
@@ -1156,14 +1198,6 @@ pub const Canvas = struct {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = name, .data = png });
     }
 
-    pub fn measureText(bytes: []const u8, size: f32) elmz.TextMetrics {
-        return ttf.measure(bytes, size);
-    }
-
-    pub fn wrapText(bytes: []const u8, size: f32, max_width: f32, out: [][]const u8) usize {
-        return ttf.wrapLines(bytes, size, max_width, out);
-    }
-
     pub fn measureTextBitmap(bytes: []const u8, size: f32) elmz.TextMetrics {
         const s = scaleFor(size);
         const n: i64 = @intCast(bytes.len);
@@ -1220,8 +1254,8 @@ pub const Canvas = struct {
     }
 
     fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
-        _ = ptr;
-        return measureText(bytes, size);
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.font.measure(bytes, size);
     }
 
     fn vtWrap(
@@ -1231,8 +1265,8 @@ pub const Canvas = struct {
         max_width: f32,
         out: [][]const u8,
     ) usize {
-        _ = ptr;
-        return wrapText(bytes, size, max_width, out);
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.font.wrapLines(bytes, size, max_width, out);
     }
 
     // -- PNG ----------------------------------------------------------------
@@ -1390,7 +1424,7 @@ fn glyph(ch: u8) [7]u5 {
 const testing = std.testing;
 
 test "a quad covers exactly the pixels it names and nothing else" {
-    var c = try Canvas.init(testing.allocator, 20, 20);
+    var c = try testCanvas(testing.allocator, 20, 20);
     defer c.deinit();
 
     c.fillRect(.{ .x = 5, .y = 5, .w = 10, .h = 10 }, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } });
@@ -1469,7 +1503,7 @@ fn decodeStoredPng(gpa: Allocator, png: []const u8) ![]u8 {
 }
 
 test "a quad larger than the canvas is clipped, not corrupting" {
-    var c = try Canvas.init(testing.allocator, 8, 8);
+    var c = try testCanvas(testing.allocator, 8, 8);
     defer c.deinit();
     c.fillRect(.{ .x = -50, .y = -50, .w = 500, .h = 500 }, .{ .solid = .{ .r = 9, .g = 9, .b = 9, .a = 255 } });
     var i: usize = 0;
@@ -1484,7 +1518,7 @@ test "a quad larger than the canvas is clipped, not corrupting" {
 }
 
 test "text is really antialiased and its measure is not a guess" {
-    var c = try Canvas.init(testing.allocator, 200, 40);
+    var c = try testCanvas(testing.allocator, 200, 40);
     defer c.deinit();
     c.drawText(2, 2, 20, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } }, "Hamburgefonstiv");
 
@@ -1496,14 +1530,14 @@ test "text is really antialiased and its measure is not a guess" {
     // rasterisation yields a spread; if this drops to 2, the TTF path is dead.
     try testing.expect(seen.count() > 20);
 
-    const m = Canvas.measureText("Hamburgefonstiv", 20);
+    const m = testing_font.get().measure("Hamburgefonstiv", 20);
     try testing.expect(m.width > 100 and m.width < 200);
     try testing.expect(m.height >= 20);
 }
 
 test "utf-8 is decoded, not measured as bytes" {
-    const one = Canvas.measureText("日", 24);
-    const three = Canvas.measureText("日本語", 24);
+    const one = testing_font.get().measure("日", 24);
+    const three = testing_font.get().measure("日本語", 24);
     try testing.expect(one.width > 8);
     // three copies of one glyph == one glyph measured three times
     try testing.expectApproxEqAbs(one.width * 3, three.width, 0.01);
@@ -1511,8 +1545,8 @@ test "utf-8 is decoded, not measured as bytes" {
     try testing.expect(@abs(three.width - one.width * 9) > 1);
     // accented latin too: 'é' is two bytes, one glyph
     try testing.expectApproxEqAbs(
-        Canvas.measureText("e", 20).width,
-        Canvas.measureText("é", 20).width,
+        testing_font.get().measure("e", 20).width,
+        testing_font.get().measure("é", 20).width,
         0.01,
     );
 }
@@ -1520,13 +1554,13 @@ test "utf-8 is decoded, not measured as bytes" {
 test "wrapping breaks at spaces and loses nothing" {
     var buf: [8][]const u8 = undefined;
     const text = "the quick brown fox jumps";
-    const n = Canvas.wrapText(text, 14, 60, &buf);
+    const n = testing_font.get().wrapLines(text, 14, 60, &buf);
     try testing.expect(n >= 2);
 
     var joined: [64]u8 = undefined;
     var len: usize = 0;
     for (buf[0..n]) |line| {
-        try testing.expect(Canvas.measureText(line, 14).width <= 60.5);
+        try testing.expect(testing_font.get().measure(line, 14).width <= 60.5);
         if (len > 0) {
             joined[len] = ' ';
             len += 1;
@@ -1539,7 +1573,7 @@ test "wrapping breaks at spaces and loses nothing" {
 
 test "a single overlong word makes progress instead of looping" {
     var buf: [4][]const u8 = undefined;
-    const n = Canvas.wrapText("antidisestablishmentarianism", 14, 40, &buf);
+    const n = testing_font.get().wrapLines("antidisestablishmentarianism", 14, 40, &buf);
     try testing.expect(n >= 1 and n <= 4);
 }
 
@@ -1547,14 +1581,14 @@ test "a wider budget produces fewer lines" {
     var a: [16][]const u8 = undefined;
     var b: [16][]const u8 = undefined;
     const text = "alpha beta gamma delta epsilon zeta";
-    const narrow = Canvas.wrapText(text, 12, 50, &a);
-    const wide = Canvas.wrapText(text, 12, 300, &b);
+    const narrow = testing_font.get().wrapLines(text, 12, 50, &a);
+    const wide = testing_font.get().wrapLines(text, 12, 300, &b);
     try testing.expect(narrow > wide);
     try testing.expectEqual(@as(usize, 1), wide);
 }
 
 test "line height accounts for the font's line gap" {
-    const m = Canvas.measureText("Ag", 20);
+    const m = testing_font.get().measure("Ag", 20);
     // DejaVu declares a zero line gap, so spacing == height here. The field
     // exists because that is a property of the font, not a constant.
     try testing.expect(m.line_height >= m.height);
@@ -1572,7 +1606,7 @@ fn chanAt(px: []const u8, w: u32, x: usize, y: usize) u8 {
 
 test "a vertical gradient ramps top to bottom and is constant across each row" {
     const gpa = std.testing.allocator;
-    var c = try Canvas.init(gpa, 40, 100);
+    var c = try testCanvas(gpa, 40, 100);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 255, .b = 0 }); // green: anything unpainted shows up
     c.fillRect(.{ .x = 0, .y = 0, .w = 40, .h = 100 }, elmz.Fill.vgrad(
@@ -1588,7 +1622,7 @@ test "a vertical gradient ramps top to bottom and is constant across each row" {
 
 test "a horizontal gradient varies by column and not by row" {
     const gpa = std.testing.allocator;
-    var c = try Canvas.init(gpa, 100, 10);
+    var c = try testCanvas(gpa, 100, 10);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 255, .b = 0 });
     c.fillRect(.{ .x = 0, .y = 0, .w = 100, .h = 10 }, elmz.Fill.hgrad(
@@ -1603,7 +1637,7 @@ test "a horizontal gradient varies by column and not by row" {
 
 test "a radial fill is brightest at the centre and falls off outward" {
     const gpa = std.testing.allocator;
-    var c = try Canvas.init(gpa, 80, 80);
+    var c = try testCanvas(gpa, 80, 80);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 255, .b = 0 });
     c.fillRect(.{ .x = 0, .y = 0, .w = 80, .h = 80 }, elmz.Fill.radialFill(
@@ -1620,7 +1654,7 @@ test "a gradient BORDER ramps around the outline and leaves the interior alone" 
     const gpa = std.testing.allocator;
     const bg = elmz.Color.rgbHex(0x102030);
     for ([_]f32{ 0, 14 }) |radius| {
-        var c = try Canvas.init(gpa, 60, 60);
+        var c = try testCanvas(gpa, 60, 60);
         defer c.deinit();
         c.clear(bg);
         c.roundRectClip(.{ .x = 10, .y = 10, .w = 40, .h = 40 }, radius, elmz.Fill.vgrad(
@@ -1642,7 +1676,7 @@ test "a gradient BORDER ramps around the outline and leaves the interior alone" 
 
 test "text takes a gradient fill, not just a solid colour" {
     const gpa = std.testing.allocator;
-    var c = try Canvas.init(gpa, 240, 48);
+    var c = try testCanvas(gpa, 240, 48);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 0, .b = 0 });
     c.drawText(2, 2, 30, elmz.Fill.hgrad(
@@ -1710,11 +1744,11 @@ test "text takes a gradient fill, not just a solid colour" {
 
 test "a blit composites by source alpha instead of stamping it" {
     const gpa = std.testing.allocator;
-    var dst = try Canvas.init(gpa, 4, 1);
+    var dst = try testCanvas(gpa, 4, 1);
     defer dst.deinit();
     dst.clear(.{ .r = 255, .g = 255, .b = 255 });
 
-    var src = try Canvas.init(gpa, 4, 1);
+    var src = try testCanvas(gpa, 4, 1);
     defer src.deinit();
     src.clear(.{ .r = 0, .g = 0, .b = 0 });
     // 0: half-alpha black -- must land halfway between white and black
@@ -1755,17 +1789,17 @@ test "a blitted pixel and a painted pixel of the same alpha agree" {
     const half = elmz.Color{ .r = 0, .g = 0, .b = 0, .a = 128 };
 
     // painted: the normal quad path
-    var painted = try Canvas.init(gpa, 1, 1);
+    var painted = try testCanvas(gpa, 1, 1);
     defer painted.deinit();
     painted.clear(.{ .r = 255, .g = 255, .b = 255 });
     painted.blendPixel(0, 0, half);
 
     // blitted: a one-pixel canvas with the same colour composited in
-    var blitted = try Canvas.init(gpa, 1, 1);
+    var blitted = try testCanvas(gpa, 1, 1);
     defer blitted.deinit();
     blitted.clear(.{ .r = 255, .g = 255, .b = 255 });
 
-    var src = try Canvas.init(gpa, 1, 1);
+    var src = try testCanvas(gpa, 1, 1);
     defer src.deinit();
     src.px[0] = half.r;
     src.px[1] = half.g;
@@ -1778,11 +1812,11 @@ test "a blitted pixel and a painted pixel of the same alpha agree" {
 
 test "an opaque blit is still a byte-exact copy" {
     const gpa = std.testing.allocator;
-    var dst = try Canvas.init(gpa, 3, 2);
+    var dst = try testCanvas(gpa, 3, 2);
     defer dst.deinit();
     dst.clear(.{ .r = 7, .g = 8, .b = 9 });
 
-    var src = try Canvas.init(gpa, 3, 2);
+    var src = try testCanvas(gpa, 3, 2);
     defer src.deinit();
     src.clear(.{ .r = 200, .g = 100, .b = 50 });
     // a non-uniform second row, so a row-offset bug cannot pass
@@ -1798,10 +1832,10 @@ test "compositing onto a transparent canvas keeps the colour, not black" {
     const gpa = std.testing.allocator;
     // init() memsets to zero, so this destination starts at alpha 0 -- the case
     // a blend that forgets to normalise by the OUTPUT alpha turns into black.
-    var dst = try Canvas.init(gpa, 1, 1);
+    var dst = try testCanvas(gpa, 1, 1);
     defer dst.deinit();
 
-    var src = try Canvas.init(gpa, 1, 1);
+    var src = try testCanvas(gpa, 1, 1);
     defer src.deinit();
     src.px[0] = 0;
     src.px[1] = 200;
@@ -1816,11 +1850,11 @@ test "compositing onto a transparent canvas keeps the colour, not black" {
 
 test "a blit clipped by the destination edge drops the rest" {
     const gpa = std.testing.allocator;
-    var dst = try Canvas.init(gpa, 2, 2);
+    var dst = try testCanvas(gpa, 2, 2);
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 0, .b = 0 });
 
-    var src = try Canvas.init(gpa, 4, 4);
+    var src = try testCanvas(gpa, 4, 4);
     defer src.deinit();
     src.clear(.{ .r = 255, .g = 0, .b = 0 });
 
@@ -1835,7 +1869,7 @@ test "a blit clipped by the destination edge drops the rest" {
 }
 
 test "the default bakes, and an explicit .sdf never touches the cache" {
-    var c = try Canvas.init(std.testing.allocator, 200, 160);
+    var c = try testCanvas(std.testing.allocator, 200, 160);
     defer c.deinit();
 
     const rect = elmz.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
@@ -1874,9 +1908,9 @@ test "the default bakes, and an explicit .sdf never touches the cache" {
 }
 
 test "the baked stencil and the distance field agree" {
-    var a = try Canvas.init(std.testing.allocator, 200, 160);
+    var a = try testCanvas(std.testing.allocator, 200, 160);
     defer a.deinit();
-    var b = try Canvas.init(std.testing.allocator, 200, 160);
+    var b = try testCanvas(std.testing.allocator, 200, 160);
     defer b.deinit();
     a.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
     b.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
@@ -1906,7 +1940,7 @@ test "the baked stencil and the distance field agree" {
     try std.testing.expect(worst <= 2);
 }
 test "nine slices: differently sized silhouettes share a single stencil" {
-    var c = try Canvas.init(std.testing.allocator, 700, 320);
+    var c = try testCanvas(std.testing.allocator, 700, 320);
     defer c.deinit();
     c.clear(elmz.Color{ .r = 18, .g = 18, .b = 22, .a = 255 });
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 700, .h = 320 };
@@ -1935,9 +1969,9 @@ test "nine slices: differently sized silhouettes share a single stencil" {
 }
 
 test "a stretched stencil still agrees with the distance field when large" {
-    var a = try Canvas.init(std.testing.allocator, 520, 300);
+    var a = try testCanvas(std.testing.allocator, 520, 300);
     defer a.deinit();
-    var b = try Canvas.init(std.testing.allocator, 520, 300);
+    var b = try testCanvas(std.testing.allocator, 520, 300);
     defer b.deinit();
     a.clear(elmz.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
     b.clear(elmz.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
@@ -2006,7 +2040,7 @@ test "the stencil and the distance field put the ramp in the same place" {
         fn edges(w: f32, h: f32, spread: f32, q: elmz.Halo.Quality) ![4]f32 {
             const clip = elmz.Rect{ .x = 0, .y = 0, .w = 260, .h = 200 };
             const rect = elmz.Rect{ .x = 40, .y = 40, .w = w, .h = h };
-            var c = try Canvas.init(gpa, 260, 200);
+            var c = try testCanvas(gpa, 260, 200);
             defer c.deinit();
             const r = c.renderer();
             r.quad(clip, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
@@ -2059,7 +2093,7 @@ test "a wide inner glow keeps the corners it is attached to" {
     // blend changes is further in, where the falloff is decaying -- the outline
     // is no longer legible there and the pool rounds off.
     inline for (.{ 30, 14 }) |blur| {
-        var c = try Canvas.init(gpa, 200, 160);
+        var c = try testCanvas(gpa, 200, 160);
         defer c.deinit();
         const r = c.renderer();
         r.quad(clip, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
@@ -2087,7 +2121,7 @@ test "an outer rim is feathered where it meets the element" {
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
     const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
 
-    var c = try Canvas.init(gpa, 200, 160);
+    var c = try testCanvas(gpa, 200, 160);
     defer c.deinit();
     const r = c.renderer();
     r.quad(rect, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
@@ -2115,7 +2149,7 @@ test "an inner glow drops fast off the edge and then converges" {
     const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
 
     inline for (.{ .sdf, .baked }) |q| {
-        var c = try Canvas.init(gpa, 200, 160);
+        var c = try testCanvas(gpa, 200, 160);
         defer c.deinit();
         const r = c.renderer();
         r.quad(clip, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
@@ -2152,7 +2186,7 @@ test "a cast shadow fills the strip under its element and never tints the face" 
     // as bare backdrop, so the shadow reads as a detached smear a few pixels below
     // the card rather than as the card's shadow.
     const gpa = std.testing.allocator;
-    var c = try Canvas.init(gpa, 220, 180);
+    var c = try testCanvas(gpa, 220, 180);
     defer c.deinit();
     const r = c.renderer();
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 180 };
@@ -2192,7 +2226,7 @@ test "a cast shadow fills the strip under its element and never tints the face" 
 
 test "a frost blurs what is behind it and leaves everything else alone" {
     const gpa = std.testing.allocator;
-    var c = try Canvas.init(gpa, 200, 140);
+    var c = try testCanvas(gpa, 200, 140);
     defer c.deinit();
     const r = c.renderer();
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 140 };
@@ -2236,7 +2270,7 @@ test "a light source throws the ramp further on the away side" {
 
     const Case = struct {
         fn bands(light: ?f32, above: *usize, below: *usize) !void {
-            var c = try Canvas.init(gpa, 220, 180);
+            var c = try testCanvas(gpa, 220, 180);
             defer c.deinit();
             const r = c.renderer();
             const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 180 };
@@ -2292,7 +2326,7 @@ test "a frame painted with opaque colours exports an opaque alpha channel" {
     // nothing at all.
     const gpa = std.testing.allocator;
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 32, .h = 24 };
-    var c = try Canvas.init(gpa, 32, 24);
+    var c = try testCanvas(gpa, 32, 24);
     defer c.deinit();
     const r = c.renderer();
 
@@ -2319,7 +2353,7 @@ test "a frame painted with opaque colours exports an opaque alpha channel" {
 // canvas half; this one catches the FILE half, which is where it was seen: a
 // rendered PNG that opened as a black rectangle.
 test "a painted frame exports opaque pixels through the PNG encoder" {
-    var c = try Canvas.init(testing.allocator, 12, 6);
+    var c = try testCanvas(testing.allocator, 12, 6);
     defer c.deinit();
     const base = elmz.Color{ .r = 30, .g = 40, .b = 50, .a = 255 };
     const over = elmz.Color{ .r = 200, .g = 120, .b = 60, .a = 255 };

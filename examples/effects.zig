@@ -19,6 +19,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     var c = try software.Canvas.init(gpa, W, H);
+
+    c.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer c.deinit();
     const r = c.renderer();
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = W, .h = H };

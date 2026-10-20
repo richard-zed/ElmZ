@@ -14,6 +14,7 @@ const software = @import("software");
 const runner = @import("runner");
 
 pub const app = .{
+    .font_path = "src/font.ttf",
     .title = "elmz - fills",
     .size = .{ .w = 560, .h = 400 },
     .Model = Model,
@@ -87,6 +88,8 @@ pub fn main(init: std.process.Init) !void {
     const out = &w.interface;
 
     var canvas = try software.Canvas.init(gpa, W, H);
+
+    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);

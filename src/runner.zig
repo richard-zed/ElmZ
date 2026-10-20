@@ -391,6 +391,16 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     const M = app.Msg;
 
     var canvas = try software.Canvas.init(gpa, @intCast(app.size.w), @intCast(app.size.h));
+    var font_bytes: ?[]u8 = null;
+    defer if (font_bytes) |b| gpa.free(b);
+    if (@hasField(@TypeOf(app), "font_path")) {
+        if (io) |i| {
+            if (software.loadFont(gpa, i, app.font_path)) |b| {
+                font_bytes = b;
+                canvas.setFont(b);
+            } else |_| {}
+        }
+    }
     defer canvas.deinit();
 
     var rt = if (@hasField(@TypeOf(app), "state"))
@@ -779,9 +789,15 @@ const Fake = struct {
     fn noop(_: *anyopaque) void {}
 };
 
+fn testCanvas(gpa: std.mem.Allocator, w: u32, h: u32) !software.Canvas {
+    var cv = try software.Canvas.init(gpa, w, h);
+    cv.setFont(@embedFile("../src/font.ttf"));
+    return cv;
+}
+
 test "runner paints once, then stops when the window says quit" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
@@ -800,7 +816,7 @@ test "runner paints once, then stops when the window says quit" {
 
 test "layout measures with the glyph metrics of the drawing backend" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
@@ -815,7 +831,7 @@ test "layout measures with the glyph metrics of the drawing backend" {
     // A button is label + 24px of padding, so this holds only if the *bitmap*
     // metrics reached layout: 3 chars at size 16 = 34px wide, not the nominal
     // 0.58em estimate of 27.84.
-    const label = software.Canvas.measureText("inc", 16);
+    const label = software.testing_font.get().measure("inc", 16);
     try std.testing.expectApproxEqAbs(label.width + 24, rect.w, 0.01);
     try std.testing.expect(@abs(rect.w - (3 * 0.58 * 16 + 24)) > 1.0);
 
@@ -835,7 +851,7 @@ test "layout measures with the glyph metrics of the drawing backend" {
 
 test "a frame survives the next one being built" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
@@ -863,7 +879,7 @@ test "a frame survives the next one being built" {
 
 test "runner hit-tests a click and routes it to update" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
@@ -1014,7 +1030,7 @@ fn sView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "no frame escapes the canvas: finite, non-negative, in bounds" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 240, 200);
+    var canvas = try testCanvas(gpa, 240, 200);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{ .n = 7 }, tUpdate, sView);
@@ -1028,7 +1044,7 @@ test "no frame escapes the canvas: finite, non-negative, in bounds" {
     // Smaller than the content: layout overflows on purpose (there is no clip
     // rect yet), so the guarantee is only that it stays finite and that
     // painting it is safe. Tighten this to checkFrame once clipping lands.
-    var small = try software.Canvas.init(gpa, 90, 70);
+    var small = try testCanvas(gpa, 90, 70);
     defer small.deinit();
     var g = try rt.frame(.{ .w = 90, .h = 70 }, small.renderer());
     defer g.deinit();
@@ -1076,7 +1092,7 @@ fn cView(s: *CState, ui: *elmz.Ui(CMsg)) *elmz.Element(CMsg) {
 
 test "run() drains a command's result while polling, with no further events" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var job: AJob = .{ .n = 21, .main_id = std.Thread.getCurrentId() };
@@ -1117,7 +1133,7 @@ fn pairView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 // dispatch the neighbour.
 test "a press on one button released over another dispatches nothing" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, pairView);
@@ -1147,7 +1163,7 @@ test "a press on one button released over another dispatches nothing" {
 
 test "only the region that owns the press stays lit" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, pairView);
@@ -1200,7 +1216,7 @@ fn cardView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "hover lights the innermost region, not the container behind it" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, cardView);
@@ -1229,7 +1245,7 @@ test "hover lights the innermost region, not the container behind it" {
 
 test "pressing the button does not press its container" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, cardView);
@@ -1252,7 +1268,7 @@ test "pressing the button does not press its container" {
 
 test "a cancelled press fires nothing and leaves nothing lit" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, cardView);
@@ -1306,7 +1322,7 @@ fn expectPixel(canvas: *software.Canvas, p: [2]f32, want: elmz.Color) !void {
 
 test "a release with no press before it dispatches nothing" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
@@ -1328,7 +1344,7 @@ test "a release with no press before it dispatches nothing" {
 
 test "the same event script produces the same frames and the same pixels" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     const point: [2]f32 = .{ 100, 60 };
@@ -1371,7 +1387,7 @@ fn pView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "a paragraph wraps to its width and paints one prim per line" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 300, 300);
+    var canvas = try testCanvas(gpa, 300, 300);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, pView);
@@ -1394,7 +1410,7 @@ test "a paragraph wraps to its width and paints one prim per line" {
     try std.testing.expect(n >= 2); // it really broke into lines
 
     // consecutive lines are exactly one line-height apart
-    const m = software.Canvas.measureText(
+    const m = software.testing_font.get().measure(
         "the quick brown fox jumps over the lazy dog and keeps going",
         12,
     );
@@ -1424,7 +1440,7 @@ fn clipView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "a clipping container confines every primitive to its own box" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, clipView);
@@ -1488,7 +1504,7 @@ fn clipHitView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "a press outside a clipping container is not a hit" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, clipHitView);
@@ -1531,7 +1547,7 @@ test "clipping that does not bind changes nothing on screen" {
     var counts: [2]usize = undefined;
 
     for (views, 0..) |view, i| {
-        var canvas = try software.Canvas.init(gpa, 200, 120);
+        var canvas = try testCanvas(gpa, 200, 120);
         defer canvas.deinit();
         var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, view);
         defer rt.deinit();
@@ -1573,7 +1589,7 @@ test "a paragraph takes the width layout gives it, and never exceeds it" {
     var lines: [2]usize = undefined;
 
     for (views, 0..) |view, i| {
-        var canvas = try software.Canvas.init(gpa, 500, 300);
+        var canvas = try testCanvas(gpa, 500, 300);
         defer canvas.deinit();
         var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, view);
         defer rt.deinit();
@@ -1586,7 +1602,7 @@ test "a paragraph takes the width layout gives it, and never exceeds it" {
         for (f.prims) |p| switch (p) {
             .text => |t| {
                 n += 1;
-                const m = software.Canvas.measureText(t.bytes, t.size);
+                const m = software.testing_font.get().measure(t.bytes, t.size);
                 try std.testing.expect(m.width <= limit + 0.01);
             },
             else => {},
@@ -1620,7 +1636,7 @@ fn oneBarView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "a button paints exactly one fill and one label" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, oneButtonView);
@@ -1646,7 +1662,7 @@ test "a button paints exactly one fill and one label" {
 
 test "a bar paints a track and a value fill, and nothing twice" {
     const gpa = std.testing.allocator;
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, oneBarView);
@@ -1689,7 +1705,7 @@ fn bgAndBorderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 }
 
 fn primsOf(gpa: std.mem.Allocator, view: anytype, out: []elmz.Primitive) ![]const elmz.Primitive {
-    var canvas = try software.Canvas.init(gpa, 120, 80);
+    var canvas = try testCanvas(gpa, 120, 80);
     defer canvas.deinit();
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, view);
     defer rt.deinit();
@@ -1973,7 +1989,7 @@ test "the frame ring averages painted frames and drops the oldest" {
 }
 
 test "the overlay paints inside its panel and nowhere else" {
-    var c = try software.Canvas.init(std.testing.allocator, 260, 120);
+    var c = try testCanvas(std.testing.allocator, 260, 120);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
     drawOverlay(&c, .{
@@ -2043,7 +2059,7 @@ test "keystrokes and typed text reach the app's hooks, and null does not repaint
         }
     };
 
-    var canvas = try software.Canvas.init(gpa, 200, 120);
+    var canvas = try testCanvas(gpa, 200, 120);
     defer canvas.deinit();
     var rt = elmz.Runtime(KState, KMsg).init(gpa, .{}, Hooks.update, Hooks.view);
     defer rt.deinit();

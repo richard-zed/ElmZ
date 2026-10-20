@@ -14,6 +14,7 @@ const software = @import("software");
 const runner = @import("runner");
 
 pub const app = .{
+    .font_path = "src/font.ttf",
     .title = "elmz gallery",
     // Opts into the runner's theme watch: drop a theme.zon next to the
     // binary and the palette reloads on save.
@@ -167,6 +168,8 @@ pub fn main(init: std.process.Init) !void {
     const out = &out_buf.interface;
 
     var canvas = try software.Canvas.init(gpa, W, H);
+
+    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer canvas.deinit();
 
     const shots = [_]Model{
@@ -178,6 +181,7 @@ pub fn main(init: std.process.Init) !void {
 
     const gap: u32 = 12;
     var sheet = try software.Canvas.init(gpa, (W + gap) * shots.len + gap, H + 2 * gap);
+    sheet.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer sheet.deinit();
     sheet.clear(elmz.Color.rgbHex(0x0b0d12));
 

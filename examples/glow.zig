@@ -47,6 +47,7 @@ const H = 484;
 /// other example: title, size, state, and optionally the keys a `theme.zon` may
 /// set that the library knows nothing about.
 pub const app = .{
+    .font_path = "src/font.ttf",
     .title = "elmz - glow, shadow, and the three cuts",
     .theme_path = "theme.zon",
     .theme_tokens = Tokens,
@@ -234,6 +235,8 @@ pub fn main(init: std.process.Init) !void {
     const out = &w.interface;
 
     var canvas = try software.Canvas.init(gpa, W, H);
+
+    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);

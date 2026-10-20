@@ -17,6 +17,7 @@ fn update(_: *Model, _: Msg) elmz.Action(Msg) {
 /// below builds its own Runtime from the same three functions, so the picture
 /// and the window cannot drift: one `view`, two ways to drive it.
 pub const app = .{
+    .font_path = "src/font.ttf",
     .title = "elmz - corner radii",
     .size = .{ .w = 420, .h = 320 },
     .Model = Model,
@@ -72,6 +73,8 @@ pub fn main(init: std.process.Init) !void {
     const out = &w.interface;
 
     var canvas = try software.Canvas.init(gpa, 380, 330);
+
+    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
