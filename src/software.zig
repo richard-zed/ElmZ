@@ -1255,6 +1255,61 @@ test "a quad covers exactly the pixels it names and nothing else" {
     try testing.expectEqual(@as(u8, 0), at(c.px, 15, 14));
 }
 
+/// Decode a PNG this library wrote -- signature, chunks, IDAT, stored deflate
+/// blocks -- and hand back the raw RGBA rows with the filter bytes stripped.
+///
+/// Deliberately not a general PNG decoder: it asserts the profile we EMIT, so a
+/// change to the encoder has to come through here. The stored-block header is
+/// checked against its own complement, which is the one part of the zlib stream
+/// a writer can get wrong without the bytes changing.
+fn decodeStoredPng(gpa: Allocator, png: []const u8) ![]u8 {
+    var w: u32 = 0;
+    var h: u32 = 0;
+    var idat: std.ArrayList(u8) = .empty;
+    defer idat.deinit(gpa);
+
+    var i: usize = 8; // signature
+    while (i + 12 <= png.len) {
+        const len = std.mem.readInt(u32, png[i..][0..4], .big);
+        const tag = png[i + 4 ..][0..4];
+        const data = png[i + 8 ..][0..len];
+        if (std.mem.eql(u8, tag, "IHDR")) {
+            w = std.mem.readInt(u32, data[0..4], .big);
+            h = std.mem.readInt(u32, data[4..8], .big);
+        } else if (std.mem.eql(u8, tag, "IDAT")) {
+            try idat.appendSlice(gpa, data);
+        }
+        i += 12 + len;
+    }
+    if (w == 0 or h == 0) return error.MissingHeader;
+
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(gpa);
+    var z: usize = 2; // zlib header
+    while (true) {
+        if (z + 5 > idat.items.len) return error.TruncatedDeflate;
+        const final = (idat.items[z] & 1) == 1;
+        const n = std.mem.readInt(u16, idat.items[z + 1 ..][0..2], .little);
+        const inv = std.mem.readInt(u16, idat.items[z + 3 ..][0..2], .little);
+        if (inv != ~n) return error.BadDeflateLength;
+        try raw.appendSlice(gpa, idat.items[z + 5 ..][0..n]);
+        z += 5 + n;
+        if (final) break;
+    }
+
+    const cols: usize = w;
+    const rows: usize = h;
+    const px = try gpa.alloc(u8, cols * rows * 4);
+    errdefer gpa.free(px);
+    var y: usize = 0;
+    while (y < rows) : (y += 1) {
+        const row = raw.items[y * (1 + cols * 4) ..][0..(1 + cols * 4)];
+        if (row[0] != 0) return error.UnsupportedFilter; // we always write 0
+        @memcpy(px[y * cols * 4 ..][0..(cols * 4)], row[1..]);
+    }
+    return px;
+}
+
 test "a quad larger than the canvas is clipped, not corrupting" {
     var c = try Canvas.init(testing.allocator, 8, 8);
     defer c.deinit();
@@ -1932,4 +1987,39 @@ test "a frame painted with opaque colours exports an opaque alpha channel" {
     // onto alpha 255 stays 255.
     r.quad(clip, .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 128 } }, clip);
     try std.testing.expectEqual(@as(u8, 255), c.px[(5 * 32 + 5) * 4 + 3]);
+}
+
+// The blind spot, stated as a test. An opaque frame used to export with alpha 0
+// on every pixel -- correct RGB, invisible in every viewer -- because the fast
+// paths wrote r, g, b and skipped alpha. The rasteriser test above caught the
+// canvas half; this one catches the FILE half, which is where it was seen: a
+// rendered PNG that opened as a black rectangle.
+test "a painted frame exports opaque pixels through the PNG encoder" {
+    var c = try Canvas.init(testing.allocator, 12, 6);
+    defer c.deinit();
+    const base = elmz.Color{ .r = 30, .g = 40, .b = 50, .a = 255 };
+    const over = elmz.Color{ .r = 200, .g = 120, .b = 60, .a = 255 };
+    c.fillRect(.{ .x = 0, .y = 0, .w = 12, .h = 6 }, .{ .solid = base });
+    // A second opaque quad through the blending path, so both routes are covered.
+    c.fillRect(.{ .x = 4, .y = 2, .w = 4, .h = 2 }, .{ .solid = over });
+
+    const png = try c.encodePng(testing.allocator);
+    defer testing.allocator.free(png);
+    const px = try decodeStoredPng(testing.allocator, png);
+    defer testing.allocator.free(px);
+
+    try testing.expectEqual(@as(usize, 12 * 6 * 4), px.len);
+    var i: usize = 0;
+    while (i < px.len) : (i += 4) {
+        try testing.expectEqual(@as(u8, 255), px[i + 3]);
+    }
+    // And the bytes are the ones painted, not a uniform fill.
+    const at = struct {
+        fn at(b: []const u8, x: usize, y: usize) [4]u8 {
+            const o = (y * 12 + x) * 4;
+            return .{ b[o], b[o + 1], b[o + 2], b[o + 3] };
+        }
+    };
+    try testing.expectEqual([4]u8{ 200, 120, 60, 255 }, at.at(px, 5, 3));
+    try testing.expectEqual([4]u8{ 30, 40, 50, 255 }, at.at(px, 0, 0));
 }

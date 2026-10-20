@@ -714,6 +714,14 @@ const Fake = struct {
         // worker's result gets drained. Then quit, so tests terminate.
         if (self.spun < self.idle) {
             self.spun += 1;
+            // Yield, or this test measures the machine instead of the code. The
+            // loop has to still be polling when the job thread posts its result,
+            // and 20k tight iterations finish in well under a millisecond -- so
+            // under load the spin can run out first. That is exactly how it
+            // failed once, while a build was saturating the CPU. A yield per
+            // idle poll gives the scheduler the turn the tight loop never gave
+            // it, at no cost to what the test asserts.
+            std.Thread.yield() catch {};
             return null;
         }
         return .quit;

@@ -258,6 +258,21 @@ pub const Rect = struct {
             p[1] >= self.y and p[1] <= self.y + self.h;
     }
 
+    /// Inside the rect AND inside its rounded corners. `radius` is clamped the
+    /// way the rasteriser clamps it, so the claimable area and the painted area
+    /// agree by construction: a corner the fill does not cover is a corner the
+    /// pointer cannot claim.
+    pub fn containsRounded(self: Rect, radius: f32, p: [2]f32) bool {
+        if (!self.contains(p)) return false;
+        const r = @min(radius, @min(self.w, self.h) * 0.5);
+        if (!(r > 0)) return true;
+        const cx = std.math.clamp(p[0], self.x + r, self.x + self.w - r);
+        const cy = std.math.clamp(p[1], self.y + r, self.y + self.h - r);
+        const dx = p[0] - cx;
+        const dy = p[1] - cy;
+        return dx * dx + dy * dy <= r * r;
+    }
+
     /// Overlap of two rects. Empty when they miss entirely, which is the only
     /// thing clipping needs to know: an empty clip draws nothing.
     pub fn intersect(self: Rect, o: Rect) Rect {
@@ -295,6 +310,9 @@ pub const Region = struct {
     /// can follow a keyed element through a reorder. Comparison stays
     /// geometry-only (`eql`), which is what hover resolution relies on.
     key: ?u64 = null,
+    /// The element's corner radius, carried so hover resolution and hit testing
+    /// ask the same question the fill answered: does this shape cover the point?
+    radius: f32 = 0,
     /// false = present but inert: it still occludes what is behind it, and it
     /// never becomes a hover or press candidate. A disabled control that
     /// simply vanished from the list would let clicks through to whatever it
@@ -306,7 +324,7 @@ pub const Region = struct {
     }
 
     pub fn holds(self: Region, p: [2]f32) bool {
-        return self.rect.contains(p) and self.clip.contains(p);
+        return self.rect.containsRounded(self.radius, p) and self.clip.contains(p);
     }
 };
 
@@ -661,6 +679,9 @@ pub fn Hit(comptime M: type) type {
         /// mirrors the element's `disabled`: recorded so a press can be
         /// cancelled when the element it claimed turns inert mid-gesture.
         active: bool = true,
+        /// Corner radius, so a rounded control is only claimed where it is
+        /// actually painted -- its bounding box is not its shape.
+        radius: f32 = 0,
     };
 }
 
@@ -676,13 +697,16 @@ fn hitAppend(
     msg: M,
     key: ?u64,
     active: bool,
+    radius: f32,
 ) Allocator.Error!void {
     if (rect.intersect(clip).isEmpty()) return;
-    // A disabled element is not pressable, so it never enters the hit list:
-    // suppression happens at registration, not at dispatch, which keeps
-    // `Frame.hit` a plain contains loop and means `press.down` cannot claim
-    // something that refuses input.
-    try hits.append(gpa, .{ .rect = rect, .clip = clip, .msg = msg, .key = key, .active = active });
+    // A disabled element DOES enter the list, inert (`active = false`). Dropping
+    // it would let a click fall through to whatever it covers, which is the one
+    // thing a disabled control must never do: occlusion without claiming.
+    // `Frame.hit` therefore stays a plain contains loop, and the topmost
+    // containing region decides -- returning null when that region is inert
+    // rather than continuing down the stack.
+    try hits.append(gpa, .{ .rect = rect, .clip = clip, .msg = msg, .key = key, .active = active, .radius = radius });
 }
 
 /// Appearance for one element, as a single value.
@@ -992,7 +1016,7 @@ pub fn Element(comptime M: type) type {
                 }
             }
             if (self.hover_bg != null) {
-                if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = self.key, .active = !self.disabled });
+                if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = self.key, .active = !self.disabled, .radius = self.radius });
             }
             // A button or bar always fills, even with no `bg` set, so the
             // kind default belongs here rather than in the kind's paint arm.
@@ -1019,7 +1043,7 @@ pub fn Element(comptime M: type) type {
                 if (self.disabled) break :blk false;
                 if (ptr.held) |held| break :blk held.eql(rect, clip) or (self.key != null and held.key == self.key);
                 if (hov.target) |target| break :blk target.eql(rect, clip);
-                if (ptr.pos) |p| break :blk rect.contains(p) and clip.contains(p);
+                if (ptr.pos) |p| break :blk rect.containsRounded(self.radius, p) and clip.contains(p);
                 break :blk false;
             };
             const halo_now: ?Halo = if (hovered) self.hover_halo orelse self.halo else self.halo;
@@ -1052,7 +1076,7 @@ pub fn Element(comptime M: type) type {
             // half and `.inner_glow` cuts the outer one, so the same order is
             // correct for all three and no mode needs a rule of its own.
             if (halo_now) |h| r.halo(rect, self.radius, h, clip);
-            if (self.on_press) |m| try hitAppend(M, hits, gpa, rect, clip, m, self.key, !self.disabled);
+            if (self.on_press) |m| try hitAppend(M, hits, gpa, rect, clip, m, self.key, !self.disabled, self.radius);
 
             switch (self.kind) {
                 .text => |t| {
@@ -1510,7 +1534,7 @@ pub fn Frame(comptime M: type) type {
             while (i > 0) {
                 i -= 1;
                 const h = self.hits[i];
-                if (h.rect.contains(p) and h.clip.contains(p)) return if (h.active) h else null;
+                if (h.rect.containsRounded(h.radius, p) and h.clip.contains(p)) return if (h.active) h else null;
             }
             return null;
         }
@@ -1556,7 +1580,7 @@ pub fn Press(comptime M: type) type {
         pub fn up(self: *Self, p: [2]f32) ?M {
             const h = self.captured orelse return null;
             self.captured = null;
-            if (!h.rect.contains(p) or !h.clip.contains(p)) return null;
+            if (!h.rect.containsRounded(h.radius, p) or !h.clip.contains(p)) return null;
             return h.msg;
         }
 
@@ -2965,4 +2989,71 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
             try std.testing.expect(std.meta.eql(@field(m, f.name), @field(full, f.name).?));
         }
     }
+}
+
+// A rounded control's bounding box is not its shape. Hit testing used to claim
+// the full rect, so a press on the empty corner of a rounded card lit it -- and
+// with overlap it would have claimed a click meant for whatever is behind.
+const RoundState = struct { presses: u32 = 0 };
+const RoundMsg = enum { press };
+fn roundUpdate(st: *RoundState, m: RoundMsg) Action(RoundMsg) {
+    if (m == .press) st.presses += 1;
+    return .{};
+}
+fn roundView(_: *RoundState, ui: *Ui(RoundMsg)) *Element(RoundMsg) {
+    return ui.button(.{
+        .label = "rounded",
+        .msg = .press,
+        .width = 120,
+        .height = 60,
+        .key = 1,
+        .style = .{ .radius = 30 },
+    });
+}
+
+test "a rounded control is not claimed by its empty corner" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(RoundState, RoundMsg).init(gpa, .{}, roundUpdate, roundView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+    try std.testing.expectEqual(@as(usize, 1), f.hits.len);
+    const r = f.hits[0].rect;
+    // The radius the rasteriser would clamp to, so the test states the shape it
+    // is asserting against: half the short side.
+    try std.testing.expectEqual(@as(f32, 30), f.hits[0].radius);
+
+    const centre: [2]f32 = .{ r.x + r.w / 2, r.y + r.h / 2 };
+    try std.testing.expectEqual(RoundMsg.press, f.hitTest(centre).?);
+
+    // 1px in from the corner: inside the rect, outside the quarter circle.
+    const corner: [2]f32 = .{ r.x + 1, r.y + 1 };
+    try std.testing.expect(r.contains(corner));
+    try std.testing.expectEqual(@as(?RoundMsg, null), f.hitTest(corner));
+
+    // A press there claims nothing, so it can never produce a message on release.
+    rt.press.down(&f, corner);
+    try std.testing.expect(!rt.press.waiting());
+    try std.testing.expectEqual(@as(?RoundMsg, null), rt.press.up(corner));
+
+    // The centre still works, so the test is not passing by refusing everything.
+    rt.press.down(&f, centre);
+    try std.testing.expectEqual(RoundMsg.press, rt.press.up(centre).?);
+}
+
+test "a square control still claims its full rect" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(RoundState, RoundMsg).init(gpa, .{}, roundUpdate, sqView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+    const r = f.hits[0].rect;
+    try std.testing.expectEqual(@as(f32, 0), f.hits[0].radius);
+    try std.testing.expectEqual(RoundMsg.press, f.hitTest(.{ r.x + 1, r.y + 1 }).?);
+}
+
+fn sqView(_: *RoundState, ui: *Ui(RoundMsg)) *Element(RoundMsg) {
+    return ui.button(.{ .label = "square", .msg = .press, .width = 120, .height = 60, .key = 1 });
 }
