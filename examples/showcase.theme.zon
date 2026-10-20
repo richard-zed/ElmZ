@@ -8,18 +8,34 @@
 //
 // Every role is optional -- an omitted one inherits the library default, so
 // this file could list only `.accent` and still be legal.
+//
+// `version` must be 2. A v1 file (flat `.theme`, no `.colors`) is refused with
+// one sentence rather than half-read, because the half-read version looks like
+// "my theme did nothing".
 .{
-    .version = 1,
+    .version = 2,
     .theme = .{
-        .bg = 0x1f1a14,
-        .panel = 0x2b241b,
-        .border = 0x8a7a63,
-        .text = 0xf2e6d8,
-        .text_muted = 0xb9a892,
-        .control = 0x3a3126,
-        .hover = 0x5c4f3d,
-        .pressed = 0x6f6049,
-        .selected = 0x473b2c,
-        .accent = 0xe0b060,
+        .colors = .{
+            .bg = 0x1f1a14,
+            .panel = 0x2b241b,
+            .border = 0x8a7a63,
+            .text = 0xf2e6d8,
+            .text_muted = 0xb9a892,
+            .control = 0x3a3126,
+            .hover = 0x5c4f3d,
+            .pressed = 0x6f6049,
+            .selected = 0x473b2c,
+            .accent = 0xe0b060,
+        },
+
+        // Gradients are per role and optional. Uncomment to see what the
+        // renderer can do that a flat token cannot -- every place this role is
+        // used as a FILL picks it up, and the flat `.colors` entry above stays
+        // as the fallback and for text/borders.
+        //
+        // .gradients = .{
+        //     .accent = .{ .linear = .{ .dir = .diagonal, .from = 0xe0b060, .to = 0x8a5a2b } },
+        //     .panel = .{ .radial = .{ .inner = 0x3a3126, .outer = 0x1f1a14, .radius = 0.7 } },
+        // },
     },
 }

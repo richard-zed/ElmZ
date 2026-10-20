@@ -124,6 +124,7 @@ pub const ThemeWatch = struct {
 
         const chain = resolveChain(gpa, io, self.floor, self.base_path, self.user_path);
         ui.theme = chain.theme;
+        ui.gradients = chain.gradients;
         if (chain.message()) |m| ui.failExternal(.theme, "{s}", .{m}) else ui.clearExternal();
     }
 };
@@ -131,6 +132,8 @@ pub const ThemeWatch = struct {
 /// A fully resolved chain: every file read, every overlay applied.
 pub const Chain = struct {
     theme: elmz.Theme,
+    /// Gradient overrides that came with that palette.
+    gradients: elmz.Gradients = .{},
     /// A `theme.defaults.zon` supplied the base rather than the compiled floor.
     base_from_file: bool = false,
     /// The defaults file was there and would not load; `diag` says why.
@@ -183,6 +186,7 @@ pub fn resolveChain(
             defer gpa.free(src);
             if (elmz.loadTheme(struct {}, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
+                out.gradients = loaded.gradients;
                 out.base_from_file = true;
             } else |_| out.base_rejected = true;
         } else |e| switch (e) {
@@ -201,6 +205,7 @@ pub fn resolveChain(
             defer gpa.free(src);
             if (elmz.loadTheme(struct {}, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
+                out.gradients = loaded.gradients;
                 out.user_from_file = true;
             } else |_| out.user_rejected = true;
         } else |e| switch (e) {
@@ -1533,11 +1538,11 @@ test "the chain layers the override over the developer's base" {
 
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 1, .theme = .{ .bg = 0x102030, .panel = 0x203040 } }",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x102030, .panel = 0x203040 } } }",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 1, .theme = .{ .accent = 0xabcdef } }",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
     });
 
     var bb: [128]u8 = undefined;
@@ -1621,11 +1626,11 @@ test "editing the base re-applies the override on top of it" {
 
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 1, .theme = .{ .bg = 0x102030 } }",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x102030 } } }",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 1, .theme = .{ .accent = 0xabcdef } }",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
     });
 
     var bb: [128]u8 = undefined;
@@ -1646,7 +1651,7 @@ test "editing the base re-applies the override on top of it" {
     // a palette that no longer exists.
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 1, .theme = .{ .bg = 0x405060, .panel = 0x203040 } }",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x405060, .panel = 0x203040 } } }",
     });
 
     watch.poll(&ui, io, gpa);

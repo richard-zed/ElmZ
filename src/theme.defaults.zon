@@ -4,40 +4,58 @@
 // what an app's own theme.zon starts from. Copy it, delete what you do not
 // want to change, and the rest inherits.
 //
-// Colours are 0xRRGGBB. A .zon is literal data -- no expressions, no calls --
-// so a token can never be spelled here. Values may only be derived in a
-// resolve step, at load time.
+// This file is DATA. A .zon cannot contain an expression, a call or an import
+// -- the parser rejects all three -- so a theme can never compute a colour or
+// reach outside itself. Everything here is a literal.
 //
-// Roles are not widgets. `panel` is "the fill of a raised area", not "a card",
-// which is what lets one token serve panels, rows and list items.
+// Colours are 0xRRGGBB. Roles are not widgets: `panel` means "the fill of a
+// raised area", not "a card", which is what lets one token serve panels, rows
+// and list items.
 //
 // Two sections, never merged:
-//   .theme -- the ten portable roles below. Same meaning in every elmz app.
-//   .app   -- tokens this app declared for itself, in Zig. Not present here,
-//             because it is the app's to define.
+//   .theme -- the ten portable roles. Same meaning in every elmz app.
+//   .app   -- tokens an app declared for itself, in Zig. Absent here, because
+//             it is the app's to define; a file that writes one without
+//             declaring it is rejected rather than ignored.
+//
+// .theme has two halves, and each has the syntax its data wants:
+//   .colors    -- ten hex roles. Omit any to inherit.
+//   .gradients -- optional, per role. A role listed here overrides the flat
+//                 colour everywhere that role is used as a FILL. Gradients are
+//                 literal too, so they do not follow a later edit to .colors.
 .{
-    .version = 1,
+    .version = 2,
 
     .theme = .{
-        // page background; the colour a backend clears to
-        .bg = 0x1e1e2e,
-        // raised or inset fill: panels, cards, rows
-        .panel = 0x313244,
-        // outlines and dividers
-        .border = 0x9399b2,
-        // primary text
-        .text = 0xcdd6f4,
-        // secondary text: captions, hints, units
-        .text_muted = 0xa6adc8,
-        // resting fill of an interactive control
-        .control = 0x45475a,
-        // control fill under the pointer
-        .hover = 0x6c7086,
-        // control fill while that control owns the press
-        .pressed = 0x7f849c,
-        // this item is the chosen one among its peers
-        .selected = 0x585b70,
-        // emphasis: active borders, markers, value fills
-        .accent = 0x89b4fa,
+        .colors = .{
+            // page background; the colour a backend clears to
+            .bg = 0x1e1e2e,
+            // raised or inset fill: panels, cards, rows
+            .panel = 0x313244,
+            // outlines and dividers
+            .border = 0x9399b2,
+            // primary text
+            .text = 0xcdd6f4,
+            // secondary text: captions, hints, units
+            .text_muted = 0xa6adc8,
+            // resting fill of an interactive control
+            .control = 0x45475a,
+            // control fill under the pointer
+            .hover = 0x6c7086,
+            // control fill while that control owns the press
+            .pressed = 0x7f849c,
+            // this item is the chosen one among its peers
+            .selected = 0x585b70,
+            // emphasis: active borders, markers, value fills
+            .accent = 0x89b4fa,
+        },
+
+        // No gradient ships by default: a default gradient is a look, and the
+        // library's default look is a flat palette. Both forms, for reference.
+        //
+        // .gradients = .{
+        //     .accent = .{ .linear = .{ .dir = .diagonal, .from = 0x89b4fa, .to = 0xf5c2e7 } },
+        //     .panel = .{ .radial = .{ .inner = 0x45475a, .outer = 0x313244, .radius = 0.7 } },
+        // },
     },
 }

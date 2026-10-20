@@ -423,6 +423,8 @@ pub const Theme = struct {
 pub const theme = @import("theme.zig");
 pub const RoleFamily = theme.RoleFamily;
 pub const ThemeSpec = theme.ThemeSpec;
+pub const Gradients = theme.Gradients;
+pub const GradientSpec = theme.GradientSpec;
 pub const ThemeFileType = theme.ThemeFileType;
 pub const Loaded = theme.Loaded;
 pub const ThemeDiag = theme.ThemeDiag;
@@ -919,6 +921,9 @@ pub fn Ui(comptime M: type) type {
 
         arena: std.heap.ArenaAllocator,
         theme: Theme = .{},
+        /// Per-role gradient overrides from the theme file. Empty means every
+        /// role paints its flat colour, which is the default look.
+        gradients: Gradients = .{},
         /// set when an allocation failed. The frame is then structurally
         /// degraded rather than aborted, which is what lets `view` be
         /// infallible. The runner reports it.
