@@ -480,6 +480,55 @@ pub const Primitive = union(enum) {
 /// than allocated for.
 pub const max_lines: usize = 32;
 
+/// What a measurement reports. One width is not enough to lay out a row: a
+/// parent has to know not just how wide a child WANTS to be but how far it can
+/// be squeezed before its content breaks. `w` is the width taken at the
+/// `avail_w` it was measured with; `min_w` is the floor.
+///
+/// There is deliberately no `pref` field. A preferred width is just "measure at
+/// a large avail", and making it a field would force an immediate answer to
+/// what the preferred width of wrapped text is -- which is a behaviour change
+/// this contract does not want to smuggle in.
+pub const Extent = struct {
+    /// width taken at the avail_w this was measured with
+    w: f32 = 0,
+    /// height at that width
+    h: f32 = 0,
+    /// narrowest width that still preserves the content
+    min_w: f32 = 0,
+};
+
+/// The widest unbreakable run in `bytes`, which is the floor for wrapped text.
+/// `wrapLines` breaks on spaces and hard-breaks a word that cannot fit, so this
+/// is the point below which it would start cutting mid-word.
+fn longestWord(r: Renderer, bytes: []const u8, size: f32) f32 {
+    var best: f32 = 0;
+    var it = std.mem.tokenizeAny(u8, bytes, " \n\t");
+    while (it.next()) |word| {
+        const w = r.measureText(word, size).width;
+        if (w > best) best = w;
+    }
+    return best;
+}
+
+/// How wide a row child ends up when the row cannot give everyone what they
+/// asked for. The deficit is shared out in proportion to each child's SLACK
+/// (`w - min_w`), so a text that can wrap shrinks and a button that cannot
+/// keeps its size -- a fixed proportional split would shrink the button too and
+/// leave the text room it does not need.
+///
+/// The distribution sums to exactly `inner`, because the shares are fractions
+/// of the total slack and the total slack is exactly what is missing.
+fn rowChildWidth(c: Extent, total_w: f32, total_min: f32, inner: f32) f32 {
+    if (total_w <= inner) return c.w;
+    const slack = c.w - c.min_w;
+    const room = total_w - total_min;
+    if (room <= 0) return c.min_w;
+    const deficit = total_w - inner;
+    if (deficit >= room) return c.min_w;
+    return c.w - deficit * (slack / room);
+}
+
 pub const TextMetrics = struct {
     width: f32,
     height: f32,
@@ -936,8 +985,8 @@ pub fn Element(comptime M: type) type {
             if (s.frost) |v| self.frost = v;
         }
 
-        pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Size {
-            var s: Size = switch (self.kind) {
+        pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
+            var s: Extent = switch (self.kind) {
                 .text => |t| blk: {
                     const ts = r.measureText(t.bytes, t.size);
                     // An explicit width still wins; otherwise wrapping text
@@ -950,49 +999,88 @@ pub fn Element(comptime M: type) type {
                         break :blk .{
                             .w = max_w,
                             .h = ts.height + @as(f32, @floatFromInt(n - 1)) * ts.line_height + 2 * self.pad,
+                            .min_w = longestWord(r, t.bytes, t.size) + 2 * self.pad,
                         };
                     }
                     // `pad` grows the box on every kind, so a filled text
                     // element is a chip and not a label with its edges shaved.
-                    break :blk .{ .w = ts.width + 2 * self.pad, .h = ts.height + 2 * self.pad };
+                    const tw = ts.width + 2 * self.pad;
+                    break :blk .{ .w = tw, .h = ts.height + 2 * self.pad, .min_w = tw };
                 },
                 .button => |b| blk: {
                     const ts = r.measureText(b.label, b.size);
-                    break :blk .{ .w = ts.width + 24, .h = ts.height + 16 };
+                    // A label does not break, so a button's floor is its width.
+                    const bw = ts.width + 24;
+                    break :blk .{ .w = bw, .h = ts.height + 16, .min_w = bw };
                 },
-                .bar => .{ .w = 0, .h = 10 },
-                .rect => .{ .w = 0, .h = 0 },
+                .bar => .{ .w = 0, .h = 10, .min_w = 0 },
+                .rect => .{ .w = 0, .h = 0, .min_w = 0 },
                 .column => |c| blk: {
                     const inner_avail = (self.width orelse avail_w) - 2 * self.pad;
                     var w: f32 = 0;
+                    var min_w: f32 = 0;
                     var h: f32 = 0;
                     for (c.children, 0..) |ch, i| {
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, inner_avail);
                         w = @max(w, cs.w);
+                        // A column stacks, so it is only as squeezable as its
+                        // widest floor. Children do not compete for width.
+                        min_w = @max(min_w, cs.min_w);
                         if (i > 0) h += self.gap;
                         h += ch.space_before;
                         h += cs.h;
                         h += ch.space_after;
                     }
-                    break :blk .{ .w = w + 2 * self.pad, .h = h + 2 * self.pad };
+                    break :blk .{ .w = w + 2 * self.pad, .h = h + 2 * self.pad, .min_w = min_w + 2 * self.pad };
                 },
                 .row => |c| blk: {
-                    var w: f32 = 0;
+                    // A row is the one container where children COMPETE: they
+                    // are laid side by side, so the widths have to be shared
+                    // out rather than summed. Pass one asks everyone what they
+                    // want and what their floor is; pass two only happens when
+                    // the row cannot pay, because a squeezed child has to be
+                    // re-measured at the width it was actually given to learn
+                    // its true height.
+                    const inner = (self.width orelse avail_w) - 2 * self.pad;
+                    var total_w: f32 = 0;
+                    var total_min: f32 = 0;
                     var h: f32 = 0;
                     for (c.children, 0..) |ch, i| {
                         if (self.disabled) ch.disabled = true;
-                        const cs = ch.measure(r, avail_w);
+                        const cs = ch.measure(r, inner);
+                        if (i > 0) {
+                            total_w += self.gap;
+                            total_min += self.gap;
+                        }
+                        total_w += ch.space_before + cs.w + ch.space_after;
+                        total_min += ch.space_before + cs.min_w + ch.space_after;
                         h = @max(h, cs.h);
-                        if (i > 0) w += self.gap;
-                        w += ch.space_before;
-                        w += ch.width orelse cs.w;
-                        w += ch.space_after;
                     }
-                    break :blk .{ .w = w + 2 * self.pad, .h = h + 2 * self.pad };
+                    if (total_w > inner) {
+                        // Heights from pass one were taken at `inner`, which no
+                        // child ends up with. Start over.
+                        h = 0;
+                        for (c.children) |ch| {
+                            const cs = ch.measure(r, inner);
+                            const cw = rowChildWidth(cs, total_w, total_min, inner);
+                            const at = ch.measure(r, cw);
+                            h = @max(h, if (cw < cs.w) at.h else cs.h);
+                        }
+                    }
+                    break :blk .{
+                        .w = @min(total_w, inner) + 2 * self.pad,
+                        .h = h + 2 * self.pad,
+                        .min_w = total_min + 2 * self.pad,
+                    };
                 },
             };
-            if (self.width) |w| s.w = w;
+            // An explicit width is both what the element takes and its floor:
+            // a parent may not squeeze past a number the app wrote down.
+            if (self.width) |w| {
+                s.w = w;
+                s.min_w = w;
+            }
             if (self.height) |h| s.h = h;
             return s;
         }
@@ -1175,12 +1263,27 @@ pub fn Element(comptime M: type) type {
                     var x = rect.x + self.pad;
                     const inner_h = (self.height orelse rect.h) - 2 * self.pad;
                     const avail_w = (self.width orelse rect.w) - 2 * self.pad;
+                    // Same totals `measure` used, so paint places children where
+                    // they were measured. Two passes over the children is the
+                    // price of `measure` taking no allocator: per-child extents
+                    // cannot be held anywhere between here and there.
+                    var total_w: f32 = 0;
+                    var total_min: f32 = 0;
+                    for (c.children, 0..) |ch, i| {
+                        const cs = ch.measure(r, avail_w);
+                        if (i > 0) {
+                            total_w += self.gap;
+                            total_min += self.gap;
+                        }
+                        total_w += ch.space_before + cs.w + ch.space_after;
+                        total_min += ch.space_before + cs.min_w + ch.space_after;
+                    }
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) x += self.gap;
                         x += ch.space_before;
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, avail_w);
-                        const w = ch.width orelse cs.w;
+                        const w = rowChildWidth(cs, total_w, total_min, avail_w);
                         try ch.paint(r, .{ .x = x, .y = rect.y + self.pad, .w = w, .h = inner_h }, child_clip, ptr, hits, gpa, hov, th);
                         x += w;
                         x += ch.space_after;
@@ -2421,6 +2524,113 @@ test "arena is reused across frames" {
         ui.reset();
         _ = ui.text(.{ .label = "hello", .size = 12 });
         _ = ui.column(.{ .children = &.{ui.text(.{ .label = "a", .size = 12 })} });
+    }
+}
+
+const RowFitMsg = enum { tap };
+
+fn rowFitUpdate(m: *RowFitState, msg: RowFitMsg) Action(RowFitMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+const RowFitState = struct { wide: bool = false };
+
+fn rowFitView(m: *RowFitState, ui: *Ui(RowFitMsg)) *Element(RowFitMsg) {
+    // Wrapped text always fills what it is given, so the wide case has to use a
+    // label that does not wrap or the row would squeeze in both cases and the
+    // comparison would prove nothing.
+    const label = if (m.wide)
+        ui.text(.{ .label = "short", .size = 10 })
+    else
+        ui.text(.{
+            .label = "a long sentence that must wrap somewhere inside this row",
+            .size = 10,
+            .wrap = true,
+        });
+    const btn = ui.button(.{ .label = "ok", .msg = .tap });
+    const row = ui.row(.{ .children = &.{ label, btn } });
+    const col = ui.column(.{ .children = &.{row} });
+    col.width = if (m.wide) 2000 else 220;
+    return col;
+}
+
+test "a squeezed row takes the deficit out of slack, not evenly" {
+    // 100 + 300 asked for, 200 of that is floor, so 200 is slack -- and all of
+    // it sits in the paragraph. An even split would shrink the button too and
+    // hand the text room it never needed.
+    const button = Extent{ .w = 100, .h = 20, .min_w = 100 };
+    const para = Extent{ .w = 300, .h = 20, .min_w = 100 };
+    const sum_w: f32 = 400;
+    const sum_min: f32 = 200;
+
+    try std.testing.expectApproxEqAbs(@as(f32, 300), rowChildWidth(para, sum_w, sum_min, 500), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), rowChildWidth(button, sum_w, sum_min, 250), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 150), rowChildWidth(para, sum_w, sum_min, 250), 0.01);
+
+    // Below the floors everything sits at its minimum and the row overflows.
+    // Clipping is the alternative, and there is no glyph clipping to clip with.
+    try std.testing.expectApproxEqAbs(@as(f32, 100), rowChildWidth(para, sum_w, sum_min, 150), 0.01);
+}
+
+test "min_w is a floor: only text that wraps gives ground" {
+    const gpa = std.testing.allocator;
+    const r = nominalRenderer();
+    var ui = Ui(RowFitMsg).init(gpa);
+    defer ui.deinit();
+
+    const plain = ui.text(.{ .label = "hello world", .size = 10 });
+    const pm = plain.measure(r, 10);
+    try std.testing.expectEqual(pm.w, pm.min_w);
+
+    const wrapped = ui.text(.{ .label = "aa bbbb cc", .size = 10, .wrap = true });
+    const wm = wrapped.measure(r, 200);
+    try std.testing.expectApproxEqAbs(r.measureText("bbbb", 10).width, wm.min_w, 0.01);
+    try std.testing.expect(wm.min_w < wm.w);
+
+    const btn = ui.button(.{ .label = "ok", .msg = .tap });
+    const bm = btn.measure(r, 10);
+    try std.testing.expectEqual(bm.w, bm.min_w);
+
+    // A width the app wrote down is both the size and the floor.
+    const fixed = ui.text(.{ .label = "hello", .size = 10, .width = 90 });
+    try std.testing.expectEqual(@as(f32, 90), fixed.measure(r, 500).min_w);
+
+    // A column stacks, so its floor is the widest floor among its children.
+    const col = ui.column(.{ .children = &.{ btn, wrapped } });
+    const cm = col.measure(r, 1000);
+    try std.testing.expectApproxEqAbs(@max(bm.min_w, wm.min_w), cm.min_w, 0.01);
+}
+
+test "a squeezed row paints the button where the row measured it" {
+    const gpa = std.testing.allocator;
+    const r = nominalRenderer();
+
+    var rt = Runtime(RowFitState, RowFitMsg).init(gpa, .{}, rowFitUpdate, rowFitView);
+    defer rt.deinit();
+
+    const btn_w = r.measureText("ok", 16).width + 24;
+
+    // Narrow: the label cannot fit, so it gives up room and the button keeps
+    // its size and lands flush against the column's right edge.
+    {
+        var f = try rt.frame(.{ .w = 240, .h = 200 }, r);
+        defer f.deinit();
+        try std.testing.expectEqual(@as(usize, 1), f.hits.len);
+        const b = f.hits[0].rect;
+        try std.testing.expectApproxEqAbs(btn_w, b.w, 0.5);
+        try std.testing.expectApproxEqAbs(@as(f32, 220), b.x + b.w, 0.5);
+    }
+
+    // Wide, unwrapped: nothing competes, so the button follows the label
+    // instead of being pushed to an edge.
+    {
+        rt.state.wide = true;
+        var f = try rt.frame(.{ .w = 2100, .h = 200 }, r);
+        defer f.deinit();
+        const b = f.hits[0].rect;
+        try std.testing.expectApproxEqAbs(btn_w, b.w, 0.5);
+        try std.testing.expect(b.x + b.w < 1900);
     }
 }
 
