@@ -102,6 +102,7 @@ pub fn main(init: std.process.Init) !void {
             if (!q.fill.isSolid()) grads += 1;
         },
         .halo => {},
+        .frost => {},
         .rrect => |q| {
             if (!q.fill.isSolid()) grads += 1;
         },

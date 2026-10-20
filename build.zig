@@ -191,6 +191,22 @@ pub fn build(b: *std.Build) void {
     const paint_exe_install = b.addInstallArtifact(paint_exe, .{});
     b.getInstallStep().dependOn(&paint_exe_install.step);
     b.step("paint", "build the headless fills render").dependOn(&paint_exe_install.step);
+
+    const effects_exe = b.addExecutable(.{
+        .name = "effects",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/effects.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+            },
+        }),
+    });
+    const effects_exe_install = b.addInstallArtifact(effects_exe, .{});
+    b.getInstallStep().dependOn(&effects_exe_install.step);
+    b.step("effects", "build the shadow + frost render").dependOn(&effects_exe_install.step);
     const overlay_exe = b.addExecutable(.{
         .name = "overlay",
         .root_module = b.createModule(.{

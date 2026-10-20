@@ -147,9 +147,12 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             .bg_grad = card_fill,
             .radius = 14,
             .border = th.border,
-            // spread gives the shadow a solid core; without it the falloff
-            // starts at the edge and reads as a smudge, not an occlusion.
-            .halo = .{ .color = shadow_color, .blur = 22, .spread = 3, .offset = .{ 0, 10 }, .mode = .shadow },
+            // spread (set inside `shadow`) gives the shadow a solid core; without
+            // it the falloff starts at the edge and reads as a smudge.
+            // `Halo.shadow` derives the offset FROM the light, so the two cannot
+            // disagree: a shadow pointing the wrong way for its own light is the
+            // one combination with no use.
+            .halo = elmz.Halo.shadow(shadow_color, 270, 10),
         },
     });
 

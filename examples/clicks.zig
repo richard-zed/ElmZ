@@ -276,6 +276,8 @@ fn lowestEdge(prims: []const elmz.Primitive) f32 {
         // allowed outside the element, so counting it would fail the layout
         // assertion for the one feature that is supposed to overflow.
         .halo => {},
+        // A frost does not move ink either: it recolours what is already there.
+        .frost => {},
     };
     return maxy;
 }

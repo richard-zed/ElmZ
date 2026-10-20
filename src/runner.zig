@@ -919,6 +919,7 @@ fn checkFrame(f: anytype, size: elmz.Size) !void {
             try std.testing.expect(std.math.isFinite(h.halo.blur));
             try std.testing.expect(std.math.isFinite(h.halo.spread));
         },
+        .frost => |f2| try std.testing.expect(std.math.isFinite(f2.blur)),
         .quad => |q| {
             const r = q.rect;
             try std.testing.expect(std.math.isFinite(r.x) and std.math.isFinite(r.y));
@@ -991,6 +992,7 @@ test "no frame escapes the canvas: finite, non-negative, in bounds" {
         .rrect => |q| try std.testing.expect(std.math.isFinite(q.rect.x + q.rect.w + q.radius)),
         .text => |t| try std.testing.expect(std.math.isFinite(t.x + t.y)),
         .halo => |h| try std.testing.expect(std.math.isFinite(h.rect.x + h.halo.blur)),
+        .frost => |f3| try std.testing.expect(std.math.isFinite(f3.blur)),
     };
     small.paintFrame(g.prims);
     var lit: usize = 0;
@@ -1401,6 +1403,8 @@ test "a clipping container confines every primitive to its own box" {
         switch (p) {
             // Except a halo: reaching outside the element is the feature.
             .halo => {},
+            // A frost rewrites pixels inside its rect; it adds no ink.
+            .frost => {},
             .quad => |q| {
                 saw_quad = true;
                 try std.testing.expect(!q.rect.intersect(c).isEmpty());
@@ -1586,6 +1590,7 @@ test "a button paints exactly one fill and one label" {
         .quad, .rrect => quads += 1,
         .text => texts += 1,
         .halo => {},
+        .frost => {},
     };
     // One fill, one label. Two quads means something upstream is drawing the
     // same rect twice, which is invisible on screen and wrong everywhere else.
@@ -1610,6 +1615,7 @@ test "a bar paints a track and a value fill, and nothing twice" {
         .quad, .rrect => quads += 1,
         .text => {},
         .halo => {},
+        .frost => {},
     };
     try std.testing.expectEqual(@as(usize, 2), quads);
     try std.testing.expectEqual(@as(usize, 2), f.prims.len);

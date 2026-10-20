@@ -315,11 +315,23 @@ pub const Region = struct {
 /// A glow or a shadow: one shape, one colour, a ramp on the same signed
 /// distance the rounded rect is already computed from.
 ///
-/// `mode` is intent, not a rendering switch -- both are a ramp around the
-/// silhouette, and `offset` is what separates them in practice (a shadow
-/// usually sits down and right of the thing casting it; a glow usually
-/// centres). Keeping the tag means a backend that CAN afford a real blur can
-/// tell the two apart later without the API changing.
+/// `mode` says which SIDE of the silhouette the ramp survives on, and there is
+/// one ramp for all three: opaque well inside, half at the edge, gone well
+/// outside.
+///
+/// `.glow` keeps both halves. An opaque element hides the inner one, so it reads
+/// as light around the shape; a translucent fill lets it tint the face, which is
+/// the only case where `.glow` and `.outer_glow` differ.
+/// `.outer_glow` keeps the outside half only.
+/// `.inner_glow` is the same ramp MIRRORED and kept inside -- full at the edge,
+/// gone `blur / 2` inward -- and is recorded AFTER the element's fill, because
+/// light inside a shape would otherwise be covered by it. Clipping `.glow` to
+/// the inside is NOT an inner glow: that washes the whole face, since the ramp is
+/// fully opaque once it is far enough inside.
+///
+/// There is no `.shadow`. A shadow is not a fourth geometry -- it is an
+/// `.outer_glow` with an offset and a dark colour, and a value of its own would
+/// have been a second name for one picture.
 pub const Halo = struct {
     color: Color,
     /// How far the ramp runs, in pixels, straddling the silhouette: fully
@@ -330,6 +342,21 @@ pub const Halo = struct {
     /// it a blurred shadow of a filled shape is barely visible.
     spread: f32 = 0,
     offset: [2]f32 = .{ 0, 0 },
+    /// Degrees the light comes FROM, clockwise from "to the right" -- the same
+    /// sense as a gradient's `dir` and, like it, `90` is straight down. Null
+    /// means no light source and a symmetric ramp.
+    ///
+    /// With a light the ramp is WIDER on the side the shadow is cast toward and
+    /// narrower on the lit side, which is what makes an offset shadow look cast
+    /// rather than copied. It is a separate axis from `offset` on purpose: offset
+    /// moves the silhouette, light shapes the falloff, and a shadow wants both.
+    ///
+    /// Costs a cache entry if it were baked, because it changes the mask's
+    /// contents rather than its position. Rather than quantise the angle into the
+    /// stencil key and spray masks whenever it animates, a lit halo takes the
+    /// distance-field path -- 0.1-0.2ms for one shadow, which is the case it is
+    /// for. `quality = .baked` does not override that.
+    light: ?f32 = null,
     mode: Mode = .glow,
     /// How the halo is computed. `baked` is the default and the fast path: a
     /// stencil is built once and blitted, 9-sliced so its cost does not scale
@@ -348,8 +375,39 @@ pub const Halo = struct {
     /// within tolerance of each other, which the agreement tests pin.
     quality: Quality = .baked,
 
-    pub const Mode = enum { glow, shadow };
+    /// A shadow as a picture, with the two axes wired consistently: the offset is
+    /// derived from the light rather than set beside it, because a shadow that
+    /// points the wrong way for its own light reads as a mistake and there is no
+    /// useful case for the combination.
+    ///
+    /// `light_deg` is where the light comes FROM -- `270` is overhead, which is the
+    /// default and the one a UI wants. `dist` is how far the silhouette is
+    /// displaced, in pixels.
+    pub fn shadow(color: Color, light_deg: f32, dist: f32) Halo {
+        const a = light_deg * std.math.pi / 180.0;
+        return .{
+            .color = color,
+            .mode = .outer_glow,
+            .light = light_deg,
+            // Away from the source, in screen pixels (y grows downward).
+            .offset = .{ -@cos(a) * dist, -@sin(a) * dist },
+            .blur = 18,
+            .spread = 2,
+        };
+    }
+
+    pub const Mode = enum { glow, outer_glow, inner_glow };
     pub const Quality = enum { baked, sdf };
+};
+
+/// Frost a backdrop: what is already drawn under the element, blurred, before
+/// the element paints itself. Physical rather than decorative -- it says "frost
+/// this" and leaves the sampling, the passes and the falloff to the rasteriser,
+/// the same way `Halo` says "glow this" instead of "run a box blur".
+pub const Frost = struct {
+    /// How far the blur reaches, in pixels. A radius, not a sigma: the passes
+    /// are sized from it, and doubling it visibly doubles the smear.
+    blur: f32 = 12,
 };
 
 pub const Primitive = union(enum) {
@@ -357,8 +415,13 @@ pub const Primitive = union(enum) {
     /// rounded rect: `stroke` draws a 1px outline instead of a fill
     rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect },
     text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect },
-    /// Drawn BEFORE the element it belongs to, so it composites behind it.
+    /// Recorded where it has to composite: before the element's own fill for
+    /// `glow` and `shadow`, after it for `inner_glow`, whose light would
+    /// otherwise be covered by the shape it lives inside.
     halo: struct { rect: Rect, corner: f32, halo: Halo, clip: Rect },
+    /// Blurs what is already on the canvas under `rect`. A backdrop effect, so
+    /// it is recorded BEFORE the element's fill and reads the destination.
+    frost: struct { rect: Rect, radius: f32, blur: f32, clip: Rect },
 
     /// `clip` is repeated in each prong because a Zig union has no common
     /// fields. It is the scissor rect resolved at record time, so a primitive
@@ -369,6 +432,7 @@ pub const Primitive = union(enum) {
             .rrect => |q| q.clip,
             .text => |t| t.clip,
             .halo => |h| h.clip,
+            .frost => |f| f.clip,
         };
     }
 };
@@ -419,6 +483,9 @@ pub const Renderer = struct {
         /// A glow or shadow behind `rect`. `corner` is the element's own radius
         /// so the halo follows its shape rather than boxing it.
         halo: *const fn (ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void,
+        /// Blurs the destination under `rect`, in place. Must be called BEFORE
+        /// the element draws, or it frosts the element too.
+        frost: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, blur: f32, clip: Rect) void,
         measure_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32) TextMetrics,
         /// Splits into lines no wider than `max_width`. Returns the count.
         /// Kept on the renderer because only the backend knows the glyph
@@ -459,6 +526,14 @@ pub const Renderer = struct {
         if (rect.w <= 0 or rect.h <= 0) return;
         if (h.color.a == 0) return;
         self.vtable.halo(self.ptr, rect, corner, h, clip);
+    }
+
+    /// Frost the backdrop under `rect`. A backend with no read-back may ignore
+    /// it, but ignoring it is not the same as approximating it: the caller asked
+    /// for the pixels underneath, so a fallback would be a different picture.
+    pub fn frost(self: Renderer, rect: Rect, radius: f32, blur: f32, clip: Rect) void {
+        if (rect.w <= 0 or rect.h <= 0 or blur <= 0) return;
+        self.vtable.frost(self.ptr, rect, radius, blur, clip);
     }
 
     pub fn measureText(self: Renderer, bytes: []const u8, size: f32) TextMetrics {
@@ -637,6 +712,9 @@ pub const Style = struct {
     /// Appearance, not layout: an app can set a glow on any element, and a
     /// widget that wants a shadow by default can put one here.
     halo: ?Halo = null,
+    /// Blur of what is behind this element. Nothing shows unless something is
+    /// drawn under it, so it pairs with a translucent `bg`.
+    frost: ?Frost = null,
 
     pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
         return resolveFill(self.bg, self.bg_grad, fallback);
@@ -691,6 +769,10 @@ pub fn Element(comptime M: type) type {
         /// A glow or shadow behind this element, following its corner radius.
         /// Appearance only: no layout cost, no hit region, no children moved.
         halo: ?Halo = null,
+        /// Blur of what is already drawn behind this element, before the
+        /// element's own fill. Cost is area, not circumference, so it is for
+        /// cards and bars, not for text.
+        frost: ?Frost = null,
         /// A halo drawn only while the pointer is over this element, merged
         /// over `halo`. Kept separate from `halo` for the same reason
         /// `hover_bg` is separate from `bg`: the hovered state is derived
@@ -759,6 +841,7 @@ pub fn Element(comptime M: type) type {
                 .radius = self.radius,
                 .pad = self.pad,
                 .halo = self.halo,
+                .frost = self.frost,
             };
         }
 
@@ -781,6 +864,7 @@ pub fn Element(comptime M: type) type {
             self.radius = s.radius orelse 0;
             self.pad = s.pad orelse 0;
             self.halo = s.halo;
+            self.frost = s.frost;
         }
 
         /// Overlay `s` on what this element already has: only the fields the
@@ -801,6 +885,7 @@ pub fn Element(comptime M: type) type {
             if (s.radius) |v| self.radius = v;
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
+            if (s.frost) |v| self.frost = v;
         }
 
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Size {
@@ -938,7 +1023,9 @@ pub fn Element(comptime M: type) type {
                 break :blk false;
             };
             const halo_now: ?Halo = if (hovered) self.hover_halo orelse self.halo else self.halo;
-            if (halo_now) |h| r.halo(rect, self.radius, h, clip);
+            // Backdrop first: a frost reads what is behind it, so it has to run
+            // while the destination is still the backdrop and not the element.
+            if (self.frost) |fr| r.frost(rect, self.radius, fr.blur, clip);
             if (self.radius > 0) {
                 if (fill_now) |c| r.roundedRect(rect, self.radius, c, false, clip);
                 if (border_now) |c| r.roundedRect(rect, self.radius, c, true, clip);
@@ -959,6 +1046,12 @@ pub fn Element(comptime M: type) type {
                     }
                 }
             }
+            // One emission point, one order, for every mode. `.glow` keeps BOTH
+            // halves of the ramp, so the inner one has to land on the face -- under
+            // the fill it would simply be covered. `.outer_glow` cuts the inner
+            // half and `.inner_glow` cuts the outer one, so the same order is
+            // correct for all three and no mode needs a rule of its own.
+            if (halo_now) |h| r.halo(rect, self.radius, h, clip);
             if (self.on_press) |m| try hitAppend(M, hits, gpa, rect, clip, m, self.key, !self.disabled);
 
             switch (self.kind) {
@@ -1536,9 +1629,22 @@ pub fn Collector(comptime M: type) type {
             .rrect = vtRrect,
             .text = vtText,
             .halo = vtHalo,
+            .frost = vtFrost,
             .measure_text = vtMeasure,
             .wrap_text = vtWrap,
         };
+
+        fn vtFrost(ptr: *anyopaque, rect: Rect, radius: f32, blur: f32, clip: Rect) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // A frost only touches its own box, so the box is the prune.
+            if (rect.intersect(clip).isEmpty()) return;
+            self.prims.append(self.gpa, .{ .frost = .{
+                .rect = rect,
+                .radius = radius,
+                .blur = blur,
+                .clip = clip,
+            } }) catch {};
+        }
 
         fn vtQuad(ptr: *anyopaque, rect: Rect, fill: Fill, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
@@ -1624,10 +1730,14 @@ pub fn nominalRenderer() Renderer {
         .rrect = nominalRrect,
         .text = nominalText,
         .halo = nominalHalo,
+        .frost = nominalFrost,
         .measure_text = nominalMeasure,
         .wrap_text = nominalWrap,
     } };
 }
+
+/// Metrics-only: a frost has no shape and no metrics, so it draws nothing.
+fn nominalFrost(_: *anyopaque, _: Rect, _: f32, _: f32, _: Rect) void {}
 
 /// Byte-ish wrap for the metrics-only renderer: same greedy rule, 0.58em/char.
 fn nominalWrap(_: *anyopaque, bytes: []const u8, size: f32, max_width: f32, out: [][]const u8) usize {
@@ -2760,6 +2870,7 @@ test "a gradient override paints instead of the flat colour" {
         .text => |t| if (!t.fill.isSolid()) {
             grads += 1;
         },
+        .frost => {},
         // A halo has one flat colour by design; it is a ramp in ALPHA, not a
         // gradient fill, so it must not count toward the gradient census.
         .halo => {},
@@ -2776,6 +2887,7 @@ test "a gradient override paints instead of the flat colour" {
         .rrect => |q| try std.testing.expect(q.fill.isSolid()),
         .text => |t| try std.testing.expect(t.fill.isSolid()),
         .halo => {},
+        .frost => {},
     };
 }
 
@@ -2824,6 +2936,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
             Fill => .{ .solid = .{ .r = 5, .g = 6, .b = 7, .a = 8 } },
             f32 => 7,
             Halo => .{ .color = .{ .r = 9, .g = 10, .b = 11, .a = 12 }, .blur = 3, .spread = 1, .offset = .{ 1, 2 } },
+            Frost => .{ .blur = 5 },
             else => @compileError("new Style field '" ++ f.name ++ "' of type " ++ @typeName(Child) ++
                 " needs a value here, and a matching line in applyStyle and mergeStyle"),
         };
