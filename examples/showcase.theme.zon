@@ -36,8 +36,18 @@
         // colour, so this follows `.accent` if you edit it above -- name only
         // the end that differs and the gradient cannot drift from the palette.
         .gradients = .{
-            .accent = .{ .linear = .{ .dir = .horizontal, .to = 0x8a5a2b } },
-            .panel = .{ .radial = .{ .outer = 0x1f1a14, .radius = 0.7 } },
+            .accent = .{ .linear = .{ .dir = 0, .to = 0x8a5a2b } },
+            // The centre is a fraction of the box, not a pixel: 0,0 is the
+            // top-left corner. Put it where the light would be.
+            .panel = .{ .radial = .{ .outer = 0x1f1a14, .center = .{ 0.25, 0.15 }, .radius = 0.7 } },
         },
+    },
+    // The app tier. Showcase declares `Tokens` and names it in its `.app`
+    // entry, so this is checked against that struct -- rename the key and the
+    // whole file is rejected with a line and column instead of quietly ignored.
+    // An app that declares nothing rejects the section outright, which is what
+    // keeps a typo from looking like a token nobody reads.
+    .app = .{
+        .title_size = 34,
     },
 }

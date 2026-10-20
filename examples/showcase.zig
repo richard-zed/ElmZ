@@ -33,6 +33,10 @@ pub const app = .{
     // and the runner watches it for the -sdl3 variant, so editing a colour
     // recolours the running window.
     .theme_path = @as(?[]const u8, "theme.zon"),
+    // Optional, and a TYPE rather than a value: this is what the file's `.app`
+    // section is parsed against. Drop the line and a theme.zon carrying an
+    // `.app` block is rejected instead of half-understood.
+    .theme_tokens = Tokens,
 };
 
 const W = app.size.w;
@@ -50,6 +54,8 @@ pub const Msg = enum {
 
 pub const Model = struct {
     tab: u8 = 1,
+    /// Set from the theme file's `.app` tier before the first frame.
+    title_size: u8 = 28,
 };
 
 pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
@@ -78,6 +84,17 @@ fn listRow(ui: *elmz.Ui(Msg), label: []const u8, meta: []const u8, msg: Msg, key
     return row;
 }
 
+/// The app tier: tokens this screen keeps in its own theme file.
+///
+/// Named here and pointed at from the app declaration below, so the runner
+/// parses the file's `.app` section against THIS type -- a typo in it is a
+/// parse error rather than a key nobody reads. Flat data only: the loader
+/// rejects types that would need an allocator.
+const Tokens = struct {
+    /// Point size for the wordmark. A demo of the tier, not a design system.
+    title_size: u8 = 28,
+};
+
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const th = ui.theme;
     const pink = elmz.Color.rgbHex(0xf5c2e7);
@@ -92,7 +109,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const edge_fill = ui.gradients.get("panel") orelse elmz.Fill.hgrad(pink, th.accent);
 
     // -- header ------------------------------------------------------------
-    const title = ui.text(.{ .label = "elmz", .size = 28, .style = .{ .fg_grad = accent_fill } });
+    const title = ui.text(.{ .label = "elmz", .size = m.title_size, .style = .{ .fg_grad = accent_fill } });
 
     const sub = ui.text(.{ .label = "one frame: layout, fills, states, keys, theme", .size = 12, .tone = .muted });
 
@@ -183,13 +200,17 @@ pub fn main(init: std.process.Init) !void {
     base_owned = runner.themePathBesideExe(gpa, io, "theme.defaults.zon");
     user_owned = runner.themePathBesideExe(gpa, io, "theme.zon");
 
-    const chain = runner.resolveChain(gpa, io, .{}, base_owned, user_owned);
+    const chain = runner.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
     rt.ui.theme = chain.theme;
     // Both halves of a loaded theme, or a file's `.gradients` would be parsed
     // and then dropped on the one path that draws a picture of it.
     rt.ui.gradients = chain.gradients;
+    // The tier the file declared, now a typed value. `showcase.theme.zon` sets
+    // `title_size = 34`, so this is visibly in effect, not just parsed.
+    rt.state.title_size = chain.app.title_size;
     if (chain.base_from_file) theme_name = "theme.defaults.zon";
     if (chain.user_from_file) theme_name = "theme.zon";
+    if (chain.user_rejected) theme_name = "base (theme.zon rejected)";
     if (chain.message()) |m| {
         // The file is present and wrong. Keep the last good palette on screen
         // and raise the band -- this is the only path that draws it, because a

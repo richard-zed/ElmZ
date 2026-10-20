@@ -139,10 +139,20 @@ pub const theme_version: u32 = 2;
 
 /// Gradient direction for the linear case. Names are ZON enum literals, so a
 /// typo is a parse error naming the key rather than a silent fallback.
-pub const Dir = enum { vertical, horizontal, diagonal };
-
+/// Degrees, clockwise from "to the right", which is the CSS convention and the
+/// one people already have in their heads:
+///
+///   0   ->  left to right
+///   45  ->  down and to the right
+///   90  ->  top to bottom  (the default, and what `vertical` used to mean)
+///   180 ->  right to left
+///
+/// A float rather than a three-value enum because the enum could only ever
+/// express 0, 45 and 90 -- every other angle was unreachable, and the way out
+/// would have been to fake it with a radial. The renderer was never the limit:
+/// `Fill.Linear` is two vectors, so any angle it is given is exact.
 pub const LinearSpec = struct {
-    dir: Dir = .vertical,
+    dir: f32 = 90,
     /// `null` inherits the role's own colour from `.colors`. Leaving an end
     /// out is how a gradient stays tied to the palette instead of holding a
     /// second copy of the same hex.
@@ -155,6 +165,11 @@ pub const RadialSpec = struct {
     /// inherits the role's own colour, same as the linear ends.
     inner: ?u32 = null,
     outer: ?u32 = null,
+    /// Where the centre sits, as a fraction of the element's box. `.{0, 0}` is
+    /// the top-left corner, `.{0.5, 0.5}` the middle. Fractions rather than
+    /// pixels because an element does not know where layout will put it, so a
+    /// pixel offset would slide as soon as anything above it grew.
+    center: ?[2]f32 = null,
     /// Fraction of the box WIDTH, matching `Fill.Radial`.
     radius: f32 = 0.5,
 };
@@ -175,17 +190,16 @@ pub const GradientSpec = union(enum) {
             .linear => |l| blk: {
                 const a = if (l.from) |h| Color.rgbHex(h) else fallback;
                 const b = if (l.to) |h| Color.rgbHex(h) else fallback;
-                break :blk switch (l.dir) {
-                    .vertical => elmz.Fill.vgrad(a, b),
-                    .horizontal => elmz.Fill.hgrad(a, b),
-                    .diagonal => elmz.Fill.diag(a, b),
-                };
+                // A unit direction centred on the box: the ramp spans the whole
+                // element whatever the angle, so turning it never shrinks it.
+                break :blk elmz.Fill.angled(l.dir, a, b);
             },
             .radial => |r| blk: {
                 const a = if (r.inner) |h| Color.rgbHex(h) else fallback;
                 const b = if (r.outer) |h| Color.rgbHex(h) else fallback;
                 var f = elmz.Fill.radialFill(a, b);
                 f.radial.radius = r.radius;
+                if (r.center) |c| f.radial.center = c;
                 break :blk f;
             },
         };
@@ -470,7 +484,7 @@ test "an override replaces exactly one role" {
 test "a gradient resolves to the fill a theme could never express before" {
     const src =
         \\.{ .version = 2, .theme = .{ .gradients = .{
-        \\    .accent = .{ .linear = .{ .dir = .diagonal, .from = 0x89b4fa, .to = 0xf5c2e7 } },
+        \\    .accent = .{ .linear = .{ .dir = 45, .from = 0x89b4fa, .to = 0xf5c2e7 } },
         \\    .panel = .{ .radial = .{ .inner = 0x313244, .outer = 0x1e1e2e, .radius = 0.75 } },
         \\} } }
     ;
@@ -479,8 +493,14 @@ test "a gradient resolves to the fill a theme could never express before" {
 
     const accent = loaded.gradients.accent.?;
     try std.testing.expectEqual(elmz.Fill.linear, std.meta.activeTag(accent));
-    // Diagonal, so the gradient vector runs corner to corner rather than down.
-    try std.testing.expectApproxEqAbs(@as(f32, 1), accent.linear.to[1], 0.0001);
+    // 45 degrees is down-and-right, and the vector is unit length centred on
+    // the box -- so it ends inside the box rather than at a corner. Comparing
+    // against the shared helper keeps this honest if the mapping ever changes.
+    try std.testing.expect(std.meta.eql(
+        accent,
+        elmz.Fill.angled(45, Color.rgbHex(0x89b4fa), Color.rgbHex(0xf5c2e7)),
+    ));
+    try std.testing.expect(accent.linear.to[1] > 0.8);
 
     const panel = loaded.gradients.panel.?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), panel.radial.radius, 0.0001);
@@ -494,6 +514,65 @@ test "a gradient resolves to the fill a theme could never express before" {
     try std.testing.expect(loaded.gradients.get("nothing") == null);
 }
 
+test "a linear direction is an angle, and it spans the box at any angle" {
+    // The point of the float: 0, 45 and 90 used to be the only reachable
+    // angles, so 22 degrees was simply not expressible.
+    const case = struct {
+        fn load(src: [:0]const u8) !elmz.Fill {
+            var diag: ThemeDiag = .{};
+            const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
+            return loaded.gradients.bg.?;
+        }
+    };
+
+    // 0 degrees runs left to right, exactly on the horizontal centre line.
+    const h = (try case.load(
+        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 0, .from = 0xff0000, .to = 0x0000ff } } } } }
+    )).linear;
+    try std.testing.expectApproxEqAbs(@as(f32, 0), h.from[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), h.to[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), h.from[1], 1e-6);
+
+    // 90 runs top to bottom -- what the old `vertical` default meant.
+    const v = (try case.load(
+        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 90, .from = 0xff0000, .to = 0x0000ff } } } } }
+    )).linear;
+    try std.testing.expectApproxEqAbs(@as(f32, 0), v.from[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), v.to[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), v.from[0], 1e-6);
+
+    // An angle the enum could not name still spans the whole box: the delta is
+    // a unit vector, so turning the ramp never shrinks it.
+    const a = (try case.load(
+        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 22, .from = 0xff0000, .to = 0x0000ff } } } } }
+    )).linear;
+    const dx = a.to[0] - a.from[0];
+    const dy = a.to[1] - a.from[1];
+    try std.testing.expectApproxEqAbs(@as(f32, 1), @sqrt(dx * dx + dy * dy), 1e-6);
+    try std.testing.expect(dx > 0.9 and dy > 0.3 and dy < 0.4);
+}
+
+test "a radial centre is a fraction of the box, not a pixel" {
+    var diag: ThemeDiag = .{};
+    const src =
+        \\.{ .version = 2, .theme = .{ .gradients = .{
+        \\    .panel = .{ .radial = .{ .inner = 0xffffff, .outer = 0x000000, .center = .{ 0, 0 }, .radius = 0.6 } },
+        \\} } }
+    ;
+    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
+    const f = loaded.gradients.panel.?;
+    try std.testing.expectEqual(@as(f32, 0), f.radial.center[0]);
+    try std.testing.expectEqual(@as(f32, 0), f.radial.center[1]);
+    try std.testing.expectEqual(@as(f32, 0.6), f.radial.radius);
+
+    // Omitted centre keeps the middle, so an old file renders as it did.
+    var diag2: ThemeDiag = .{};
+    const mid = try loadTheme(struct {}, std.testing.allocator, "theme.zon",
+        \\.{ .version = 2, .theme = .{ .gradients = .{ .panel = .{ .radial = .{} } } } }
+    , Theme{}, &diag2);
+    try std.testing.expectEqual(@as(f32, 0.5), mid.gradients.panel.?.radial.center[0]);
+}
+
 test "an omitted gradient end inherits the role colour" {
     // The drift this removes: a gradient that spells both ends holds a second
     // copy of the palette, so editing `.colors` leaves it behind. Naming only
@@ -501,28 +580,28 @@ test "an omitted gradient end inherits the role colour" {
     const only_to =
         \\.{ .version = 2, .theme = .{
         \\    .colors = .{ .accent = 0x112233 },
-        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = .horizontal, .to = 0xffffff } } },
+        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = 0, .to = 0xffffff } } },
         \\} }
     ;
     var diag: ThemeDiag = .{};
     const a = try loadTheme(struct {}, std.testing.allocator, "theme.zon", only_to, Theme{}, &diag);
     try std.testing.expect(std.meta.eql(
         a.gradients.accent.?,
-        elmz.Fill.hgrad(Color.rgbHex(0x112233), Color.rgbHex(0xffffff)),
+        elmz.Fill.angled(0, Color.rgbHex(0x112233), Color.rgbHex(0xffffff)),
     ));
 
     // Same gradient, different palette role: the inherited end moves with it.
     const other =
         \\.{ .version = 2, .theme = .{
         \\    .colors = .{ .accent = 0x445566 },
-        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = .horizontal, .to = 0xffffff } } },
+        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = 0, .to = 0xffffff } } },
         \\} }
     ;
     var diag2: ThemeDiag = .{};
     const b = try loadTheme(struct {}, std.testing.allocator, "theme.zon", other, Theme{}, &diag2);
     try std.testing.expect(std.meta.eql(
         b.gradients.accent.?,
-        elmz.Fill.hgrad(Color.rgbHex(0x445566), Color.rgbHex(0xffffff)),
+        elmz.Fill.angled(0, Color.rgbHex(0x445566), Color.rgbHex(0xffffff)),
     ));
 
     // A radial with nothing named is the role colour at both ends: legal, and

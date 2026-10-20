@@ -52,104 +52,127 @@ pub const Options = struct {
 /// The app never learns that a theme changed. It is not app state -- the next
 /// frame is simply built out of different colours, which is why this can live
 /// in the runner instead of in anyone's Model.
-pub const ThemeWatch = struct {
-    /// What a missing or broken base falls back to. Held rather than read off
-    /// `ui.theme`, which is the *result* of the previous resolution.
-    floor: elmz.Theme,
-    /// The developer's palette, beside the binary. Absent is the normal case.
-    base_path: ?[:0]const u8,
-    /// The end user's override, beside the binary.
-    user_path: ?[:0]const u8,
-    base_stamp: ?Stamp = null,
-    user_stamp: ?Stamp = null,
-    base_seen: bool = false,
-    user_seen: bool = false,
+/// Watches the theme files, and resolves them through the same call startup
+/// uses. Generic over the app tier for the same reason `ChainOf` is: a reload
+/// that guessed `struct {}` would reject a file whose `.app` section the app
+/// legitimately declared, and it would only do so *after* the first edit.
+pub fn ThemeWatchOf(comptime App: type) type {
+    return struct {
+        const Self = @This();
+        /// What a missing or broken base falls back to. Held rather than read off
+        /// `ui.theme`, which is the *result* of the previous resolution.
+        floor: elmz.Theme,
+        /// The developer's palette, beside the binary. Absent is the normal case.
+        base_path: ?[:0]const u8,
+        /// The end user's override, beside the binary.
+        user_path: ?[:0]const u8,
+        base_stamp: ?Stamp = null,
+        user_stamp: ?Stamp = null,
+        base_seen: bool = false,
+        user_seen: bool = false,
 
-    pub const Stamp = struct { mtime: i128 = 0, size: u64 = 0 };
+        pub const Stamp = struct { mtime: i128 = 0, size: u64 = 0 };
 
-    pub fn init(floor: elmz.Theme, base_path: ?[:0]const u8, user_path: ?[:0]const u8) ThemeWatch {
-        return .{ .floor = floor, .base_path = base_path, .user_path = user_path };
-    }
-
-    pub fn changed(prev: Stamp, now: Stamp) bool {
-        return prev.mtime != now.mtime or prev.size != now.size;
-    }
-
-    /// Whether a stat result earns a reload.
-    ///
-    /// A file that disappears is left alone on purpose: editors save by
-    /// unlinking and renaming, so a transient absence is ordinary, and dropping
-    /// the palette mid-save would flash the fallback colours at exactly the
-    /// moment someone is watching them. Only a file that is there and different
-    /// earns a reload.
-    fn shouldReload(seen: bool, prev: ?Stamp, now: ?Stamp) bool {
-        const n = now orelse return false;
-        if (!seen) return true;
-        const p = prev orelse return true;
-        return changed(p, n);
-    }
-
-    fn stampOf(io: std.Io, path: ?[]const u8) ?Stamp {
-        const p = path orelse return null;
-        const st = std.Io.Dir.cwd().statFile(io, p, .{}) catch return null;
-        return .{ .mtime = st.mtime.toNanoseconds(), .size = st.size };
-    }
-
-    /// Re-resolve the whole chain if either file changed. `ui` is `*Ui(Msg)`;
-    /// generic because the composition layer must not know the app's message
-    /// type.
-    ///
-    /// Both files are re-read, not just the one that moved: an override is
-    /// resolved *against* the base, so a base edit has to re-apply the override
-    /// -- otherwise it stays resolved against a palette that no longer exists.
-    ///
-    /// A broken edit keeps the last good palette and puts the diagnostic in the
-    /// error band. Blanking the window you are trying to fix a colour in would
-    /// be the worst possible response to a typo.
-    pub fn poll(self: *ThemeWatch, ui: anytype, io: std.Io, gpa: std.mem.Allocator) void {
-        const base_now = stampOf(io, self.base_path);
-        const user_now = stampOf(io, self.user_path);
-        const base_reload = shouldReload(self.base_seen, self.base_stamp, base_now);
-        const user_reload = shouldReload(self.user_seen, self.user_stamp, user_now);
-
-        if (base_now) |st| {
-            self.base_stamp = st;
-            self.base_seen = true;
+        pub fn init(floor: elmz.Theme, base_path: ?[:0]const u8, user_path: ?[:0]const u8) Self {
+            return .{ .floor = floor, .base_path = base_path, .user_path = user_path };
         }
-        if (user_now) |st| {
-            self.user_stamp = st;
-            self.user_seen = true;
-        }
-        if (!base_reload and !user_reload) return;
 
-        const chain = resolveChain(gpa, io, self.floor, self.base_path, self.user_path);
-        ui.theme = chain.theme;
-        ui.gradients = chain.gradients;
-        if (chain.message()) |m| ui.failExternal(.theme, "{s}", .{m}) else ui.clearExternal();
-    }
-};
+        pub fn changed(prev: Stamp, now: Stamp) bool {
+            return prev.mtime != now.mtime or prev.size != now.size;
+        }
+
+        /// Whether a stat result earns a reload.
+        ///
+        /// A file that disappears is left alone on purpose: editors save by
+        /// unlinking and renaming, so a transient absence is ordinary, and dropping
+        /// the palette mid-save would flash the fallback colours at exactly the
+        /// moment someone is watching them. Only a file that is there and different
+        /// earns a reload.
+        fn shouldReload(seen: bool, prev: ?Stamp, now: ?Stamp) bool {
+            const n = now orelse return false;
+            if (!seen) return true;
+            const p = prev orelse return true;
+            return changed(p, n);
+        }
+
+        fn stampOf(io: std.Io, path: ?[]const u8) ?Stamp {
+            const p = path orelse return null;
+            const st = std.Io.Dir.cwd().statFile(io, p, .{}) catch return null;
+            return .{ .mtime = st.mtime.toNanoseconds(), .size = st.size };
+        }
+
+        /// Re-resolve the whole chain if either file changed. `ui` is `*Ui(Msg)`;
+        /// generic because the composition layer must not know the app's message
+        /// type.
+        ///
+        /// Both files are re-read, not just the one that moved: an override is
+        /// resolved *against* the base, so a base edit has to re-apply the override
+        /// -- otherwise it stays resolved against a palette that no longer exists.
+        ///
+        /// A broken edit keeps the last good palette and puts the diagnostic in the
+        /// error band. Blanking the window you are trying to fix a colour in would
+        /// be the worst possible response to a typo.
+        pub fn poll(self: *Self, ui: anytype, io: std.Io, gpa: std.mem.Allocator) void {
+            const base_now = stampOf(io, self.base_path);
+            const user_now = stampOf(io, self.user_path);
+            const base_reload = shouldReload(self.base_seen, self.base_stamp, base_now);
+            const user_reload = shouldReload(self.user_seen, self.user_stamp, user_now);
+
+            if (base_now) |st| {
+                self.base_stamp = st;
+                self.base_seen = true;
+            }
+            if (user_now) |st| {
+                self.user_stamp = st;
+                self.user_seen = true;
+            }
+            if (!base_reload and !user_reload) return;
+
+            const chain = resolveChain(App, gpa, io, self.floor, self.base_path, self.user_path);
+            ui.theme = chain.theme;
+            ui.gradients = chain.gradients;
+            if (chain.message()) |m| ui.failExternal(.theme, "{s}", .{m}) else ui.clearExternal();
+        }
+    };
+}
+
+/// The watch for an app that declares no tokens of its own.
+pub const ThemeWatch = ThemeWatchOf(struct {});
 
 /// A fully resolved chain: every file read, every overlay applied.
-pub const Chain = struct {
-    theme: elmz.Theme,
-    /// Gradient overrides that came with that palette.
-    gradients: elmz.Gradients = .{},
-    /// A `theme.defaults.zon` supplied the base rather than the compiled floor.
-    base_from_file: bool = false,
-    /// The defaults file was there and would not load; `diag` says why.
-    base_rejected: bool = false,
-    /// A `theme.zon` supplied the override.
-    user_from_file: bool = false,
-    /// The override was there and would not load; `diag` says why.
-    user_rejected: bool = false,
-    diag: elmz.ThemeDiag = .{},
+///
+/// Generic over the app tier's type because `.app` is parsed strictly, and a
+/// strict parse needs to know what it is parsing against. An app that declares
+/// tokens gets `ChainOf(Tokens)`; one that does not uses the alias below and
+/// its files may not contain an `.app` section.
+pub fn ChainOf(comptime App: type) type {
+    return struct {
+        theme: elmz.Theme,
+        /// Gradient overrides that came with that palette.
+        gradients: elmz.Gradients = .{},
+        /// The app tier, if the app declared one. Otherwise `.{}` -- and a file
+        /// that writes `.app` keys is rejected rather than waved through.
+        app: App = .{},
+        /// A `theme.defaults.zon` supplied the base rather than the compiled floor.
+        base_from_file: bool = false,
+        /// The defaults file was there and would not load; `diag` says why.
+        base_rejected: bool = false,
+        /// A `theme.zon` supplied the override.
+        user_from_file: bool = false,
+        /// The override was there and would not load; `diag` says why.
+        user_rejected: bool = false,
+        diag: elmz.ThemeDiag = .{},
 
-    /// The one line the band should show, or null when nothing went wrong.
-    pub fn message(self: *const Chain) ?[]const u8 {
-        if (self.base_rejected or self.user_rejected) return self.diag.text();
-        return null;
-    }
-};
+        /// The one line the band should show, or null when nothing went wrong.
+        pub fn message(self: *const @This()) ?[]const u8 {
+            if (self.base_rejected or self.user_rejected) return self.diag.text();
+            return null;
+        }
+    };
+}
+
+/// The chain for an app that declares no tokens of its own.
+pub const Chain = ChainOf(struct {});
 
 /// Read `path` as sentinel-terminated text. ZON parsing wants the sentinel; a
 /// file read does not hand one back.
@@ -169,13 +192,14 @@ fn readZ(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
 /// nobody has to open a `.zig`. The compiled `floor` stays underneath, so a
 /// deleted or unparseable defaults file costs a diagnostic, not the whole look.
 pub fn resolveChain(
+    comptime App: type,
     gpa: std.mem.Allocator,
     io: std.Io,
     floor: elmz.Theme,
     base_path: ?[]const u8,
     user_path: ?[]const u8,
-) Chain {
-    var out: Chain = .{ .theme = floor };
+) ChainOf(App) {
+    var out: ChainOf(App) = .{ .theme = floor };
 
     // The developer's palette. A file that will not load costs a diagnostic and
     // leaves the floor in place: an app with no palette at all is not something
@@ -184,9 +208,10 @@ pub fn resolveChain(
         const name = "theme.defaults.zon";
         if (readZ(gpa, io, p)) |src| {
             defer gpa.free(src);
-            if (elmz.loadTheme(struct {}, gpa, name, src, out.theme, &out.diag)) |loaded| {
+            if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
+                out.app = loaded.app;
                 out.base_from_file = true;
             } else |_| out.base_rejected = true;
         } else |e| switch (e) {
@@ -203,9 +228,10 @@ pub fn resolveChain(
         const name = "theme.zon";
         if (readZ(gpa, io, p)) |src| {
             defer gpa.free(src);
-            if (elmz.loadTheme(struct {}, gpa, name, src, out.theme, &out.diag)) |loaded| {
+            if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
+                out.app = loaded.app;
                 out.user_from_file = true;
             } else |_| out.user_rejected = true;
         } else |e| switch (e) {
@@ -281,7 +307,14 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     // declares `theme_path` in its struct, and one that does not never sees it.
     if (@hasField(@TypeOf(app), "theme_path")) opts.theme_path = app.theme_path;
 
-    return run(S, M, &rt, &canvas, window, opts);
+    // Same trick again, for the type rather than a value: an app that wants
+    // tokens in its theme file names the struct here (`theme_tokens = Tokens`),
+    // and its `.app` section is then parsed and checked against it. Without it
+    // there is no tier and a file writing one is told so, which is the whole
+    // point of declaring.
+    const Tokens = if (@hasField(@TypeOf(app), "theme_tokens")) app.theme_tokens else struct {};
+
+    return run(Tokens, S, M, &rt, &canvas, window, opts);
 }
 
 /// Build a frame sized to the canvas, clear it to `bg`, and rasterise it.
@@ -324,6 +357,7 @@ pub fn paintOnce(
 }
 
 pub fn run(
+    comptime App: type,
     comptime S: type,
     comptime M: type,
     rt: *elmz.Runtime(S, M),
@@ -354,7 +388,7 @@ pub fn run(
     // on the way out.
     var base_owned: ?[:0]u8 = null;
     var user_owned: ?[:0]u8 = null;
-    var theme_watch: ?ThemeWatch = null;
+    var theme_watch: ?ThemeWatchOf(App) = null;
     defer if (opts.gpa) |g| {
         if (base_owned) |p| g.free(p);
         if (user_owned) |p| g.free(p);
@@ -372,7 +406,7 @@ pub fn run(
             else
                 false;
             if (base_there or user_owned != null) {
-                theme_watch = ThemeWatch.init(rt.ui.theme, base_owned, user_owned);
+                theme_watch = ThemeWatchOf(App).init(rt.ui.theme, base_owned, user_owned);
                 // Resolve before the first frame, through the same call the
                 // loop makes on a change.
                 if (theme_watch) |*w| w.poll(&rt.ui, io_arg, g);
@@ -585,7 +619,7 @@ test "runner paints once, then stops when the window says quit" {
     const events = [_]elmz.Event{.quit};
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 1), stats.frames);
     try std.testing.expectEqual(@as(u32, 1), stats.events);
@@ -679,7 +713,7 @@ test "runner hit-tests a click and routes it to update" {
     };
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 1), rt.state.n);
     try std.testing.expectEqual(@as(u32, 1), stats.messages);
@@ -882,7 +916,7 @@ test "run() drains a command's result while polling, with no further events" {
     const events = [_]elmz.Event{ .{ .pointer_down = point }, .{ .pointer_up = point } };
     var fake: Fake = .{ .events = &events, .idle = 20_000 };
 
-    const stats = try run(CState, CMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try run(struct {}, CState, CMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 1), rt.state.clicks);
     try std.testing.expectEqual(@as(i32, 42), rt.state.got);
@@ -924,7 +958,7 @@ test "a press on one button released over another dispatches nothing" {
     };
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 0), rt.state.n);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -1060,7 +1094,7 @@ test "a cancelled press fires nothing and leaves nothing lit" {
         .quit,
     };
     var fake: Fake = .{ .events = &events };
-    const stats = try run(TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 0), rt.state.n);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -1108,7 +1142,7 @@ test "a release with no press before it dispatches nothing" {
     const events = [_]elmz.Event{ .{ .pointer_up = point }, .quit };
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 0), rt.state.n);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -1132,7 +1166,7 @@ test "the same event script produces the same frames and the same pixels" {
         defer rt.deinit();
 
         var fake: Fake = .{ .events = &events };
-        const stats = try run(TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+        const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
         res.* = .{ .frames = stats.frames, .messages = stats.messages, .hash = fake.last_hash };
     }
 
@@ -1550,7 +1584,7 @@ test "the chain layers the override over the developer's base" {
     const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
     const user = try tmpPath(&ub, tmp, "theme.zon");
 
-    const chain = resolveChain(gpa, io, .{}, base, user);
+    const chain = resolveChain(struct {}, gpa, io, .{}, base, user);
     try std.testing.expect(chain.base_from_file);
     try std.testing.expect(chain.user_from_file);
     try std.testing.expectEqual(@as(?[]const u8, null), chain.message());
@@ -1575,7 +1609,7 @@ test "a defaults file that will not load keeps the floor and says so" {
     var bb: [128]u8 = undefined;
     const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
 
-    const chain = resolveChain(gpa, io, .{}, base, null);
+    const chain = resolveChain(struct {}, gpa, io, .{}, base, null);
     try std.testing.expect(chain.base_rejected);
     try std.testing.expect(!chain.base_from_file);
     try std.testing.expect(std.meta.eql(chain.theme, elmz.Theme{}));
@@ -1595,7 +1629,7 @@ test "a file that is not there is not an error in the chain" {
     const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
     const user = try tmpPath(&ub, tmp, "theme.zon");
 
-    const chain = resolveChain(gpa, io, .{}, base, user);
+    const chain = resolveChain(struct {}, gpa, io, .{}, base, user);
     try std.testing.expect(!chain.base_rejected);
     try std.testing.expect(!chain.user_rejected);
     try std.testing.expectEqual(@as(?[]const u8, null), chain.message());
@@ -1664,6 +1698,40 @@ test "editing the base re-applies the override on top of it" {
     try std.testing.expect(std.meta.eql(settled, ui.theme));
 }
 
+test "the app tier is parsed against the type the app declares, and refused without one" {
+    // The bug this closes: `resolveChain` hardcoded `struct {}`, so an app that
+    // declared tokens had its `.app` section rejected by the very function that
+    // loads it -- the tier worked when called directly and never through the
+    // runner. Same file, two callers, opposite answers.
+    const Tokens = struct { sidebar_width: u16 = 200 };
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "theme.zon",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } }, .app = .{ .sidebar_width = 240 } }",
+    });
+    var bb: [128]u8 = undefined;
+    var ub: [128]u8 = undefined;
+    const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
+    const user = try tmpPath(&ub, tmp, "theme.zon");
+
+    // Declared: the value arrives, typed.
+    const declared = resolveChain(Tokens, gpa, io, .{}, base, user);
+    try std.testing.expect(declared.user_from_file);
+    try std.testing.expectEqual(@as(u16, 240), declared.app.sidebar_width);
+    try std.testing.expect(declared.message() == null);
+
+    // Undeclared: rejected, with the offending key named rather than swallowed.
+    const undeclared = resolveChain(struct {}, gpa, io, .{}, base, user);
+    try std.testing.expect(undeclared.user_rejected);
+    try std.testing.expect(undeclared.message() != null);
+    try std.testing.expect(std.mem.indexOf(u8, undeclared.diag.text(), "sidebar_width") != null);
+}
+
 test "a gradient written into the file reaches the Ui, and leaves when edited out" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1675,7 +1743,7 @@ test "a gradient written into the file reaches the Ui, and leaves when edited ou
     // actually fills it.
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa }, .gradients = .{ .accent = .{ .linear = .{ .dir = .diagonal, .from = 0x89b4fa, .to = 0xf5c2e7 } } } } }",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa }, .gradients = .{ .accent = .{ .linear = .{ .dir = 45, .from = 0x89b4fa, .to = 0xf5c2e7 } } } } }",
     });
 
     var bb: [128]u8 = undefined;

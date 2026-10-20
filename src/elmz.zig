@@ -154,6 +154,25 @@ pub const Fill = union(enum) {
         return .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 0 }, .stops = Stops.two(a, b) } };
     }
 
+    /// Linear ramp at `deg` degrees, clockwise from "to the right" -- 0 is
+    /// left-to-right, 90 top-to-bottom, 22 whatever 22 means.
+    ///
+    /// Centred on the box and unit-length, so every angle spans the element and
+    /// turning the ramp never shrinks it. `vgrad`/`hgrad`/`diag` are the three
+    /// uncentred conveniences that predate this; they shade identically because
+    /// a ramp only cares about the projection, but they keep their old vectors
+    /// so existing renders do not move.
+    pub fn angled(deg: f32, a: Color, b: Color) Fill {
+        const rad = std.math.degreesToRadians(deg);
+        const dx = @cos(rad) * 0.5;
+        const dy = @sin(rad) * 0.5;
+        return .{ .linear = .{
+            .from = .{ 0.5 - dx, 0.5 - dy },
+            .to = .{ 0.5 + dx, 0.5 + dy },
+            .stops = Stops.two(a, b),
+        } };
+    }
+
     /// Diagonal, corner to corner.
     pub fn diag(a: Color, b: Color) Fill {
         return .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 1 }, .stops = Stops.two(a, b) } };
