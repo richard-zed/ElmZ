@@ -746,11 +746,63 @@ pub const FailKind = enum {
     }
 };
 
+/// What the wheel needs from a scroll viewport: how tall the content is and
+/// how much of it is on screen. Travels with the hit region rather than being
+/// stored, because only paint knows the content height.
+pub const ScrollView = struct { content_h: f32, view_h: f32 };
+
+/// A request to move one viewport. Two forms because the two things an app
+/// actually wants are different: go to a place, or move by an amount.
+pub const ScrollChange = union(enum) {
+    to: struct { key: u64, offset: f32 },
+    by: struct { key: u64, dy: f32 },
+};
+
+/// One viewport's offset, keyed by the element's `key`. Owned by the runtime
+/// so that no message ever carries a continuous value: a drag or a wheel tick
+/// changes this, and the next frame reads it.
+pub const ScrollSlot = struct { key: u64 = 0, offset: f32 = 0 };
+
+/// Scrollbar geometry, in logical units. The thumb has a floor or it becomes
+/// impossible to grab on a long list; the strip is thin and sits over the
+/// trailing edge, because a gutter would change the content width the moment
+/// overflow began -- which rewraps, which can remove the overflow.
+pub const scrollbar_w: f32 = 6;
+pub const scrollbar_min_thumb: f32 = 24;
+/// How wide the thumb's claim on the pointer is. Deliberately wider than the
+/// strip it paints: a 6px target is not grabbable. It is the whole reason the
+/// thumb is allowed to sit in front of the content, so it must earn the space
+/// by being usable -- and it grows LEFTWARD, into the content, because the
+/// right edge is the viewport's own border.
+pub const scrollbar_grab: f32 = 14;
+
+/// A thumb that has taken the pointer. Carried on the hit region instead of a
+/// message, because a drag produces a continuous value and nothing that is
+/// continuous may ride in a Msg. The key travels here rather than on
+/// `Hit.key`: keys are frame-unique identity, and a thumb is the same element
+/// as the viewport it belongs to, so reusing the key would report a collision.
+pub const ScrollDrag = struct {
+    key: u64,
+    view: ScrollView,
+};
+
 pub fn Hit(comptime M: type) type {
     return struct {
         rect: Rect,
         clip: Rect,
-        msg: M,
+        /// The message a release here dispatches, or null for a region that
+        /// only routes input -- a scroll viewport claims pointer position
+        /// without ever producing a message.
+        msg: ?M = null,
+        /// Set on a scroll viewport. Null on every other region, which is what
+        /// keeps wheel routing to one walk of the hit list instead of a second
+        /// traversal of the tree.
+        scroll: ?ScrollView = null,
+        /// Set on a scroll THUMB, which claims the pointer as a drag rather
+        /// than as a press. Recorded with no `key` and no `msg`: it dispatches
+        /// nothing, and its identity is the viewport's, so the duplicate-key
+        /// scan stays meaningful.
+        drag: ?ScrollDrag = null,
         /// Identity of the element that produced this region, if it declared
         /// one. A keyed press re-binds to the element carrying the same key
         /// instead of to a rectangle, so it survives the content reordering
@@ -779,7 +831,7 @@ fn hitAppend(
     gpa: Allocator,
     rect: Rect,
     clip: Rect,
-    msg: M,
+    msg: ?M,
     key: ?u64,
     active: bool,
     radius: f32,
@@ -902,6 +954,11 @@ pub fn Element(comptime M: type) type {
         /// rounded corners are not cut yet). Off by default, so nothing that
         /// does not ask for it changes.
         clips: bool = false,
+        /// Vertical scroll offset for a `scroll` kind, in logical units.
+        /// INJECTED BY THE RUNTIME from its keyed store, between `view` and
+        /// layout -- writing it in `view` is meaningless, because the next
+        /// frame overwrites it. Ask for a change with `Action.scroll`.
+        scroll_offset: f32 = 0,
         /// background while the pointer is over this element. null = no
         /// hover feedback, so nothing that does not ask for it changes.
         /// Still a `Fill` rather than the `Color` + `_grad` pair the three
@@ -936,6 +993,11 @@ pub fn Element(comptime M: type) type {
         pub const Kind = union(enum) {
             column: struct { children: []const *Self },
             row: struct { children: []const *Self },
+            /// A viewport over ONE child: the child is laid out at its full
+            /// height and painted shifted by `scroll_offset`, clipped to this
+            /// element's box. The offset is runtime state, so a viewport is
+            /// something an app declares and never animates by hand.
+            scroll: struct { child: *Self },
             text: struct { bytes: []const u8, size: f32 },
             button: struct { label: []const u8, size: f32 },
             bar: struct { value: f32 },
@@ -1136,6 +1198,19 @@ pub fn Element(comptime M: type) type {
                         .min_w = fit.total_min + 2 * self.pad,
                     };
                 },
+                .scroll => |c| blk: {
+                    // A viewport takes its child's width and its own height.
+                    // The child is measured at full height and clipped, which
+                    // is the whole difference from an ordinary column.
+                    const inner_w = (self.width orelse avail_w) - 2 * self.pad;
+                    if (self.disabled) c.child.disabled = true;
+                    const cs = c.child.measure(r, inner_w);
+                    break :blk .{
+                        .w = cs.w + 2 * self.pad,
+                        .h = self.height orelse (cs.h + 2 * self.pad),
+                        .min_w = cs.min_w + 2 * self.pad,
+                    };
+                },
             };
             // An explicit width is both what the element takes and its floor:
             // a parent may not squeeze past a number the app wrote down.
@@ -1260,7 +1335,13 @@ pub fn Element(comptime M: type) type {
             // half and `.inner_glow` cuts the outer one, so the same order is
             // correct for all three and no mode needs a rule of its own.
             if (halo_now) |h| r.halo(rect, self.radius, h, clip);
-            if (self.on_press) |m| try hitAppend(M, hits, gpa, rect, clip, m, self.key, !self.disabled, self.radius, self.focusable and self.key != null);
+            // A region exists for anything the runtime must be able to FIND,
+            // not only for things that produce a message: a focusable control
+            // with no message is exactly the case where Tab had nothing to
+            // land on, because the only region recorded was a press.
+            if (self.on_press != null or (self.focusable and self.key != null)) {
+                try hitAppend(M, hits, gpa, rect, clip, self.on_press, self.key, !self.disabled, self.radius, self.focusable and self.key != null);
+            }
 
             switch (self.kind) {
                 .text => |t| {
@@ -1352,6 +1433,82 @@ pub fn Element(comptime M: type) type {
                         x += ch.space_after;
                     }
                 },
+
+                .scroll => |c| {
+                    if (child_clip.isEmpty()) return;
+                    const inner: Rect = .{
+                        .x = rect.x + self.pad,
+                        .y = rect.y + self.pad,
+                        .w = rect.w - 2 * self.pad,
+                        .h = rect.h - 2 * self.pad,
+                    };
+                    if (inner.w <= 0 or inner.h <= 0) return;
+                    const cs = c.child.measure(r, inner.w);
+                    // Clamped HERE and nowhere else: layout is the only place
+                    // that knows the content height, so a stored offset past
+                    // the end is the store being one frame ahead, not a bug --
+                    // and clamping on read is what stops it painting blank
+                    // space at the bottom.
+                    const max_off = @max(0, cs.h - inner.h);
+                    const off = std.math.clamp(self.scroll_offset, 0, max_off);
+                    const vp: Rect = inner.intersect(child_clip);
+                    if (vp.isEmpty()) return;
+                    // Recorded BEFORE the child paints, so the viewport is
+                    // BELOW everything inside it in the hit list and a control
+                    // in the content still wins the pointer. Recorded with no
+                    // message: scrolling produces an offset, not a Msg.
+                    if (self.key) |k| {
+                        try hits.append(gpa, .{
+                            .rect = inner,
+                            .clip = vp,
+                            .key = k,
+                            .scroll = .{ .content_h = cs.h, .view_h = inner.h },
+                        });
+                    }
+                    try c.child.paint(
+                        r,
+                        .{ .x = inner.x, .y = inner.y - off, .w = inner.w, .h = cs.h },
+                        vp,
+                        ptr,
+                        hits,
+                        gpa,
+                        hov,
+                        th,
+                    );
+                    // Decoration, painted last so content can never cover it,
+                    // and only when there is something to scroll.
+                    if (max_off > 0 and inner.w > 2 * scrollbar_w) {
+                        const track = inner.h;
+                        const thumb_h = @min(track, @max(scrollbar_min_thumb, track * (track / cs.h)));
+                        const ty = inner.y + (track - thumb_h) * (off / max_off);
+                        r.quad(
+                            .{ .x = inner.x + inner.w - scrollbar_w, .y = ty, .w = scrollbar_w, .h = thumb_h },
+                            .{ .solid = th.border },
+                            vp,
+                        );
+                        // The thumb is DRAGGABLE, and it has to be: a strip in
+                        // front of the content that ignores the pointer is
+                        // dead weight, and one that swallows the whole region
+                        // makes the content unreachable. So it claims exactly
+                        // where it is painted, with a grab area wider than the
+                        // 6px it draws. Appended last, so it is the topmost
+                        // region in its own viewport.
+                        if (self.key) |k| {
+                            const grab_w = @min(inner.w, scrollbar_grab);
+                            try hits.append(gpa, .{
+                                .rect = .{
+                                    .x = inner.x + inner.w - grab_w,
+                                    .y = ty,
+                                    .w = grab_w,
+                                    .h = thumb_h,
+                                },
+                                .clip = vp,
+                                .active = !self.disabled,
+                                .drag = .{ .key = k, .view = .{ .content_h = cs.h, .view_h = inner.h } },
+                            });
+                        }
+                    }
+                },
             }
         }
     };
@@ -1376,6 +1533,10 @@ pub fn Ui(comptime M: type) type {
         /// belongs to it, and the app does not have to keep a second copy of
         /// the answer in its Model. Null means nothing holds focus.
         focus: ?u64 = null,
+        /// The READ side of the scroll store: whatever the runtime is holding
+        /// for each keyed viewport. Read-only here because the offset is not
+        /// the app's to write -- the wheel and the thumb own it.
+        scrolls: []const ScrollSlot = &.{},
         /// set when an allocation failed. The frame is then structurally
         /// degraded rather than aborted, which is what lets `view` be
         /// infallible. The runner reports it.
@@ -1396,6 +1557,15 @@ pub fn Ui(comptime M: type) type {
         ext_len: usize = 0,
         /// stands in for any node that could not be allocated
         dead: Elem,
+
+        /// Current offset for a keyed viewport, or 0 if it has never moved.
+        pub fn scrollAt(self: *const Self, key: ?u64) f32 {
+            const k = key orelse return 0;
+            for (self.scrolls) |s| {
+                if (s.key == k) return s.offset;
+            }
+            return 0;
+        }
 
         pub fn init(gpa: Allocator) Self {
             return .{
@@ -1631,6 +1801,39 @@ pub fn Ui(comptime M: type) type {
             e.gap = o.gap;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
+            return self.finish(e, o);
+        }
+
+        pub const ScrollOpts = struct {
+            child: *Elem,
+            on_press: ?M = null,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+            hover_halo: ?Halo = null,
+            width: ?f32 = null,
+            /// The viewport's height. Without one a viewport is as tall as its
+            /// content and can never overflow, so this is the field that makes
+            /// scrolling possible at all.
+            height: ?f32 = null,
+            style: Style = .{},
+            space_before: f32 = 0,
+            space_after: f32 = 0,
+            /// Required for a scrollable viewport: the offset is stored under
+            /// this key, so an unkeyed viewport sits at zero forever.
+            key: ?u64 = null,
+            disabled: bool = false,
+            /// accepted and redundant: a viewport always clips.
+            clips: bool = false,
+        };
+
+        /// A viewport over one child. Clipped by construction -- that is what
+        /// makes it a viewport -- and never given an offset by the app: the
+        /// wheel and the thumb move it, and the runtime holds the number.
+        pub fn scroll(self: *Self, o: ScrollOpts) *Elem {
+            const e = self.mk(.{ .scroll = .{ .child = o.child } });
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
+            e.clips = true;
             return self.finish(e, o);
         }
 
@@ -2083,6 +2286,13 @@ pub fn Action(comptime M: type) type {
         /// runtime, so without this field the app could declare a focusable
         /// element and never focus it.
         focus: ?FocusChange = null,
+        /// Move a viewport's offset. Same reasoning as `focus`: the offset is
+        /// runtime state, so the app can ask for a change but cannot write the
+        /// number in `view` -- the runtime injects it between `view` and
+        /// layout, so an app that set it there would be overwritten every
+        /// frame. This is the channel for "show me the top" and "reveal the
+        /// row I just added"; the wheel and the thumb do not come through here.
+        scroll: ?ScrollChange = null,
 
         pub fn then(c: Cmd(M)) @This() {
             return .{ .cmd = c };
@@ -2415,6 +2625,11 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// True while the app wants frames without input. Lives here because
         /// the loop consults it BEFORE it decides how long to block in poll.
         animate: bool = false,
+        /// Offsets for keyed scroll viewports. Fixed capacity, drop-oldest:
+        /// an allocator for this would be state that can fail mid-frame, and a
+        /// viewport that left the tree is not worth remembering anyway.
+        scroll_slots: [64]ScrollSlot = [_]ScrollSlot{.{}} ** 64,
+        scroll_n: usize = 0,
 
         pub fn init(
             gpa: Allocator,
@@ -2443,6 +2658,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 .clear => null,
             };
             if (action.animate) |v| self.animate = v;
+            if (action.scroll) |change| switch (change) {
+                .to => |t| self.scrollTo(t.key, t.offset),
+                .by => |b| self.scrollBy(b.key, b.dy),
+            };
             if (action.cmd) |cmd| {
                 if (self.exec == null) self.exec = Executor(M){ .gpa = self.gpa };
                 self.exec.?.submit(cmd);
@@ -2471,6 +2690,76 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         ///
         /// The returned frame owns its data (including text bytes) and stays
         /// valid until `deinit()`, even across later `frame()` calls.
+        fn scrollAtKey(self: *const Self, key: ?u64) f32 {
+            const k = key orelse return 0;
+            for (self.scroll_slots[0..self.scroll_n]) |s| {
+                if (s.key == k) return s.offset;
+            }
+            return 0;
+        }
+
+        pub fn scrollOffset(self: *const Self, key: u64) f32 {
+            return self.scrollAtKey(key);
+        }
+
+        /// Set a viewport's offset outright. The wheel clamps before calling
+        /// this, because the content extent is only known to the frame it just
+        /// came from; paint clamps again on read, which is what makes a stored
+        /// value that is one frame stale harmless.
+        pub fn scrollTo(self: *Self, key: u64, off: f32) void {
+            for (self.scroll_slots[0..self.scroll_n]) |*s| {
+                if (s.key == key) {
+                    s.offset = off;
+                    return;
+                }
+            }
+            if (self.scroll_n == self.scroll_slots.len) {
+                std.mem.copyForwards(
+                    ScrollSlot,
+                    self.scroll_slots[0 .. self.scroll_slots.len - 1],
+                    self.scroll_slots[1..],
+                );
+                self.scroll_n -= 1;
+            }
+            self.scroll_slots[self.scroll_n] = .{ .key = key, .offset = off };
+            self.scroll_n += 1;
+        }
+
+        /// Move a viewport. Clamping to the content extent happens at paint,
+        /// where the content height is known, so an offset past the end here
+        /// is the store being one frame ahead -- not a bug to fix twice.
+        pub fn scrollBy(self: *Self, key: u64, dy: f32) void {
+            for (self.scroll_slots[0..self.scroll_n]) |*s| {
+                if (s.key == key) {
+                    s.offset += dy;
+                    return;
+                }
+            }
+            if (self.scroll_n == self.scroll_slots.len) {
+                std.mem.copyForwards(
+                    ScrollSlot,
+                    self.scroll_slots[0 .. self.scroll_slots.len - 1],
+                    self.scroll_slots[1..],
+                );
+                self.scroll_n -= 1;
+            }
+            self.scroll_slots[self.scroll_n] = .{ .key = key, .offset = dy };
+            self.scroll_n += 1;
+        }
+
+        /// Push the store into the tree. The offset is runtime state, so it
+        /// cannot be written in `view` -- an app that set it there would be
+        /// overwritten every frame. Same shape as `disabled` inheritance.
+        fn injectScrollOffsets(self: *Self, e: *Elem) void {
+            if (e.kind == .scroll) e.scroll_offset = self.scrollAtKey(e.key);
+            switch (e.kind) {
+                .column => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
+                .row => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
+                .scroll => |c| self.injectScrollOffsets(c.child),
+                else => {},
+            }
+        }
+
         pub fn frame(self: *Self, size: Size, metrics: Renderer) !FrameT {
             self.ui.reset();
             // `failed` describes THIS build, so it cannot outlive a reset: an
@@ -2497,8 +2786,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             // The read side of `Action.focus`. Mirrored every frame, so view
             // never has to remember what it asked for.
             self.ui.focus = self.focus;
+            self.ui.scrolls = self.scroll_slots[0..self.scroll_n];
 
             const root = self.viewFn(&self.state, &self.ui);
+            self.injectScrollOffsets(root);
 
             var collector: Collector(M) = .{ .gpa = a, .metrics = metrics };
             const r = collector.renderer();
@@ -3686,6 +3977,71 @@ test "an action moves focus, view can read it, and the ring follows" {
     }
 }
 
+const VPState = struct {};
+const VPMsg = enum { nop, tap };
+
+fn vpUpdate(_: *VPState, _: VPMsg) Action(VPMsg) {
+    return .{};
+}
+
+/// Ten 20px rows in a 100px viewport: 200 of content, 100 of view, so the
+/// maximum offset is exactly 100 and every row is 20 below the one before it.
+fn vpView(_: *VPState, ui: *Ui(VPMsg)) *Element(VPMsg) {
+    var kids: [10]*Element(VPMsg) = undefined;
+    for (&kids, 0..) |*k, i| {
+        k.* = ui.rect(.{ .width = 80, .height = 20, .on_press = .tap, .key = 100 + i });
+    }
+    const col = ui.column(.{ .children = &kids });
+    const vp = ui.scroll(.{ .key = 7, .height = 100, .child = col });
+    return ui.column(.{ .children = &.{vp} });
+}
+
+fn vpRegion(hits: []const Hit(VPMsg), key: u64) ?Hit(VPMsg) {
+    for (hits) |h| {
+        if (h.key) |k| if (k == key) return h;
+    }
+    return null;
+}
+
+test "a viewport records its content height and translates its content" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(VPState, VPMsg).init(gpa, .{}, vpUpdate, vpView);
+    defer rt.deinit();
+
+    // Unscrolled: the region tells the wheel how much there is to scroll, and
+    // the first row sits at the top of the viewport.
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        const vp = vpRegion(f.hits, 7) orelse return error.NoViewport;
+        const sv = vp.scroll orelse return error.NoScrollInfo;
+        try std.testing.expectEqual(@as(f32, 200), sv.content_h);
+        try std.testing.expectEqual(@as(f32, 100), sv.view_h);
+        try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 100).?.rect.y);
+    }
+
+    // Offset 40: the first two rows are gone and row 2 has taken row 0's
+    // place. A region that scrolled out produces NO hit at all, which is the
+    // clip doing its work rather than paint pretending.
+    rt.scrollTo(7, 40);
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?Hit(VPMsg), null), vpRegion(f.hits, 100));
+        try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 102).?.rect.y);
+    }
+
+    // Offset past the end: paint clamps to content_h - view_h, so the store is
+    // allowed to be one frame ahead without painting blank space.
+    rt.scrollTo(7, 9999);
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 105).?.rect.y);
+        try std.testing.expectEqual(@as(?Hit(VPMsg), null), vpRegion(f.hits, 104));
+    }
+}
+
 test "a font failure names the path in the band" {
     const gpa = std.testing.allocator;
     var rt = Runtime(FocusState, FocusMsg).init(gpa, .{}, focusUpdate, focusView);
@@ -3880,5 +4236,67 @@ test "a row places a short child according to row_align" {
         defer f.deinit();
         try std.testing.expectApproxEqAbs(@as(f32, 20), rectOfKey(f, 2).h, 0.5);
         try std.testing.expectApproxEqAbs(rectOfKey(f, 1).y, rectOfKey(f, 2).y, 0.5);
+    }
+}
+
+test "a thumb exists only when there is overflow, and claims where it paints" {
+    const gpa = std.testing.allocator;
+    const ThMsg = enum { tap };
+    const ThState = struct { fits: bool = false };
+
+    const H = struct {
+        fn upd(s: *ThState, m: ThMsg) Action(ThMsg) {
+            _ = s;
+            _ = m;
+            return .{};
+        }
+        fn view(s: *ThState, ui: *Ui(ThMsg)) *Element(ThMsg) {
+            var kids: [10]*Element(ThMsg) = undefined;
+            for (&kids, 0..) |*k, i| {
+                k.* = ui.rect(.{ .width = 80, .height = 20, .key = 100 + i });
+            }
+            const col = ui.column(.{ .children = &kids });
+            const vp = ui.scroll(.{ .key = 7, .height = if (s.fits) 300 else 100, .child = col });
+            return ui.column(.{ .children = &.{vp} });
+        }
+    };
+
+    var st: ThState = .{};
+    var rt = Runtime(ThState, ThMsg).init(gpa, st, H.upd, H.view);
+    defer rt.deinit();
+
+    // 200 of content in a 100px view: the thumb is half the track, pinned to
+    // the top at offset zero, and its grab area is wider than the 6px it
+    // draws -- a 6px target is not draggable with a finger or a trackpad.
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        var thumb: ?Hit(ThMsg) = null;
+        for (f.hits) |h| {
+            if (h.drag != null) thumb = h;
+        }
+        const t = thumb orelse return error.NoThumb;
+        try std.testing.expectEqual(@as(f32, 186), t.rect.x); // 200 - grab
+        try std.testing.expectEqual(@as(f32, 14), t.rect.w);
+        try std.testing.expectEqual(@as(f32, 0), t.rect.y);
+        try std.testing.expectEqual(@as(f32, 50), t.rect.h);
+        // The thumb carries the viewport's identity for the drag, but NOT as a
+        // `key`: a second region with key 7 would trip the duplicate-key guard
+        // and would let `Press.rebind` hand the claim to the content region.
+        try std.testing.expectEqual(@as(?u64, null), t.key);
+        try std.testing.expectEqual(@as(u64, 7), t.drag.?.key);
+        // No message: a thumb produces an offset, not an event.
+        try std.testing.expectEqual(@as(?ThMsg, null), t.msg);
+    }
+
+    // Content that fits: nothing to scroll, so no thumb and nothing to grab.
+    st.fits = true;
+    rt.state = st;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        for (f.hits) |h| {
+            if (h.drag != null) return error.ThumbWithoutOverflow;
+        }
     }
 }

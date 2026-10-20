@@ -523,6 +523,16 @@ pub fn paintOnce(
     defer frame.deinit();
 }
 
+/// What a thumb drag needs to turn pointer motion into an offset: the grab
+/// point, the offset at grab time, and the viewport's proportions (so moving
+/// the thumb one unit moves the content by `content_h / view_h`).
+const ThumbDrag = struct {
+    key: u64,
+    view: elmz.ScrollView,
+    from_y: f32,
+    from_off: f32,
+};
+
 pub fn run(
     comptime App: type,
     comptime S: type,
@@ -546,6 +556,13 @@ pub fn run(
     // Which region the pointer is over, as of the last frame. Motion only
     // earns a repaint when this changes; sweeping across empty space is free.
     var hovered: ?elmz.Rect = null;
+
+    // A thumb drag in flight. The claim already lives in `rt.press`; this is
+    // the extra bit a drag needs and a click does not: WHERE the grab started,
+    // so moving the pointer can be read as a delta. Kept here rather than on
+    // `Press` because a click never needs an origin, and the thumb is the only
+    // control whose geometry moves out from under the pointer mid-gesture.
+    var drag: ?ThumbDrag = null;
 
     // messages produced by commands land here between polls
     var async_msgs: std.ArrayList(M) = .empty;
@@ -679,12 +696,37 @@ pub fn run(
                 // The press owns its region from here until release, and the
                 // renderer colours that region -- and only that one -- until
                 // then, because it paints from this same claim.
-                if (frame) |*f| rt.press.down(f, p) else rt.press.cancel();
+                drag = null;
+                if (frame) |*f| {
+                    rt.press.down(f, p);
+                    // A thumb is a region with no Msg, so the claim is the only
+                    // thing that knows the press landed on one. The offset is
+                    // read NOW, not tracked across frames: the grab is relative
+                    // to where the thumb was when it was grabbed.
+                    if (rt.press.captured) |h| {
+                        if (h.drag) |d| drag = .{
+                            .key = d.key,
+                            .view = d.view,
+                            .from_y = p[1],
+                            .from_off = rt.scrollOffset(d.key),
+                        };
+                    }
+                } else rt.press.cancel();
                 dirty = true;
             },
 
             .pointer_up => |p| {
                 rt.pointer.pos = p;
+                // A drag produces an offset, never a message: the thumb region
+                // carries no Msg, so there is nothing to dispatch and nothing
+                // to hit-test on release. Dropping the claim here is what stops
+                // the thumb staying held after the button comes up.
+                if (drag != null) {
+                    drag = null;
+                    rt.press.cancel();
+                    dirty = true;
+                    continue;
+                }
                 // Only a press that was actually CLAIMED can change paint: the
                 // release drops that control's pressed look. A release over
                 // empty space changes nothing, and marking dirty for it billed
@@ -700,7 +742,22 @@ pub fn run(
 
             .pointer_move => |p| {
                 rt.pointer.pos = p;
-                if (frame) |*f| {
+                // While a drag is in flight the pointer is moving the thumb,
+                // not hovering anything: the thumb follows the cursor, so the
+                // region under it is the region being dragged and re-running
+                // hover would only mark a frame dirty that is already dirty.
+                if (drag) |d| {
+                    if (d.view.view_h > 0) {
+                        // One unit of thumb travel is worth this much content.
+                        const ratio = d.view.content_h / d.view.view_h;
+                        const max_off = @max(0, d.view.content_h - d.view.view_h);
+                        const next = std.math.clamp(d.from_off + (p[1] - d.from_y) * ratio, 0, max_off);
+                        if (next != rt.scrollOffset(d.key)) {
+                            rt.scrollTo(d.key, next);
+                            dirty = true;
+                        }
+                    }
+                } else if (frame) |*f| {
                     const now: ?elmz.Rect = if (f.hit(p)) |h| h.rect else null;
                     if (!sameRect(now, hovered)) {
                         hovered = now;
@@ -714,6 +771,7 @@ pub fn run(
             // is what stops a button staying lit for the rest of the session.
             .pointer_cancel => {
                 rt.press.cancel();
+                drag = null;
                 rt.pointer.pos = null;
                 hovered = null;
                 dirty = true;
@@ -761,18 +819,43 @@ pub fn run(
                 }
             },
 
-            // Typed text, not keysyms. Borrowed for this dispatch only, which is
-            // fine here because the app sees it before the backend reuses the
-            // buffer; `update` copies anything it keeps.
-            // Wheel deltas are the app's, because the scroll OFFSET is model
-            // state: `view` reads it to clip and translate, so the runtime
-            // cannot keep it privately the way it keeps hover.
-            .wheel => |w| if (rt.on_wheel) |hook| {
-                if (hook(&rt.state, w)) |msg| {
-                    const action = rt.dispatch(msg);
-                    stats.messages += 1;
-                    if (action.quit) running = false;
-                    dirty = dirty or action.repaint;
+            // A scroll viewport under the pointer consumes the tick first. Its
+            // offset is runtime state, so there is no message to carry a
+            // continuous value and nothing for an app to route. A tick the
+            // runtime cannot scroll falls through to `on_wheel`, which is what
+            // keeps an app's own wheel handling working.
+            //
+            // Topmost-first over the hit list, same order `hit()` uses, so a
+            // viewport nested in another viewport takes the tick.
+            .wheel => |w| blk: {
+                if (frame) |*f| {
+                    const p = [2]f32{ w.x, w.y };
+                    var i = f.hits.len;
+                    while (i > 0) {
+                        i -= 1;
+                        const h = f.hits[i];
+                        const sv = h.scroll orelse continue;
+                        const key = h.key orelse continue;
+                        if (!h.rect.containsRounded(h.radius, p) or !h.clip.contains(p)) continue;
+                        const max_off = @max(0, sv.content_h - sv.view_h);
+                        if (max_off <= 0) continue;
+                        const before = rt.scrollOffset(key);
+                        const next = std.math.clamp(before + w.dy * scroll_step, 0, max_off);
+                        // A tick against the end of the content changed
+                        // nothing, so it must not bill a repaint.
+                        if (next == before) break :blk;
+                        rt.scrollTo(key, next);
+                        dirty = true;
+                        break :blk;
+                    }
+                }
+                if (rt.on_wheel) |hook| {
+                    if (hook(&rt.state, w)) |msg| {
+                        const action = rt.dispatch(msg);
+                        stats.messages += 1;
+                        if (action.quit) running = false;
+                        dirty = dirty or action.repaint;
+                    }
                 }
             },
             .text => |bytes| if (rt.on_text) |hook| {
@@ -793,6 +876,10 @@ pub fn run(
     if (frame) |*f| f.deinit();
     return stats;
 }
+
+/// One wheel notch, in logical units. SDL reports whole clicks, and a notch
+/// that moves less than a line reads as a trackpad that is broken.
+const scroll_step: f32 = 48;
 
 fn sameRect(a: ?elmz.Rect, b: ?elmz.Rect) bool {
     const x = a orelse return b == null;
@@ -2386,6 +2473,52 @@ test "a press and release on a control still repaints twice" {
     try std.testing.expectEqual(@as(u32, 3), stats.frames); // initial, press, release
 }
 
+test "a viewport under the pointer takes the wheel before the app sees it" {
+    const gpa = std.testing.allocator;
+    const VWMsg = enum { nop };
+    const VWState = struct { hook_calls: u32 = 0 };
+
+    const Hooks = struct {
+        fn update(s: *VWState, m: VWMsg) elmz.Action(VWMsg) {
+            _ = s;
+            _ = m;
+            return .{};
+        }
+        /// Ten 20px rows behind a 60px viewport: 200 of content, 140 of travel.
+        fn view(_: *VWState, ui: *elmz.Ui(VWMsg)) *elmz.Element(VWMsg) {
+            var kids: [10]*elmz.Element(VWMsg) = undefined;
+            for (&kids) |*k| k.* = ui.rect(.{ .width = 50, .height = 20 });
+            const vp = ui.scroll(.{ .key = 9, .height = 60, .child = ui.column(.{ .children = &kids }) });
+            return ui.column(.{ .children = &.{vp} });
+        }
+        fn onWheel(s: *VWState, w: elmz.Wheel) ?VWMsg {
+            _ = w;
+            s.hook_calls += 1;
+            return null;
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 120, 80);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(VWState, VWMsg).init(gpa, .{}, Hooks.update, Hooks.view);
+    defer rt.deinit();
+    rt.on_wheel = Hooks.onWheel;
+
+    var fake = Fake{
+        .events = &.{
+            .{ .wheel = .{ .dy = 2, .x = 10, .y = 10 } },
+            .quit,
+        },
+        .idle = 2,
+    };
+    _ = try run(struct {}, VWState, VWMsg, &rt, &canvas, fake.window(), .{});
+
+    // Two notches at 48 units each, and the app's hook never ran: the offset is
+    // runtime state, so there is nothing for the app to route.
+    try std.testing.expectEqual(@as(f32, 96), rt.scrollOffset(9));
+    try std.testing.expectEqual(@as(u32, 0), rt.state.hook_calls);
+}
+
 test "a wheel event reaches the app's hook and an unclaimed one repaints nothing" {
     const gpa = std.testing.allocator;
     const WMsg = enum { scrolled };
@@ -2535,4 +2668,148 @@ test "a clock that nobody listens to is not a clock: no on_tick, no ticks" {
 
     try std.testing.expectEqual(@as(u32, 0), rt.state.seen);
     try std.testing.expectEqual(@as(u32, 1), stats.frames); // no message, no repaint
+}
+
+// ---------------------------------------------------------------------------
+// thumb drag
+// ---------------------------------------------------------------------------
+// One viewport, ten 20px rows, a 100px view: 200 of content, so the offset
+// maxes at exactly 100 and one unit of thumb travel is worth two of content.
+// The thumb is therefore 50 tall at the top, and its grab strip is the right
+// `scrollbar_grab` px of the viewport -- x 186..200 when the view is 200 wide.
+const DragMsg = enum { tap };
+const DragState = struct {};
+
+fn dragUpdate(s: *DragState, m: DragMsg) elmz.Action(DragMsg) {
+    _ = s;
+    _ = m;
+    return .{};
+}
+
+fn dragView(_: *DragState, ui: *elmz.Ui(DragMsg)) *elmz.Element(DragMsg) {
+    var kids: [10]*elmz.Element(DragMsg) = undefined;
+    for (&kids, 0..) |*k, i| {
+        k.* = ui.rect(.{ .width = 80, .height = 20, .on_press = .tap, .key = 100 + i });
+    }
+    const col = ui.column(.{ .children = &kids });
+    const vp = ui.scroll(.{ .key = 7, .height = 100, .child = col });
+    return ui.column(.{ .children = &.{vp} });
+}
+
+test "dragging the thumb moves the content by the viewport's ratio, and letting go stops it" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(DragState, DragMsg).init(gpa, .{}, dragUpdate, dragView);
+    defer rt.deinit();
+
+    var fake = Fake{
+        .events = &.{
+            .{ .pointer_down = .{ 195, 5 } }, // on the thumb
+            .{ .pointer_move = .{ 195, 15 } }, // 10 down
+            .{ .pointer_up = .{ 195, 15 } },
+            .{ .pointer_move = .{ 195, 45 } }, // still moving, drag is over
+            .quit,
+        },
+        .idle = 1,
+    };
+    _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+
+    // 10 of pointer travel x (200 content / 100 view) = 20 of content. The
+    // direction matters more than the magnitude: dy grows downward, and
+    // dragging the thumb DOWN has to move the content UP, i.e. increase the
+    // offset. An inverted sign still scrolls, just backwards, which is why
+    // this asserts a positive number.
+    try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(7));
+}
+
+test "a cancelled drag stops moving the content" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(DragState, DragMsg).init(gpa, .{}, dragUpdate, dragView);
+    defer rt.deinit();
+
+    // The release does not always arrive -- focus can go, or the pointer can
+    // leave the window. Everything the claim touches has to be dropped with
+    // it, or the content keeps following a pointer that is no longer dragging.
+    var fake = Fake{
+        .events = &.{
+            .{ .pointer_down = .{ 195, 5 } },
+            .{ .pointer_move = .{ 195, 15 } },
+            .pointer_cancel,
+            .{ .pointer_move = .{ 195, 45 } },
+            .quit,
+        },
+        .idle = 1,
+    };
+    _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+
+    try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(7));
+}
+
+test "a press on the content is not a scroll drag" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(DragState, DragMsg).init(gpa, .{}, dragUpdate, dragView);
+    defer rt.deinit();
+
+    // Row 0 is 80 wide, so x=40 is over content and nowhere near the strip.
+    // Pressing it and moving must scroll nothing: the drag is keyed on the
+    // region's `drag` marker, not on the pointer being inside a viewport.
+    var fake = Fake{
+        .events = &.{
+            .{ .pointer_down = .{ 40, 5 } },
+            .{ .pointer_move = .{ 40, 45 } },
+            .quit,
+        },
+        .idle = 1,
+    };
+    _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+
+    try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(7));
+}
+
+test "a drag clamps at both ends of the content" {
+    const gpa = std.testing.allocator;
+
+    // Far past the bottom: the grab is 10 down and the pointer is 500 down,
+    // which is 980 of content in a space that only has 100 to give.
+    {
+        var canvas = try testCanvas(gpa, 200, 120);
+        defer canvas.deinit();
+        var rt = elmz.Runtime(DragState, DragMsg).init(gpa, .{}, dragUpdate, dragView);
+        defer rt.deinit();
+        var fake = Fake{
+            .events = &.{
+                .{ .pointer_down = .{ 195, 5 } },
+                .{ .pointer_move = .{ 195, 500 } },
+                .quit,
+            },
+            .idle = 1,
+        };
+        _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+        try std.testing.expectEqual(@as(f32, 100), rt.scrollOffset(7));
+    }
+
+    // Far past the top, from a thumb already resting at the bottom: the thumb
+    // sits at y 50..100 there, so the grab starts at 60 and ends above zero.
+    {
+        var canvas = try testCanvas(gpa, 200, 120);
+        defer canvas.deinit();
+        var rt = elmz.Runtime(DragState, DragMsg).init(gpa, .{}, dragUpdate, dragView);
+        defer rt.deinit();
+        rt.scrollTo(7, 100);
+        var fake = Fake{
+            .events = &.{
+                .{ .pointer_down = .{ 195, 60 } },
+                .{ .pointer_move = .{ 195, 0 } },
+                .quit,
+            },
+            .idle = 1,
+        };
+        _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+        try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(7));
+    }
 }

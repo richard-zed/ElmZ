@@ -149,7 +149,11 @@ pub fn main(init: std.process.Init) !void {
     try out.print("hit regions ({d}):\n", .{probe.hits.len});
     for (probe.hits) |h| {
         try out.print("  {s:<6} x={d:.0} y={d:.0} w={d:.0} h={d:.0}\n", .{
-            @tagName(h.msg), h.rect.x, h.rect.y, h.rect.w, h.rect.h,
+            if (h.msg) |m| @tagName(m) else "-",
+            h.rect.x,
+            h.rect.y,
+            h.rect.w,
+            h.rect.h,
         });
     }
 
