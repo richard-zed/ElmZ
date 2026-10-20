@@ -7,8 +7,98 @@
 //! Wayland `wl_shm` backend (or a test harness) changes nothing above it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const elmz = @import("elmz");
 const software = @import("software");
+
+/// Whether the overlay is compiled in by default. Debug builds get it, release
+/// builds do not: `zig build -Doptimize=ReleaseFast` is the difference between
+/// measuring and shipping, and this is the one thing that should follow it.
+pub const default_overlay = builtin.mode == .Debug;
+
+/// What the overlay has to say. Flat on purpose -- this is the diagnostic
+/// struct, not a model, and it is written and read in one place.
+pub const OverlayStats = struct {
+    frame_ns: u64 = 0,
+    build_ns: u64 = 0,
+    paint_ns: u64 = 0,
+    mean_ns: u64 = 0,
+    prims: usize = 0,
+    hits: usize = 0,
+};
+
+/// Rolling window of PAINTED frame durations.
+///
+/// Per repaint, not per loop pass: an idle window is not drawing 1000 frames a
+/// second, and averaging the idle poll in would report a rate nobody sees. The
+/// number this produces is "how long a frame takes when one is drawn", which
+/// is the number that decides whether the app feels smooth.
+pub const FrameRing = struct {
+    pub const capacity = 60;
+    ns: [capacity]u64 = [_]u64{0} ** capacity,
+    head: usize = 0,
+    len: usize = 0,
+
+    pub fn push(self: *FrameRing, v: u64) void {
+        self.ns[self.head] = v;
+        self.head = (self.head + 1) % capacity;
+        if (self.len < capacity) self.len += 1;
+    }
+
+    pub fn meanNs(self: *const FrameRing) u64 {
+        if (self.len == 0) return 0;
+        var sum: u64 = 0;
+        for (self.ns, 0..) |v, i| {
+            if (i < self.len) sum += v;
+        }
+        return sum / self.len;
+    }
+
+    pub fn fps(self: *const FrameRing) f64 {
+        const m = self.meanNs();
+        if (m == 0) return 0;
+        return 1e9 / @as(f64, @floatFromInt(m));
+    }
+};
+
+/// Four lines wedged into the top-left corner, on nothing at all.
+///
+/// No panel and no backing: the text is composited straight over whatever the
+/// app painted, so the readout cannot hide the pixels it is there to explain.
+/// That makes legibility a function of the frame underneath -- which is why it
+/// is drawn in the light theme text colour with the emphasised first line, and
+/// why the corner it sits in is the one least likely to hold a control.
+///
+/// Drawn with the renderer's own primitives rather than through a Ui tree: it
+/// runs after the frame is painted and must not be able to perturb layout,
+/// raise a failure band, or add hit regions a click could land on.
+pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
+    const pad: f32 = 3;
+    const line_h: f32 = 13;
+    const size: f32 = 10;
+    const rows: usize = 4;
+    const fg = elmz.Color{ .r = 0xcd, .g = 0xd6, .b = 0xf4, .a = 255 };
+    const dim = elmz.Color{ .r = 0xa6, .g = 0xad, .b = 0xc8, .a = 255 };
+
+    var buf: [4][48]u8 = undefined;
+    const lines = [rows][]const u8{
+        std.fmt.bufPrint(&buf[0], "{d:.2} ms  {d:.0} fps", .{
+            @as(f64, @floatFromInt(s.frame_ns)) / 1e6,
+            if (s.mean_ns == 0) 0 else 1e9 / @as(f64, @floatFromInt(s.mean_ns)),
+        }) catch "?",
+        std.fmt.bufPrint(&buf[1], "build {d:.2}  paint {d:.2} ms", .{
+            @as(f64, @floatFromInt(s.build_ns)) / 1e6,
+            @as(f64, @floatFromInt(s.paint_ns)) / 1e6,
+        }) catch "?",
+        std.fmt.bufPrint(&buf[2], "{d} prims  {d} hits", .{ s.prims, s.hits }) catch "?",
+        std.fmt.bufPrint(&buf[3], "{d}x{d}  {s}", .{ canvas.w, canvas.h, @tagName(builtin.mode) }) catch "?",
+    };
+
+    for (lines, 0..) |line, i| {
+        const y = pad + line_h * @as(f32, @floatFromInt(i));
+        canvas.drawText(pad, y, size, .{ .solid = if (i == 0) fg else dim }, line);
+    }
+}
 
 pub const Options = struct {
     /// Stop after this many events. null = run until the window says quit.
@@ -23,6 +113,13 @@ pub const Options = struct {
     /// times a second, which is cheaper than dragging a filesystem watcher
     /// into the composition layer.
     theme_poll_ms: i32 = 250,
+    /// Draw the frame readout over the painted frame. OFF by default here and
+    /// turned on by `runApp` when the binary is built in Debug, because the
+    /// overlay costs a timestamp pair per repaint and a text render -- fine
+    /// while measuring, not something a shipped build should pay for.
+    ///
+    /// It needs `io` for the clock, so it silently does nothing without one.
+    overlay: bool = false,
     /// Ambient io handle: mtime-polling a theme file, and (later) a frame
     /// clock for animation. null means no io was supplied -- headless carving
     /// and tests stay filesystem-free, which is a property worth keeping.
@@ -302,7 +399,7 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
         elmz.Runtime(S, M).init(gpa, .{}, app.update, app.view);
     defer rt.deinit();
 
-    var opts: Options = .{ .io = io, .gpa = gpa };
+    var opts: Options = .{ .io = io, .gpa = gpa, .overlay = default_overlay };
     // Same optional-field trick as `state`: an app that wants a theme file
     // declares `theme_path` in its struct, and one that does not never sees it.
     if (@hasField(@TypeOf(app), "theme_path")) opts.theme_path = app.theme_path;
@@ -421,6 +518,8 @@ pub fn run(
         }
     }
 
+    var ring: FrameRing = .{};
+
     while (running) {
         // Before the frame is decided, so a first frame is already the right
         // colours and an edit lands on the very next paint. A failed reload
@@ -447,10 +546,30 @@ pub fn run(
         if (dirty) {
             if (frame) |*f| f.deinit();
             const size = window.size();
+            const clock = opts.io;
+            const t0 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
             frame = try rt.frame(size, canvas.renderer());
+            const t1 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
 
             canvas.clear(rt.ui.theme.bg);
             canvas.paintFrame(frame.?.prims);
+            const t2 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
+
+            // Over the finished frame and under the present, so the readout
+            // describes the frame underneath it rather than the previous one,
+            // and so it can never end up in a PNG a headless example writes.
+            if (opts.overlay and clock != null) {
+                const total = t2 - t0;
+                ring.push(@intCast(total));
+                drawOverlay(canvas, .{
+                    .frame_ns = @intCast(total),
+                    .build_ns = @intCast(t1 - t0),
+                    .paint_ns = @intCast(t2 - t1),
+                    .mean_ns = ring.meanNs(),
+                    .prims = frame.?.prims.len,
+                    .hits = frame.?.hits.len,
+                });
+            }
             window.present(canvas.px, size);
 
             stats.frames += 1;
@@ -1785,4 +1904,56 @@ test "a gradient written into the file reaches the Ui, and leaves when edited ou
     watch.poll(&ui, io, gpa);
     try std.testing.expect(ui.gradients.accent == null);
     try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0x89b4fa)));
+}
+
+test "the frame ring averages painted frames and drops the oldest" {
+    var r: FrameRing = .{};
+    try std.testing.expectEqual(@as(u64, 0), r.meanNs());
+    try std.testing.expectEqual(@as(f64, 0), r.fps());
+    r.push(1_000_000);
+    r.push(3_000_000);
+    try std.testing.expectEqual(@as(u64, 2_000_000), r.meanNs());
+    try std.testing.expectApproxEqAbs(@as(f64, 500), r.fps(), 0.001);
+
+    var i: usize = 0;
+    while (i < FrameRing.capacity) : (i += 1) r.push(4_000_000);
+    try std.testing.expectEqual(FrameRing.capacity, r.len);
+    try std.testing.expectEqual(@as(u64, 4_000_000), r.meanNs());
+}
+
+test "the overlay paints inside its panel and nowhere else" {
+    var c = try software.Canvas.init(std.testing.allocator, 260, 120);
+    defer c.deinit();
+    c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+    drawOverlay(&c, .{
+        .frame_ns = 850_000,
+        .build_ns = 50_000,
+        .paint_ns = 800_000,
+        .mean_ns = 900_000,
+        .prims = 80,
+        .hits = 5,
+    });
+
+    var painted: usize = 0;
+    var outside: usize = 0;
+    var corner: usize = 0;
+    var y: u32 = 0;
+    while (y < c.h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < c.w) : (x += 1) {
+            const i = (@as(usize, y) * c.w + x) * 4;
+            if (c.px[i] != 0 or c.px[i + 1] != 0 or c.px[i + 2] != 0) {
+                painted += 1;
+                // Four 13px lines from (3,3): the readout ended up far from
+                // the corner it is wedged into, or it escaped onto pixels it
+                // has no business touching.
+                if (x > 210 or y > 60) outside += 1;
+                if (x < 24 and y < 16) corner += 1;
+            }
+        }
+    }
+    try std.testing.expect(painted > 500);
+    try std.testing.expectEqual(@as(usize, 0), outside);
+    // It is wedged in the corner rather than merely near it.
+    try std.testing.expect(corner > 40);
 }

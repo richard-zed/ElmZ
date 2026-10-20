@@ -3,7 +3,11 @@
 //! Three questions, one harness:
 //!   1. how does build (view + layout + hit list) scale with prim count,
 //!   2. how does rasterisation scale with the same,
-//!   3. what does a hovering pointer cost on top of the first.
+//!   3. what does a hovering pointer cost on top of the first,
+//!   4. what each fill VARIANT costs per pixel (paint is area-bound, so this
+//!      is the only question that can move the frame time),
+//!   5. whether the halo crossover at 10px is priced right: distance field
+//!      per pixel against one bake plus a blit.
 //!
 //! Headless on purpose: the numbers are the output. `zig build run-bench`.
 //! No PNG -- a picture of a benchmark is a bar chart, and this prints one.
@@ -97,6 +101,44 @@ fn measure(
     return out;
 }
 
+/// One full-canvas fill, repeated. Paint is the expensive half of a frame and
+/// it is area-bound, so the useful unit is nanoseconds per pixel per VARIANT --
+/// a solid quad and a diagonal ramp are the same work at the prim level and
+/// nothing alike at the pixel level.
+fn measureFill(io: std.Io, c: *software.Canvas, fill: elmz.Fill, iters: usize) u64 {
+    const rect = elmz.Rect{ .x = 0, .y = 0, .w = @floatFromInt(c.w), .h = @floatFromInt(c.h) };
+    c.fillRectClip(rect, fill, rect); // warm: first touch costs page faults
+    const t0 = ns(io);
+    for (0..iters) |_| c.fillRectClip(rect, fill, rect);
+    const t1 = ns(io);
+    return @intCast(@divTrunc(t1 - t0, @as(i128, @intCast(iters))));
+}
+
+/// A halo is either a distance field evaluated per pixel or one baked stencil
+/// blitted. `cold` is the bake (cache miss, full silhouette built); `hot` is
+/// the blit. If `hot_baked` is not clearly cheaper than `sdf` at a given blur,
+/// the crossover is on the wrong side of it.
+const HaloCost = struct { cold: u64, hot: u64, stencils: usize };
+
+fn measureHalo(io: std.Io, gpa: std.mem.Allocator, h: elmz.Halo, w: f32, ht: f32, iters: usize) !HaloCost {
+    const cw: u32 = @intFromFloat(w + 120);
+    const ch: u32 = @intFromFloat(ht + 120);
+    var c = try software.Canvas.init(gpa, cw, ch);
+    defer c.deinit();
+    const rect = elmz.Rect{ .x = 60, .y = 60, .w = w, .h = ht };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = @floatFromInt(cw), .h = @floatFromInt(ch) };
+    const t0 = ns(io);
+    c.halo(rect, 8, h, clip);
+    const t1 = ns(io);
+    for (0..iters) |_| c.halo(rect, 8, h, clip);
+    const t2 = ns(io);
+    return .{
+        .cold = @intCast(t1 - t0),
+        .hot = @intCast(@divTrunc(t2 - t1, @as(i128, @intCast(iters)))),
+        .stencils = c.masks.items.len,
+    };
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -166,5 +208,90 @@ pub fn main(init: std.process.Init) !void {
     try out.print("  paint cost = {d:.1} ns/pixel\n", .{
         @as(f64, @floatFromInt(wf.paint_ns)) / pixels,
     });
+
+    // -- fill variants -----------------------------------------------------
+    // Same rect, same area, same call: only the Fill changes. A solid quad is
+    // a hoisted colour loop; a vertical ramp is one colour per scanline and
+    // keeps the row fill; anything with a horizontal component cannot hoist
+    // and pays per pixel.
+    {
+        var fc = try software.Canvas.init(gpa, 640, 480);
+        defer fc.deinit();
+        const a = elmz.Color{ .r = 0x1e, .g = 0x1e, .b = 0x2e, .a = 255 };
+        const b = elmz.Color{ .r = 0xf3, .g = 0xc0, .b = 0xe5, .a = 255 };
+        const area = @as(f64, @floatFromInt(640 * 480));
+        const iters: usize = 20;
+
+        const cases = [_]struct { name: []const u8, fill: elmz.Fill }{
+            .{ .name = "solid", .fill = .{ .solid = a } },
+            .{ .name = "vertical", .fill = elmz.Fill.vgrad(a, b) },
+            .{ .name = "horizontal", .fill = elmz.Fill.hgrad(a, b) },
+            .{ .name = "diagonal 45", .fill = elmz.Fill.angled(45, a, b) },
+            .{ .name = "diagonal 115", .fill = elmz.Fill.angled(115, a, b) },
+            .{ .name = "radial", .fill = elmz.Fill.radialFill(a, b) },
+        };
+        try out.print("\n  640x480 full-canvas fill, {d} passes each\n", .{iters});
+        try out.print("  variant        ms/pass   ns/px   vs solid\n", .{});
+        var solid_ns: f64 = 0;
+        for (cases, 0..) |cs, i| {
+            const t = measureFill(io, &fc, cs.fill, iters);
+            const nspx = @as(f64, @floatFromInt(t)) / area;
+            if (i == 0) solid_ns = nspx;
+            const ratio = if (solid_ns > 0) nspx / solid_ns else 0;
+            try out.print("  {s:<12} {d:>8.3}  {d:>5.2}   {d:>5.2}x\n", .{
+                cs.name,
+                @as(f64, @floatFromInt(t)) / 1e6,
+                nspx,
+                ratio,
+            });
+        }
+    }
+
+    // -- halo: distance field or baked stencil -----------------------------
+    // The crossover is a constant in the renderer, so it needs a number under
+    // it. Below the crossover the field wins because a bake is an allocation
+    // and a full second silhouette; above it the field is quadratic in blur
+    // while a blit is flat.
+    {
+        try out.print("\n  halo, 200x120 at radius 8    (cold = bake, hot = blit)\n", .{});
+        try out.print("  blur    sdf hot   baked cold   baked hot\n", .{});
+        const col = elmz.Color{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 120 };
+        for ([_]f32{ 4, 8, 10, 16, 24, 40 }) |blur| {
+            const base = elmz.Halo{ .color = col, .blur = blur, .mode = .glow };
+            const s = try measureHalo(io, gpa, .{ .color = base.color, .blur = base.blur, .mode = base.mode, .quality = .sdf }, 200, 120, 20);
+            const bk = try measureHalo(io, gpa, .{ .color = base.color, .blur = base.blur, .mode = base.mode, .quality = .baked }, 200, 120, 20);
+            try out.print("  {d:>4.0}   {d:>7.1}us   {d:>9.1}us  {d:>9.1}us\n", .{
+                blur,
+                @as(f64, @floatFromInt(s.hot)) / 1000,
+                @as(f64, @floatFromInt(bk.cold)) / 1000,
+                @as(f64, @floatFromInt(bk.hot)) / 1000,
+            });
+        }
+    }
+
+    // -- halo: does slicing hold up as the silhouette grows? ----------------
+    // A full bake scales with AREA; a sliced one scales with the same area for
+    // the blit but only a fixed square for the bake. This sweep is what decides
+    // whether the distance field should stay the default anywhere above the
+    // crossover.
+    {
+        try out.print("\n  halo, blur 24, radius 8, by silhouette   (stencils = entries kept)\n", .{});
+        try out.print("  size          sdf hot   baked cold   baked hot  stencils\n", .{});
+        const col = elmz.Color{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 120 };
+        const sizes = [_][2]f32{ .{ 200, 120 }, .{ 640, 120 }, .{ 1280, 200 }, .{ 1440, 300 } };
+        for (sizes) |sz| {
+            const base = elmz.Halo{ .color = col, .blur = 24, .mode = .glow };
+            const s = try measureHalo(io, gpa, .{ .color = base.color, .blur = base.blur, .mode = base.mode, .quality = .sdf }, sz[0], sz[1], 10);
+            const bk = try measureHalo(io, gpa, .{ .color = base.color, .blur = base.blur, .mode = base.mode, .quality = .baked }, sz[0], sz[1], 10);
+            try out.print("  {d:>4.0}x{d:<4.0}   {d:>7.1}us   {d:>9.1}us  {d:>9.1}us  {d:>6}\n", .{
+                sz[0],
+                sz[1],
+                @as(f64, @floatFromInt(s.hot)) / 1000,
+                @as(f64, @floatFromInt(bk.cold)) / 1000,
+                @as(f64, @floatFromInt(bk.hot)) / 1000,
+                bk.stencils,
+            });
+        }
+    }
     try out.flush();
 }

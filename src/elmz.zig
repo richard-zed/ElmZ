@@ -73,6 +73,20 @@ pub const Stops = struct {
 
     /// Sample at `t`. Flat outside the end stops (every toolkit does this), so
     /// a rect taller than its axis does not snap to an edge colour.
+    /// The two-stop ramp, without the loop or the span division that `at`
+    /// needs to stay general. Almost every gradient in a UI is exactly two
+    /// stops at 0 and 1, and this is called once per PIXEL, so the general
+    /// lookup's `while` and its divide are not affordable there.
+    ///
+    /// Identical output to `at` for that shape: `at` computes
+    /// `(t - 0) / 1` for a two-stop ramp, which is `t`.
+    pub fn atFast(self: Stops, t: f32) Color {
+        if (self.n == 2 and self.items[0].at <= 0 and self.items[1].at >= 1) {
+            return mix(self.items[0].color, self.items[1].color, std.math.clamp(t, 0, 1));
+        }
+        return self.at(std.math.clamp(t, 0, 1));
+    }
+
     pub fn at(self: Stops, t: f32) Color {
         if (self.n == 0) return .{ .r = 0, .g = 0, .b = 0 };
         if (t <= self.items[0].at) return self.items[0].color;
@@ -93,6 +107,20 @@ pub const Stops = struct {
     /// fade. Costs one divide per sampled pixel.
     fn mix(a: Color, b: Color, u: f32) Color {
         const t = std.math.clamp(u, 0, 1);
+        // Two opaque endpoints mix to an opaque colour, and saying so skips
+        // the premultiply, the reciprocal and the unpremultiply below. It also
+        // keeps the result's alpha at exactly 255, which is what lets the
+        // rasteriser take its store path instead of its blend path -- a fact
+        // worth three lines, because that is the difference between a 1x fill
+        // and a 20x one.
+        if (a.a == 255 and b.a == 255) {
+            return .{
+                .r = clamp255(@as(f32, @floatFromInt(a.r)) + (@as(f32, @floatFromInt(b.r)) - @as(f32, @floatFromInt(a.r))) * t),
+                .g = clamp255(@as(f32, @floatFromInt(a.g)) + (@as(f32, @floatFromInt(b.g)) - @as(f32, @floatFromInt(a.g))) * t),
+                .b = clamp255(@as(f32, @floatFromInt(a.b)) + (@as(f32, @floatFromInt(b.b)) - @as(f32, @floatFromInt(a.b))) * t),
+                .a = 255,
+            };
+        }
         const aa: f32 = @as(f32, @floatFromInt(a.a)) / 255.0;
         const ba: f32 = @as(f32, @floatFromInt(b.a)) / 255.0;
         const oa = aa + (ba - aa) * t;

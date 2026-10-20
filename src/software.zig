@@ -28,13 +28,17 @@ pub const Canvas = struct {
     pub const sdf_crossover: f32 = 10;
 
     const Mask = struct {
+        /// Shape size this stencil was baked at. `sw == 0` marks a SLICE
+        /// TEMPLATE, which stands in for every size at its radius and blur.
         sw: i32,
         sh: i32,
         r: f32,
         blur: f32,
+        /// Template only: width of the corner band, in pixels.
+        corner: u32 = 0,
         rw: u32,
         rh: u32,
-        px: []u8, // coverage, one byte per pixel
+        px: []u8 = &.{}, // coverage, one byte per pixel; set by `admit`
     };
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
@@ -65,6 +69,16 @@ pub const Canvas = struct {
         const uy: u32 = @intCast(y);
         if (ux >= self.w or uy >= self.h) return;
         const i = (@as(usize, uy) * self.w + ux) * 4;
+        // Opaque is not a special case for correctness -- src-over with a=255
+        // is an identity -- it is a special case for TIME: it is what nearly
+        // every pixel in a UI does, and discovering the identity costs four
+        // float conversions and a divide per pixel.
+        if (color.a == 255) {
+            self.px[i + 0] = color.r;
+            self.px[i + 1] = color.g;
+            self.px[i + 2] = color.b;
+            return;
+        }
         const a: f32 = @as(f32, @floatFromInt(color.a)) / 255.0;
         const dst_r: f32 = @floatFromInt(self.px[i + 0]);
         const dst_g: f32 = @floatFromInt(self.px[i + 1]);
@@ -72,6 +86,37 @@ pub const Canvas = struct {
         self.px[i + 0] = @intFromFloat(@as(f32, @floatFromInt(color.r)) * a + dst_r * (1 - a));
         self.px[i + 1] = @intFromFloat(@as(f32, @floatFromInt(color.g)) * a + dst_g * (1 - a));
         self.px[i + 2] = @intFromFloat(@as(f32, @floatFromInt(color.b)) * a + dst_b * (1 - a));
+    }
+
+    /// One scanline in one colour. The blend coefficients are hoisted out of
+    /// the loop, which is the whole point of a row fill: the source colour is
+    /// constant along the row, so converting it to float 640 times was 640
+    /// times too many.
+    fn fillRow(self: *Self, x0: i64, x1: i64, y: u32, color: elmz.Color) void {
+        if (color.a == 0) return;
+        const row = @as(usize, y) * self.w;
+        var x: usize = @intCast(x0);
+        const end: usize = @intCast(x1);
+        if (color.a == 255) {
+            while (x < end) : (x += 1) {
+                const i = (row + x) * 4;
+                self.px[i + 0] = color.r;
+                self.px[i + 1] = color.g;
+                self.px[i + 2] = color.b;
+            }
+            return;
+        }
+        const a: f32 = @as(f32, @floatFromInt(color.a)) / 255.0;
+        const inv = 1.0 - a;
+        const sr = @as(f32, @floatFromInt(color.r)) * a;
+        const sg = @as(f32, @floatFromInt(color.g)) * a;
+        const sb = @as(f32, @floatFromInt(color.b)) * a;
+        while (x < end) : (x += 1) {
+            const i = (row + x) * 4;
+            self.px[i + 0] = @intFromFloat(sr + @as(f32, @floatFromInt(self.px[i + 0])) * inv);
+            self.px[i + 1] = @intFromFloat(sg + @as(f32, @floatFromInt(self.px[i + 1])) * inv);
+            self.px[i + 2] = @intFromFloat(sb + @as(f32, @floatFromInt(self.px[i + 2])) * inv);
+        }
     }
 
     const Span = struct { x0: i64, y0: i64, x1: i64, y1: i64 };
@@ -106,50 +151,139 @@ pub const Canvas = struct {
 
     pub fn fillRectClip(self: *Self, rect: elmz.Rect, fill: elmz.Fill, clip: elmz.Rect) void {
         const sp = self.clipSpan(rect, clip) orelse return;
-        var y = sp.y0;
         switch (fill) {
             // The solid case hoists the colour out of the loop entirely: this
             // is still the path every plain background takes, and it must not
             // pay for gradients existing.
             .solid => |c| {
-                if (c.a == 0) return;
-                while (y < sp.y1) : (y += 1) {
-                    var x = sp.x0;
-                    while (x < sp.x1) : (x += 1) self.blendPixel(x, y, c);
-                }
+                var y = sp.y0;
+                while (y < sp.y1) : (y += 1) self.fillRow(sp.x0, sp.x1, @intCast(y), c);
             },
+
+            // A linear ramp is AFFINE in x and y, so every geometric term in
+            // the projection is constant for the whole fill. Deriving them
+            // once -- including the reciprocal of the axis length -- is what
+            // separates a 20x fill from a 1x one. The old path rebuilt the
+            // axis, the length and the whole projection on every pixel.
             .linear => |g| {
-                // A purely vertical axis makes the colour constant along every
-                // scanline, so it is sampled once per ROW rather than per
-                // pixel -- the row-wide fill survives untouched.
-                if (g.to[1] != g.from[1] and g.to[0] == g.from[0]) {
-                    const xm: f32 = @floatFromInt(sp.x0);
-                    while (y < sp.y1) : (y += 1) {
-                        const c = fill.colorAt(rect, xm, @as(f32, @floatFromInt(y)) + 0.5);
-                        if (c.a == 0) continue;
-                        var x = sp.x0;
-                        while (x < sp.x1) : (x += 1) self.blendPixel(x, y, c);
+                const ax = rect.x + g.from[0] * rect.w;
+                const ay = rect.y + g.from[1] * rect.h;
+                const dx = (rect.x + g.to[0] * rect.w) - ax;
+                const dy = (rect.y + g.to[1] * rect.h) - ay;
+                const len2 = dx * dx + dy * dy;
+                if (!(len2 > 0)) {
+                    const c = g.stops.at(0);
+                    var y = sp.y0;
+                    while (y < sp.y1) : (y += 1) self.fillRow(sp.x0, sp.x1, @intCast(y), c);
+                    return;
+                }
+                const inv = 1.0 / len2;
+                const step = dx * inv; // dt per pixel along x
+                const xm = @as(f32, @floatFromInt(sp.x0)) + 0.5;
+                var y = sp.y0;
+                if (dy == 0) {
+                    // Horizontal: the colour depends on x ONLY, so the row of
+                    // colours is the same on every scanline. Build it once per
+                    // band of columns and replay it -- the ramp becomes a row
+                    // fill, which is what makes it cost the same as a solid.
+                    const band: i64 = 512;
+                    var xs = sp.x0;
+                    while (xs < sp.x1) {
+                        const xe = @min(sp.x1, xs + band);
+                        const n: usize = @intCast(xe - xs);
+                        var lut: [512]elmz.Color = undefined;
+                        var tt = ((@as(f32, @floatFromInt(xs)) + 0.5 - ax) * dx) * inv;
+                        var i: usize = 0;
+                        while (i < n) : (i += 1) {
+                            lut[i] = g.stops.atFast(tt);
+                            tt += step;
+                        }
+                        var yy = sp.y0;
+                        while (yy < sp.y1) : (yy += 1) {
+                            const row = (@as(usize, @intCast(yy)) * self.w + @as(usize, @intCast(xs))) * 4;
+                            var j: usize = 0;
+                            var off = row;
+                            while (j < n) : (j += 1) {
+                                const c = lut[j];
+                                if (c.a == 255) {
+                                    self.px[off + 0] = c.r;
+                                    self.px[off + 1] = c.g;
+                                    self.px[off + 2] = c.b;
+                                } else {
+                                    self.blendPixel(xs + @as(i64, @intCast(j)), yy, c);
+                                }
+                                off += 4;
+                            }
+                        }
+                        xs = xe;
                     }
-                } else {
+                    return;
+                }
+                if (dx == 0) {
+                    // Constant along the scanline, so it is sampled once per
+                    // ROW and the row fill does the rest. This is the case that
+                    // made vertical gradients free and horizontal ones 20x.
                     while (y < sp.y1) : (y += 1) {
                         const ym = @as(f32, @floatFromInt(y)) + 0.5;
-                        var x = sp.x0;
-                        while (x < sp.x1) : (x += 1) {
-                            const c = fill.colorAt(rect, @as(f32, @floatFromInt(x)) + 0.5, ym);
-                            if (c.a == 0) continue;
+                        const t = ((xm - ax) * dx + (ym - ay) * dy) * inv;
+                        self.fillRow(sp.x0, sp.x1, @intCast(y), g.stops.atFast(t));
+                    }
+                    return;
+                }
+                while (y < sp.y1) : (y += 1) {
+                    const ym = @as(f32, @floatFromInt(y)) + 0.5;
+                    // No multiply and no divide inside the row: `t` advances
+                    // by a constant. Error over a scanline is under 1e-5,
+                    // which is three orders below one unit of 8-bit colour.
+                    var t = ((xm - ax) * dx + (ym - ay) * dy) * inv;
+                    const row = @as(usize, @intCast(y)) * self.w;
+                    var x = sp.x0;
+                    var off = (row + @as(usize, @intCast(sp.x0))) * 4;
+                    while (x < sp.x1) : (x += 1) {
+                        const c = g.stops.atFast(t);
+                        if (c.a == 255) {
+                            self.px[off + 0] = c.r;
+                            self.px[off + 1] = c.g;
+                            self.px[off + 2] = c.b;
+                        } else {
                             self.blendPixel(x, y, c);
                         }
+                        off += 4;
+                        t += step;
                     }
                 }
             },
-            .radial => {
+
+            .radial => |g| {
+                const cx = rect.x + g.center[0] * rect.w;
+                const cy = rect.y + g.center[1] * rect.h;
+                const r = g.radius * rect.w;
+                var y = sp.y0;
+                if (!(r > 0)) {
+                    const c = g.stops.at(1);
+                    while (y < sp.y1) : (y += 1) self.fillRow(sp.x0, sp.x1, @intCast(y), c);
+                    return;
+                }
+                // Still a square root per pixel -- that is what a radial ramp
+                // is -- but the centre and the reciprocal of the radius are
+                // fixed, so only the distance changes.
+                const inv = 1.0 / r;
                 while (y < sp.y1) : (y += 1) {
-                    const ym = @as(f32, @floatFromInt(y)) + 0.5;
+                    const dyv = (@as(f32, @floatFromInt(y)) + 0.5) - cy;
+                    const row = @as(usize, @intCast(y)) * self.w;
                     var x = sp.x0;
+                    var off = (row + @as(usize, @intCast(sp.x0))) * 4;
                     while (x < sp.x1) : (x += 1) {
-                        const c = fill.colorAt(rect, @as(f32, @floatFromInt(x)) + 0.5, ym);
-                        if (c.a == 0) continue;
-                        self.blendPixel(x, y, c);
+                        const dxv = (@as(f32, @floatFromInt(x)) + 0.5) - cx;
+                        const c = g.stops.atFast(@sqrt(dxv * dxv + dyv * dyv) * inv);
+                        if (c.a == 255) {
+                            self.px[off + 0] = c.r;
+                            self.px[off + 1] = c.g;
+                            self.px[off + 2] = c.b;
+                        } else {
+                            self.blendPixel(x, y, c);
+                        }
+                        off += 4;
                     }
                 }
             },
@@ -401,33 +535,64 @@ pub const Canvas = struct {
         };
         if (shape.w <= 0 or shape.h <= 0) return;
         const r = @min(@max(corner + h.spread, 0), @min(shape.w, shape.h) * 0.5);
-        const m = self.maskFor(
-            @intFromFloat(@round(shape.w)),
-            @intFromFloat(@round(shape.h)),
-            r,
-            blur,
-        ) orelse return self.haloSdf(rect, corner, h, clip);
+        const swi: i32 = @intFromFloat(@round(shape.w));
+        const shi: i32 = @intFromFloat(@round(shape.h));
+        const m = self.maskFor(swi, shi, r, blur) orelse return self.haloSdf(rect, corner, h, clip);
 
         const grow = blur * 0.5 + 1;
+        // A template describes any size, so the target ring is computed here;
+        // a whole stencil already knows how big it is.
+        const rw: u32 = if (m.sw == 0)
+            @intFromFloat(@ceil(@as(f32, @floatFromInt(swi)) + grow * 2))
+        else
+            m.rw;
+        const rh: u32 = if (m.sw == 0)
+            @intFromFloat(@ceil(@as(f32, @floatFromInt(shi)) + grow * 2))
+        else
+            m.rh;
+
         const ox: i64 = @intFromFloat(@round(shape.x - grow));
         const oy: i64 = @intFromFloat(@round(shape.y - grow));
         const ring = elmz.Rect{
             .x = @floatFromInt(ox),
             .y = @floatFromInt(oy),
-            .w = @floatFromInt(m.rw),
-            .h = @floatFromInt(m.rh),
+            .w = @floatFromInt(rw),
+            .h = @floatFromInt(rh),
         };
         const sp = self.clipSpan(ring, clip) orelse return;
 
+        const sliced = m.sw == 0;
+        const c = m.corner;
         var y = sp.y0;
         while (y < sp.y1) : (y += 1) {
             const j = y - oy;
-            if (j < 0 or j >= m.rh) continue;
+            if (j < 0 or j >= rh) continue;
+            const uj: u32 = @intCast(j);
+            // Rows inside the corner band are copied; the band between them is
+            // one stretched row, which is the middle row of the template.
+            const sj: u32 = if (!sliced)
+                uj
+            else if (uj < c)
+                uj
+            else if (uj >= rh - c)
+                m.rh - 1 - (rh - 1 - uj)
+            else
+                c;
+            const row = m.px[@as(usize, sj) * m.rw ..][0..m.rw];
             var x = sp.x0;
             while (x < sp.x1) : (x += 1) {
                 const i = x - ox;
-                if (i < 0 or i >= m.rw) continue;
-                const a = m.px[@as(usize, @intCast(j)) * m.rw + @as(usize, @intCast(i))];
+                if (i < 0 or i >= rw) continue;
+                const ui: u32 = @intCast(i);
+                const si: u32 = if (!sliced)
+                    ui
+                else if (ui < c)
+                    ui
+                else if (ui >= rw - c)
+                    m.rw - 1 - (rw - 1 - ui)
+                else
+                    c;
+                const a = row[si];
                 if (a == 0) continue;
                 self.blendCoverage(x, y, h.color, @as(f32, @floatFromInt(a)) / 255.0);
             }
@@ -436,23 +601,73 @@ pub const Canvas = struct {
 
     /// The stencil for one silhouette, built on first use and kept.
     ///
-    /// COST NOTE: the mask is full size, not 9-sliced. Slicing is what makes a
-    /// huge blurred panel cheap; without it a bake saves the per-frame distance
-    /// math but not the area. Slicing needs the centre and the four edges kept
-    /// separately, so it is a second data shape, not a flag on this one.
+    /// Large silhouettes get a 9-SLICE TEMPLATE instead of a full mask. The
+    /// coverage at the middle of an edge depends only on the distance from
+    /// that edge, and the interior is solid, so one small square describes
+    /// every size at a given radius and blur. `w` and `h` therefore drop out of
+    /// the key -- which is the real prize: a view full of differently-sized
+    /// glowing rows used to evict every mask every frame and bake forever.
+    /// Memory is the side effect, not the point.
+    ///
+    /// Silhouettes too small to slice still get a full bake, so the cache holds
+    /// two shapes of entry.
     fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32) ?*Mask {
+        if (sw <= 0 or sh <= 0) return null;
+        const grow = blur * 0.5 + 1;
+        const corner: u32 = @intFromFloat(@ceil(grow + r) + 1);
+
+        if (sw >= @as(i32, @intCast(corner * 2)) and sh >= @as(i32, @intCast(corner * 2))) {
+            for (self.masks.items) |*m| {
+                if (m.sw == 0 and m.r == r and m.blur == blur and m.corner == corner) return m;
+            }
+            // The template is a bake of a shape exactly large enough that its
+            // two corner bands meet and the middle is the solid interior.
+            const tsw: i32 = @intCast(corner * 2 + 1);
+            const rw: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(tsw)) + grow * 2));
+            if (@as(u64, rw) * @as(u64, rw) > 4_000_000) return null;
+            const px = self.gpa.alloc(u8, @as(usize, rw) * rw) catch return null;
+            bakeStencil(px, rw, rw, tsw, tsw, r, blur, grow);
+            return self.admit(px, .{ .sw = 0, .sh = 0, .r = r, .blur = blur, .corner = corner, .rw = rw, .rh = rw });
+        }
+
         for (self.masks.items) |*m| {
             if (m.sw == sw and m.sh == sh and m.r == r and m.blur == blur) return m;
         }
-        if (sw <= 0 or sh <= 0) return null;
-        const grow = blur * 0.5 + 1;
-        const rw_f = @as(f32, @floatFromInt(sw)) + grow * 2;
-        const rh_f = @as(f32, @floatFromInt(sh)) + grow * 2;
-        const rw: u32 = @intFromFloat(@ceil(rw_f));
-        const rh: u32 = @intFromFloat(@ceil(rh_f));
+        const rw: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(sw)) + grow * 2));
+        const rh: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(sh)) + grow * 2));
         if (@as(u64, rw) * @as(u64, rh) > 4_000_000) return null;
         const px = self.gpa.alloc(u8, @as(usize, rw) * rh) catch return null;
+        bakeStencil(px, rw, rh, sw, sh, r, blur, grow);
+        return self.admit(px, .{ .sw = sw, .sh = sh, .r = r, .blur = blur, .rw = rw, .rh = rh });
+    }
 
+    /// Install a baked stencil, evicting the eldest when the cache is full.
+    fn admit(self: *Self, px: []u8, entry: Mask) ?*Mask {
+        if (self.masks.items.len >= 8) {
+            const old = self.masks.orderedRemove(0);
+            self.gpa.free(old.px);
+        }
+        self.masks.append(self.gpa, .{
+            .sw = entry.sw,
+            .sh = entry.sh,
+            .r = entry.r,
+            .blur = entry.blur,
+            .corner = entry.corner,
+            .rw = entry.rw,
+            .rh = entry.rh,
+            .px = px,
+        }) catch {
+            self.gpa.free(px);
+            return null;
+        };
+        return &self.masks.items[self.masks.items.len - 1];
+    }
+
+    /// Coverage of one rounded-rect silhouette grown by `grow` on every side,
+    /// into a `rw` x `rh` buffer. The shape's own top-left lands at
+    /// (grow, grow), which is what lets a template's corner band be copied
+    /// straight out at any target size.
+    fn bakeStencil(px: []u8, rw: u32, rh: u32, sw: i32, sh: i32, r: f32, blur: f32, grow: f32) void {
         const hx = @as(f32, @floatFromInt(sw)) * 0.5 - r;
         const hy = @as(f32, @floatFromInt(sh)) * 0.5 - r;
         const cx = grow + @as(f32, @floatFromInt(sw)) * 0.5;
@@ -475,16 +690,6 @@ pub const Canvas = struct {
                 px[@as(usize, j) * rw + i] = @intFromFloat(cov * 255.0 + 0.5);
             }
         }
-
-        if (self.masks.items.len >= 8) {
-            const old = self.masks.orderedRemove(0);
-            self.gpa.free(old.px);
-        }
-        self.masks.append(self.gpa, .{ .sw = sw, .sh = sh, .r = r, .blur = blur, .rw = rw, .rh = rh, .px = px }) catch {
-            self.gpa.free(px);
-            return null;
-        };
-        return &self.masks.items[self.masks.items.len - 1];
     }
 
     /// True when every pixel in a row of RGBA bytes is fully opaque.
@@ -1204,6 +1409,67 @@ test "the baked stencil and the distance field agree" {
 
     // Same silhouette, two renderers of it. Quantising coverage to a byte is
     // the only licence to differ, so anything past rounding is a real drift.
+    var worst: u32 = 0;
+    var off: usize = 0;
+    for (a.px, b.px) |x, y| {
+        const d = @abs(@as(i32, x) - @as(i32, y));
+        if (d > worst) worst = d;
+        if (d > 2) off += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), off);
+    try std.testing.expect(worst <= 2);
+}
+test "nine slices: differently sized silhouettes share a single stencil" {
+    var c = try Canvas.init(std.testing.allocator, 700, 320);
+    defer c.deinit();
+    c.clear(elmz.Color{ .r = 18, .g = 18, .b = 22, .a = 255 });
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 700, .h = 320 };
+    const color = elmz.Color{ .r = 120, .g = 200, .b = 255, .a = 200 };
+
+    // Three widths, one radius and blur. Before slicing these were three
+    // stencils, and a view with a hundred glowing rows baked all hundred --
+    // every frame, since eight entries cannot hold a hundred sizes.
+    const widths = [_]f32{ 120, 260, 420 };
+    for (widths, 0..) |w, i| {
+        c.halo(.{
+            .x = 20,
+            .y = 20 + @as(f32, @floatFromInt(i)) * 80,
+            .w = w,
+            .h = 50,
+        }, 8, .{ .color = color, .blur = 26, .mode = .glow, .quality = .baked }, clip);
+    }
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    try std.testing.expectEqual(@as(i32, 0), c.masks.items[0].sw);
+
+    // A silhouette smaller than two corner bands cannot be sliced -- the
+    // corners would overlap -- so it keeps a full bake of its own.
+    c.halo(.{ .x = 20, .y = 260, .w = 12, .h = 12 }, 8, .{ .color = color, .blur = 26, .mode = .glow, .quality = .baked }, clip);
+    try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
+    try std.testing.expect(c.masks.items[1].sw > 0);
+}
+
+test "a stretched stencil still agrees with the distance field when large" {
+    var a = try Canvas.init(std.testing.allocator, 520, 300);
+    defer a.deinit();
+    var b = try Canvas.init(std.testing.allocator, 520, 300);
+    defer b.deinit();
+    a.clear(elmz.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
+    b.clear(elmz.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
+
+    // Long edges, so the middle of each edge is stretched far past the baked
+    // corner -- the part of a 9-slice that is actually an approximation.
+    const rect = elmz.Rect{ .x = 60, .y = 90, .w = 380, .h = 110 };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 520, .h = 300 };
+    const h = elmz.Halo{
+        .color = .{ .r = 255, .g = 190, .b = 90, .a = 210 },
+        .blur = 30,
+        .spread = 3,
+        .offset = .{ 0, 8 },
+        .mode = .shadow,
+    };
+    a.halo(rect, 14, .{ .color = h.color, .blur = h.blur, .spread = h.spread, .offset = h.offset, .mode = h.mode, .quality = .sdf }, clip);
+    b.halo(rect, 14, .{ .color = h.color, .blur = h.blur, .spread = h.spread, .offset = h.offset, .mode = h.mode, .quality = .baked }, clip);
+
     var worst: u32 = 0;
     var off: usize = 0;
     for (a.px, b.px) |x, y| {

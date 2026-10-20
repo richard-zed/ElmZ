@@ -192,6 +192,23 @@ pub fn build(b: *std.Build) void {
     const paint_exe_install = b.addInstallArtifact(paint_exe, .{});
     b.getInstallStep().dependOn(&paint_exe_install.step);
     b.step("paint", "build the headless fills render").dependOn(&paint_exe_install.step);
+    const overlay_exe = b.addExecutable(.{
+        .name = "overlay",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/overlay.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+            },
+        }),
+    });
+    const overlay_exe_install = b.addInstallArtifact(overlay_exe, .{});
+    b.getInstallStep().dependOn(&overlay_exe_install.step);
+    b.step("overlay", "build the debug overlay render (headless)").dependOn(&overlay_exe_install.step);
+
     const bench_exe = b.addExecutable(.{
         .name = "bench",
         .root_module = b.createModule(.{
@@ -213,6 +230,9 @@ pub fn build(b: *std.Build) void {
 
     b.step("run-paint", "render gradient fills to paint.png (headless)").dependOn(
         &runExample(b, paint_exe).step,
+    );
+    b.step("run-overlay", "render the debug overlay to overlay.png (headless)").dependOn(
+        &runExample(b, overlay_exe).step,
     );
 
     const showcase_exe = b.addExecutable(.{
