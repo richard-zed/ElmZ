@@ -190,6 +190,12 @@ pub const Canvas = struct {
             self.px[i + 0] = color.r;
             self.px[i + 1] = color.g;
             self.px[i + 2] = color.b;
+            // Alpha is written here too, and it is not decoration: src-over onto
+            // a cleared canvas leaves the destination at 0 when the source only
+            // covers it partly, so an entire frame painted with opaque colours
+            // would export as a fully TRANSPARENT PNG -- correct RGB, invisible
+            // everywhere except a test that compares channels.
+            self.px[i + 3] = 255;
             return;
         }
         const a: f32 = @as(f32, @floatFromInt(color.a)) / 255.0;
@@ -216,6 +222,7 @@ pub const Canvas = struct {
                 self.px[i + 0] = color.r;
                 self.px[i + 1] = color.g;
                 self.px[i + 2] = color.b;
+                self.px[i + 3] = 255;
             }
             return;
         }
@@ -1256,7 +1263,10 @@ test "a quad larger than the canvas is clipped, not corrupting" {
     while (i < c.px.len) : (i += 4) {
         try testing.expectEqual(@as(u8, 9), c.px[i]);
         try testing.expectEqual(@as(u8, 9), c.px[i + 2]);
-        try testing.expectEqual(@as(u8, 0), c.px[i + 3]); // alpha untouched
+        // Alpha is NOT untouched: an opaque quad makes the canvas opaque. This
+        // assertion used to read 0, which recorded the bug -- a frame painted
+        // entirely with opaque colours exported as a fully transparent PNG.
+        try testing.expectEqual(@as(u8, 255), c.px[i + 3]);
     }
 }
 
@@ -1893,4 +1903,33 @@ test "a light source throws the ramp further on the away side" {
     try std.testing.expect(wb > ob);
     try std.testing.expect(wa < oa);
     try std.testing.expect(wb > wa);
+}
+
+test "a frame painted with opaque colours exports an opaque alpha channel" {
+    // The failure this catches is invisible to every other test: RGB is correct,
+    // and the PNG is a fully transparent image that renders black everywhere.
+    // src-over onto a cleared canvas leaves the destination alpha at 0 unless the
+    // opaque path writes it, so a frame made only of opaque fills exports as
+    // nothing at all.
+    const gpa = std.testing.allocator;
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 32, .h = 24 };
+    var c = try Canvas.init(gpa, 32, 24);
+    defer c.deinit();
+    const r = c.renderer();
+
+    r.quad(clip, .{ .solid = elmz.Color.rgbHex(0x1e1e2e) }, clip);
+    // Both opaque paths: the row fill above, a per-pixel blend here.
+    r.halo(.{ .x = 8, .y = 6, .w = 12, .h = 10 }, 3, .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 255 }, .blur = 2, .mode = .glow }, clip);
+
+    for (0..24) |y| {
+        for (0..32) |x| {
+            const a = c.px[(y * 32 + x) * 4 + 3];
+            try std.testing.expectEqual(@as(u8, 255), a);
+        }
+    }
+
+    // A translucent fill over the opaque result must not un-opaque it: src-over
+    // onto alpha 255 stays 255.
+    r.quad(clip, .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 128 } }, clip);
+    try std.testing.expectEqual(@as(u8, 255), c.px[(5 * 32 + 5) * 4 + 3]);
 }
