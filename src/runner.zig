@@ -312,6 +312,13 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     // and its `.app` section is then parsed and checked against it. Without it
     // there is no tier and a file writing one is told so, which is the whole
     // point of declaring.
+    //
+    // What this does NOT do is hand the values back. Declaring `theme_tokens`
+    // buys validation, not delivery: `run` passes `.app` through unread, so an
+    // app that wants the numbers resolves the chain itself (see
+    // `resolveChain`). Stated here because the declaration reads as though the
+    // runner would deliver them, and two resolutions of one file are worth
+    // knowing about before you write the second one.
     const Tokens = if (@hasField(@TypeOf(app), "theme_tokens")) app.theme_tokens else struct {};
 
     return run(Tokens, S, M, &rt, &canvas, window, opts);

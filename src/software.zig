@@ -16,6 +16,27 @@ pub const Canvas = struct {
     h: u32,
     px: []u8, // RGBA8
 
+    /// A baked halo is a stencil: coverage per pixel for one silhouette, tinted
+    /// at blit. Keyed on geometry only, so changing a halo's colour never
+    /// invalidates it -- which is the entire reason to bake rather than ramp
+    /// the distance field every frame.
+    masks: std.ArrayListUnmanaged(Mask) = .empty,
+
+    /// Below this blur the distance field is cheaper than a mask: the ramp has
+    /// few pixels left to cache, and baking would cost more than it saves.
+    /// Only `.auto` consults it -- an explicit `quality` overrules it.
+    pub const sdf_crossover: f32 = 10;
+
+    const Mask = struct {
+        sw: i32,
+        sh: i32,
+        r: f32,
+        blur: f32,
+        rw: u32,
+        rh: u32,
+        px: []u8, // coverage, one byte per pixel
+    };
+
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
         @memset(px, 0);
@@ -23,6 +44,8 @@ pub const Canvas = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        for (self.masks.items) |m| self.gpa.free(m.px);
+        self.masks.deinit(self.gpa);
         self.gpa.free(self.px);
     }
 
@@ -254,6 +277,19 @@ pub const Canvas = struct {
     /// circumference rather than to the area it wraps.
     pub fn halo(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         if (h.color.a == 0) return;
+        // Explicit beats the heuristic. A quality setting the library can
+        // second-guess is not an escape hatch, so `.auto` is the only mode the
+        // crossover is allowed to tune.
+        const use_sdf = switch (h.quality) {
+            .sdf => true,
+            .baked => false,
+            .auto => h.blur < sdf_crossover,
+        };
+        if (use_sdf) return self.haloSdf(rect, corner, h, clip);
+        self.haloBaked(rect, corner, h, clip);
+    }
+
+    fn haloSdf(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         const blur = @max(h.blur, 0);
         // The silhouette the ramp runs away from, after spread and offset.
         const shape = elmz.Rect{
@@ -348,6 +384,107 @@ pub const Canvas = struct {
                 composite(drow[o..][0..4], srow[o..][0..4]);
             }
         }
+    }
+
+    /// Baked path: same ramp, sampled from a stencil instead of computed.
+    ///
+    /// The stencil is built in the shape's own space, so `offset` moves the
+    /// blit and never the bake. A silhouette that would need an absurd mask
+    /// falls back to the distance field rather than allocating it.
+    fn haloBaked(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+        const blur = @max(h.blur, 0);
+        const shape = elmz.Rect{
+            .x = rect.x + h.offset[0] - h.spread,
+            .y = rect.y + h.offset[1] - h.spread,
+            .w = rect.w + h.spread * 2,
+            .h = rect.h + h.spread * 2,
+        };
+        if (shape.w <= 0 or shape.h <= 0) return;
+        const r = @min(@max(corner + h.spread, 0), @min(shape.w, shape.h) * 0.5);
+        const m = self.maskFor(
+            @intFromFloat(@round(shape.w)),
+            @intFromFloat(@round(shape.h)),
+            r,
+            blur,
+        ) orelse return self.haloSdf(rect, corner, h, clip);
+
+        const grow = blur * 0.5 + 1;
+        const ox: i64 = @intFromFloat(@round(shape.x - grow));
+        const oy: i64 = @intFromFloat(@round(shape.y - grow));
+        const ring = elmz.Rect{
+            .x = @floatFromInt(ox),
+            .y = @floatFromInt(oy),
+            .w = @floatFromInt(m.rw),
+            .h = @floatFromInt(m.rh),
+        };
+        const sp = self.clipSpan(ring, clip) orelse return;
+
+        var y = sp.y0;
+        while (y < sp.y1) : (y += 1) {
+            const j = y - oy;
+            if (j < 0 or j >= m.rh) continue;
+            var x = sp.x0;
+            while (x < sp.x1) : (x += 1) {
+                const i = x - ox;
+                if (i < 0 or i >= m.rw) continue;
+                const a = m.px[@as(usize, @intCast(j)) * m.rw + @as(usize, @intCast(i))];
+                if (a == 0) continue;
+                self.blendCoverage(x, y, h.color, @as(f32, @floatFromInt(a)) / 255.0);
+            }
+        }
+    }
+
+    /// The stencil for one silhouette, built on first use and kept.
+    ///
+    /// COST NOTE: the mask is full size, not 9-sliced. Slicing is what makes a
+    /// huge blurred panel cheap; without it a bake saves the per-frame distance
+    /// math but not the area. Slicing needs the centre and the four edges kept
+    /// separately, so it is a second data shape, not a flag on this one.
+    fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32) ?*Mask {
+        for (self.masks.items) |*m| {
+            if (m.sw == sw and m.sh == sh and m.r == r and m.blur == blur) return m;
+        }
+        if (sw <= 0 or sh <= 0) return null;
+        const grow = blur * 0.5 + 1;
+        const rw_f = @as(f32, @floatFromInt(sw)) + grow * 2;
+        const rh_f = @as(f32, @floatFromInt(sh)) + grow * 2;
+        const rw: u32 = @intFromFloat(@ceil(rw_f));
+        const rh: u32 = @intFromFloat(@ceil(rh_f));
+        if (@as(u64, rw) * @as(u64, rh) > 4_000_000) return null;
+        const px = self.gpa.alloc(u8, @as(usize, rw) * rh) catch return null;
+
+        const hx = @as(f32, @floatFromInt(sw)) * 0.5 - r;
+        const hy = @as(f32, @floatFromInt(sh)) * 0.5 - r;
+        const cx = grow + @as(f32, @floatFromInt(sw)) * 0.5;
+        const cy = grow + @as(f32, @floatFromInt(sh)) * 0.5;
+        var j: u32 = 0;
+        while (j < rh) : (j += 1) {
+            const py = @as(f32, @floatFromInt(j)) + 0.5 - cy;
+            const qy = @abs(py) - hy;
+            const ay = @max(qy, 0);
+            var i: u32 = 0;
+            while (i < rw) : (i += 1) {
+                const pxx = @as(f32, @floatFromInt(i)) + 0.5 - cx;
+                const qx = @abs(pxx) - hx;
+                const ax = @max(qx, 0);
+                const d = @sqrt(ax * ax + ay * ay) + @min(@max(qx, qy), 0) - r;
+                var cov: f32 = 0;
+                if (d <= blur * 0.5 and d >= -blur * 0.5) {
+                    cov = if (blur <= 0) 1 else std.math.clamp(0.5 - d / blur, 0, 1);
+                }
+                px[@as(usize, j) * rw + i] = @intFromFloat(cov * 255.0 + 0.5);
+            }
+        }
+
+        if (self.masks.items.len >= 8) {
+            const old = self.masks.orderedRemove(0);
+            self.gpa.free(old.px);
+        }
+        self.masks.append(self.gpa, .{ .sw = sw, .sh = sh, .r = r, .blur = blur, .rw = rw, .rh = rh, .px = px }) catch {
+            self.gpa.free(px);
+            return null;
+        };
+        return &self.masks.items[self.masks.items.len - 1];
     }
 
     /// True when every pixel in a row of RGBA bytes is fully opaque.
@@ -1012,4 +1149,68 @@ test "a blit clipped by the destination edge drops the rest" {
     // an origin outside the destination is a no-op, not a crash
     dst.blitFrom(&src, .{ 9, 9 });
     dst.blitFrom(&src, .{ 2, 0 });
+}
+
+test "auto takes the distance field below the crossover and a stencil above" {
+    var c = try Canvas.init(std.testing.allocator, 200, 160);
+    defer c.deinit();
+
+    const rect = elmz.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const color = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
+    c.clear(elmz.Color{ .r = 20, .g = 20, .b = 20, .a = 255 });
+
+    // Under the crossover there is nothing worth caching.
+    c.halo(rect, 8, .{ .color = color, .blur = 6, .mode = .glow, .quality = .auto }, clip);
+    try std.testing.expectEqual(@as(usize, 0), c.masks.items.len);
+
+    // Over it, one stencil -- and the second draw must find it, not build it.
+    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+
+    // ...while an explicit `.sdf` must NOT consult it. This is the precedence
+    // the switch exists for: the threshold is a default, not an override.
+    //
+    // The silhouette here is deliberately DIFFERENT from the one above. Asking
+    // for `.sdf` on the same geometry would find the existing stencil and
+    // leave the count unchanged even if the baked path ran -- a cache hit is
+    // not evidence about dispatch. A fresh shape is: if `.sdf` fell through to
+    // baked, this draw would have to build stencil number two.
+    c.halo(elmz.Rect{ .x = 20, .y = 20, .w = 60, .h = 40 }, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .sdf }, clip);
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+}
+
+test "the baked stencil and the distance field agree" {
+    var a = try Canvas.init(std.testing.allocator, 200, 160);
+    defer a.deinit();
+    var b = try Canvas.init(std.testing.allocator, 200, 160);
+    defer b.deinit();
+    a.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    b.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+
+    const rect = elmz.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const base = elmz.Halo{
+        .color = .{ .r = 255, .g = 200, .b = 0, .a = 220 },
+        .blur = 20,
+        .spread = 2,
+        .offset = .{ 0, 6 },
+        .mode = .shadow,
+    };
+    a.halo(rect, 10, .{ .color = base.color, .blur = base.blur, .spread = base.spread, .offset = base.offset, .mode = base.mode, .quality = .sdf }, clip);
+    b.halo(rect, 10, .{ .color = base.color, .blur = base.blur, .spread = base.spread, .offset = base.offset, .mode = base.mode, .quality = .baked }, clip);
+
+    // Same silhouette, two renderers of it. Quantising coverage to a byte is
+    // the only licence to differ, so anything past rounding is a real drift.
+    var worst: u32 = 0;
+    var off: usize = 0;
+    for (a.px, b.px) |x, y| {
+        const d = @abs(@as(i32, x) - @as(i32, y));
+        if (d > worst) worst = d;
+        if (d > 2) off += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), off);
+    try std.testing.expect(worst <= 2);
 }
