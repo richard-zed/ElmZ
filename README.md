@@ -113,11 +113,11 @@ and it looks the same.
   recolours on save. A file that will not parse keeps the last good palette and
   puts the loader's own `file line:col: reason` in the error band.
 
-Both are seeded on the first build and then never overwritten, so a rebuild
-will not revert an edit. `zig build theme` is the deliberate overwrite: it
-restores both from their masters (`src/theme.defaults.zon`, the listing
-embedded in the library, and `examples/showcase.theme.zon`, the warm sample),
-which makes it the reset button after a bad edit.
+It is seeded beside the binary on the first build and then never overwritten,
+so a rebuild will not revert an edit. `zig build theme` is the deliberate
+overwrite: it restores the file from its master, `src/theme.defaults.zon`, which
+makes it the reset button after a bad edit. No live `theme.zon` ships -- you
+write one, and it overrides only the roles it names.
 
 `zig build run-X` runs the *installed* copy, not the cache artifact, so a run
 sees the same files a hand-launched binary does. (`addRunArtifact` spawns

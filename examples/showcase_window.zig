@@ -12,9 +12,9 @@
 //! and the hover fill is DERIVED by the frame, never set on the element.
 //!
 //! Because `showcase.zig` declares a `theme_path`, the runner watches
-//! `theme.zon` and recolours live. Start with the warm sample:
+//! `theme.zon` and recolours live. Copy the defaults and edit a colour:
 //!
-//!     cp examples/showcase.theme.zon theme.zon   (project root, next to build.zig)
+//!     cp zig-out/bin/theme.defaults.zon zig-out/bin/theme.zon   (beside the exe)
 //!     zig build run-showcase-sdl3
 //!
 //! then edit a colour and the window follows. Break it on purpose — set

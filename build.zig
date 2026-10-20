@@ -34,33 +34,32 @@ pub fn build(b: *std.Build) void {
     {
         const io = b.graph.io;
         const cwd = std.Io.Dir.cwd();
-        for ([_][2][]const u8{
-            .{ "src/theme.defaults.zon", "theme.defaults.zon" },
-            .{ "examples/showcase.theme.zon", "theme.zon" },
-        }) |pair| {
-            const dst = b.getInstallPath(.bin, pair[1]);
-            if (std.fs.path.dirname(dst)) |d| cwd.createDirPath(io, d) catch {};
-            const data = cwd.readFileAlloc(io, pair[0], b.allocator, .limited(64 * 1024)) catch continue;
+        // The listing `.zon` themes are written against: seeded as a file so it
+        // can be read, copied and edited without a rebuild. There is no second
+        // seed -- no live `theme.zon` ships, so the reset button restores one
+        // master rather than two.
+        //
+        // Exclusive create, so "seed it" and "never revert an edit" are the same
+        // operation: if the file is already there, whoever put it there wins and
+        // this is a no-op. A missing master is skipped silently, because a dev
+        // tree mid-edit should not stop configuring -- which is also why the
+        // step is the documented reset.
+        if (cwd.readFileAlloc(io, "src/theme.defaults.zon", b.allocator, .limited(64 * 1024))) |data| {
             defer b.allocator.free(data);
-            // Exclusive create, so "seed it" and "never revert an edit" are the
-            // same operation: if the file is already there, whoever put it there
-            // wins and this is a no-op.
-            const file = cwd.createFile(io, dst, .{ .exclusive = true }) catch continue;
-            defer file.close(io);
-            file.writeStreamingAll(io, data) catch continue;
-        }
+            const dst = b.getInstallPath(.bin, "theme.defaults.zon");
+            if (std.fs.path.dirname(dst)) |d| cwd.createDirPath(io, d) catch {};
+            if (cwd.createFile(io, dst, .{ .exclusive = true })) |file| {
+                defer file.close(io);
+                file.writeStreamingAll(io, data) catch {};
+            } else |_| {}
+        } else |_| {}
     }
 
-    const theme_step = b.step("theme", "restore theme.zon and theme.defaults.zon beside the binary");
+    const theme_step = b.step("theme", "restore theme.defaults.zon beside the binary");
     theme_step.dependOn(&b.addInstallFileWithDir(
         b.path("src/theme.defaults.zon"),
         .bin,
         "theme.defaults.zon",
-    ).step);
-    theme_step.dependOn(&b.addInstallFileWithDir(
-        b.path("examples/showcase.theme.zon"),
-        .bin,
-        "theme.zon",
     ).step);
 
     const target = b.standardTargetOptions(.{});

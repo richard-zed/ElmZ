@@ -12,10 +12,10 @@
 //!
 //! Both frames come from the same chain the runner resolves -- `theme.zon` over
 //! `theme.defaults.zon` over the library's palette -- so a recoloured screen
-//! here is a recoloured screen in a window. The sample beside this file is a
-//! starting point:
+//! here is a recoloured screen in a window. No live `theme.zon` ships: copy the
+//! defaults beside the binary and edit the copy.
 //!
-//!     cp examples/showcase.theme.zon theme.zon && zig build run-showcase
+//!     cp zig-out/bin/theme.defaults.zon zig-out/bin/theme.zon
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -205,8 +205,8 @@ pub fn main(init: std.process.Init) !void {
     // Both halves of a loaded theme, or a file's `.gradients` would be parsed
     // and then dropped on the one path that draws a picture of it.
     rt.ui.gradients = chain.gradients;
-    // The tier the file declared, now a typed value. `showcase.theme.zon` sets
-    // `title_size = 34`, so this is visibly in effect, not just parsed.
+    // The tier the file declared, now a typed value. A `theme.zon` that sets
+    // `title_size = 34` puts this visibly in effect, not merely parsed.
     rt.state.title_size = chain.app.title_size;
     if (chain.base_from_file) theme_name = "theme.defaults.zon";
     if (chain.user_from_file) theme_name = "theme.zon";
