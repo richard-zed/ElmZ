@@ -56,7 +56,24 @@ fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32) f32 {
         //
         // Full at the edge, gone a whole `blur` inward: twice the peak and twice
         // the reach of the mirrored form.
-        .inner_glow => if (d > 0) 0 else std.math.clamp(1.0 + d / blur, 0, 1),
+        // Squared, and that is the whole shape of it: drop away fast from the edge,
+        // then converge gently instead of arriving.
+        //
+        // A linear ramp fails both halves. It holds its brightness most of the way
+        // in and then terminates, which reads as a band with a hard inner edge --
+        // most of the falloff spent where it is invisible, none of it where the eye
+        // needs it. `(1-u)^2` is steepest AT the edge (three quarters of the
+        // brightness is gone by the halfway point) and flattens as it runs out, so
+        // the tail approaches the face colour rather than stopping on it.
+        //
+        // A soft-at-both-ends curve (`(1-u^2)^2`) was tried and is the wrong way
+        // round: peak brightness with zero slope at the boundary is a plateau, not a
+        // rim, and the face reads flat.
+        .inner_glow => if (d > 0) 0 else blk: {
+            const u = std.math.clamp(-d / blur, 0, 1);
+            const left = 1.0 - u;
+            break :blk left * left;
+        },
     };
 }
 
@@ -738,9 +755,12 @@ pub const Canvas = struct {
                 var cov = ramp(h.mode, rd, w);
                 if (cov > 0) {
                     cov *= switch (h.mode) {
-                        // A rim inside the face still has to stop at the face's own
-                        // antialiased boundary, not one pixel past or short of it.
-                        .inner_glow => std.math.clamp(0.5 - d, 0, 1),
+                        // Not feathered. The face's own fill already antialiases
+                        // this boundary, and the rim underneath it is SOFT there
+                        // (zero slope at the edge, see `ramp`), so multiplying by
+                        // the boundary coverage as well just halves the rim's last
+                        // pixel and leaves a seam where the two disagree.
+                        .inner_glow => 1,
                         .glow => 1,
                         .outer_glow => cut,
                     };
@@ -2068,7 +2088,7 @@ test "an outer rim is feathered where it meets the element" {
     try std.testing.expect(just_outside < 255);
 }
 
-test "an inner glow starts at full strength and reaches a whole blur inward" {
+test "an inner glow drops fast off the edge and then converges" {
     const gpa = std.testing.allocator;
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
     const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
@@ -2091,26 +2111,17 @@ test "an inner glow starts at full strength and reaches a whole blur inward" {
         const half: f32 = @floatFromInt(testRgb(&c, 47, y)[0]);
         const deep: f32 = @floatFromInt(testRgb(&c, 53, y)[0]);
         const gone: f32 = @floatFromInt(testRgb(&c, 55, y)[0]);
-        const outside: f32 = @floatFromInt(testRgb(&c, 39, y)[0]);
 
-        // The CEILING is the point: mirrored, this ramp could never exceed 128
-        // at the edge, and died 7px in. Full strength at the edge, half at
-        // blur / 2, gone at blur.
-        try std.testing.expectApproxEqAbs(@as(f32, 227.7), edge, 10);
-        try std.testing.expectApproxEqAbs(@as(f32, 118.4), half, 10);
-        try std.testing.expect(deep < 20);
-        try std.testing.expect(gone == 0);
-        // An inner glow must not spill out of the shape it lives in.
-        try std.testing.expect(outside == 0);
-
-        // Monotone: a longer ramp must not bump somewhere along the way.
-        var x: usize = 41;
-        var prev: f32 = edge;
-        while (x < 55) : (x += 1) {
-            const v: f32 = @floatFromInt(testRgb(&c, x, y)[0]);
-            try std.testing.expect(v <= prev + 1);
-            prev = v;
-        }
+        // Full at the silhouette: d = -1.5, u = 0.107, (1-u)^2 = 0.797.
+        try std.testing.expectApproxEqAbs(@as(f32, 203), edge, 12);
+        // Halfway in it is nearly spent -- 0.216, not the 0.464 a linear ramp gives.
+        // This is the assertion that distinguishes "drops fast" from "drops evenly".
+        try std.testing.expectApproxEqAbs(@as(f32, 55), half, 12);
+        // And it converges rather than stopping: still a trace, close to nothing.
+        try std.testing.expect(deep < 6);
+        try std.testing.expect(gone < 2);
+        // Monotone: no ring, no plateau.
+        try std.testing.expect(edge > half and half > deep and deep >= gone);
     }
 }
 
