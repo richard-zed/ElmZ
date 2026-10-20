@@ -529,6 +529,17 @@ fn rowChildWidth(c: Extent, total_w: f32, total_min: f32, inner: f32) f32 {
     return c.w - deficit * (slack / room);
 }
 
+/// Cross-axis placement for a row's children.
+///
+/// `stretch` is the default because it is what every existing render already
+/// does: a child that paints its own background wants the full height, and
+/// moving the default would move every pin for a cosmetic reason.
+///
+/// `start` and `center` exist for LABELS, which have no box of their own and
+/// otherwise sit on the top edge of a taller neighbour -- a caption beside a
+/// button is the case that makes the default look broken.
+pub const RowAlign = enum { stretch, start, center };
+
 pub const TextMetrics = struct {
     width: f32,
     height: f32,
@@ -908,6 +919,14 @@ pub fn Element(comptime M: type) type {
         /// KEYED element: focus names an identity, and an unkeyed element has
         /// none, so `focusable` alone draws nothing.
         focusable: bool = false,
+        /// In a ROW, take a share of the width left over after every non-grow
+        /// child and the gaps have been paid for. Equal shares, floored at the
+        /// child's own `min_w` -- overflow rather than clipping, same rule as
+        /// the squeeze. Ignored in a column; vertical fill is a separate idea
+        /// and nothing needs it yet.
+        grow: bool = false,
+        /// Cross-axis placement of this row's children. See `RowAlign`.
+        row_align: RowAlign = .stretch,
         /// identity for keyed children. When set, a press that starts here
         /// re-binds to the element carrying the same key on later frames
         /// rather than to a rectangle, so it survives reordering. Unique among
@@ -991,6 +1010,52 @@ pub fn Element(comptime M: type) type {
             if (s.frost) |v| self.frost = v;
         }
 
+        /// Totals a row shares out. Computed by ONE function so measure and
+        /// paint cannot drift: they disagreed once about a child's height and
+        /// the symptom was a control painted outside the box it was measured
+        /// in, which no test caught because both halves were self-consistent.
+        const RowFit = struct {
+            total_w: f32 = 0,
+            total_min: f32 = 0,
+            /// Everything the grow shares cannot eat: the non-grow children
+            /// with their spacing, plus the gaps between everyone.
+            fixed_w: f32 = 0,
+            n_grow: usize = 0,
+            inner: f32 = 0,
+        };
+
+        fn rowFit(r: Renderer, children: []const *Self, gap: f32, inner: f32) RowFit {
+            var fit: RowFit = .{ .inner = inner };
+            for (children, 0..) |ch, i| {
+                const cs = ch.measure(r, inner);
+                if (i > 0) {
+                    fit.total_w += gap;
+                    fit.total_min += gap;
+                    fit.fixed_w += gap;
+                }
+                fit.total_w += ch.space_before + cs.w + ch.space_after;
+                fit.total_min += ch.space_before + cs.min_w + ch.space_after;
+                if (ch.grow) {
+                    fit.n_grow += 1;
+                } else {
+                    fit.fixed_w += ch.space_before + cs.w + ch.space_after;
+                }
+            }
+            return fit;
+        }
+
+        /// Final width for one row child. A grow child is paid out of the
+        /// leftover at the width it was measured at, so a row that cannot pay
+        /// falls back to the ordinary squeeze -- which already floors everyone
+        /// at `min_w`.
+        fn rowWidth(cs: Extent, ch: *const Self, fit: RowFit) f32 {
+            if (ch.grow and fit.n_grow > 0 and fit.total_w <= fit.inner) {
+                const n: f32 = @floatFromInt(fit.n_grow);
+                return @max((fit.inner - fit.fixed_w) / n, cs.min_w);
+            }
+            return rowChildWidth(cs, fit.total_w, fit.total_min, fit.inner);
+        }
+
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
             var s: Extent = switch (self.kind) {
                 .text => |t| blk: {
@@ -1043,41 +1108,32 @@ pub fn Element(comptime M: type) type {
                 .row => |c| blk: {
                     // A row is the one container where children COMPETE: they
                     // are laid side by side, so the widths have to be shared
-                    // out rather than summed. Pass one asks everyone what they
-                    // want and what their floor is; pass two only happens when
-                    // the row cannot pay, because a squeezed child has to be
-                    // re-measured at the width it was actually given to learn
-                    // its true height.
+                    // out rather than summed. `rowFit` collects the totals once
+                    // and paint calls the same pair, because measure and paint
+                    // disagreeing about a width is how a child ends up painted
+                    // somewhere it was never measured.
                     const inner = (self.width orelse avail_w) - 2 * self.pad;
-                    var total_w: f32 = 0;
-                    var total_min: f32 = 0;
-                    var h: f32 = 0;
-                    for (c.children, 0..) |ch, i| {
+                    for (c.children) |ch| {
                         if (self.disabled) ch.disabled = true;
+                    }
+                    const fit = rowFit(r, c.children, self.gap, inner);
+                    var h: f32 = 0;
+                    for (c.children) |ch| {
                         const cs = ch.measure(r, inner);
-                        if (i > 0) {
-                            total_w += self.gap;
-                            total_min += self.gap;
-                        }
-                        total_w += ch.space_before + cs.w + ch.space_after;
-                        total_min += ch.space_before + cs.min_w + ch.space_after;
-                        h = @max(h, cs.h);
+                        const cw = rowWidth(cs, ch, fit);
+                        // A child given less than it asked for has to be
+                        // re-measured at the width it actually got, or the row
+                        // reserves a height no child ever paints at.
+                        const at = if (cw < cs.w) ch.measure(r, cw) else cs;
+                        h = @max(h, at.h);
                     }
-                    if (total_w > inner) {
-                        // Heights from pass one were taken at `inner`, which no
-                        // child ends up with. Start over.
-                        h = 0;
-                        for (c.children) |ch| {
-                            const cs = ch.measure(r, inner);
-                            const cw = rowChildWidth(cs, total_w, total_min, inner);
-                            const at = ch.measure(r, cw);
-                            h = @max(h, if (cw < cs.w) at.h else cs.h);
-                        }
-                    }
+                    // A grow child eats the leftover, so the row claims the
+                    // width it was offered rather than the sum of the parts.
+                    const w = if (fit.n_grow > 0) inner else @min(fit.total_w, inner);
                     break :blk .{
-                        .w = @min(total_w, inner) + 2 * self.pad,
+                        .w = w + 2 * self.pad,
                         .h = h + 2 * self.pad,
-                        .min_w = total_min + 2 * self.pad,
+                        .min_w = fit.total_min + 2 * self.pad,
                     };
                 },
             };
@@ -1270,27 +1326,28 @@ pub fn Element(comptime M: type) type {
                     const inner_h = (self.height orelse rect.h) - 2 * self.pad;
                     const avail_w = (self.width orelse rect.w) - 2 * self.pad;
                     // Same totals `measure` used, so paint places children where
-                    // they were measured. Two passes over the children is the
-                    // price of `measure` taking no allocator: per-child extents
-                    // cannot be held anywhere between here and there.
-                    var total_w: f32 = 0;
-                    var total_min: f32 = 0;
-                    for (c.children, 0..) |ch, i| {
-                        const cs = ch.measure(r, avail_w);
-                        if (i > 0) {
-                            total_w += self.gap;
-                            total_min += self.gap;
-                        }
-                        total_w += ch.space_before + cs.w + ch.space_after;
-                        total_min += ch.space_before + cs.min_w + ch.space_after;
-                    }
+                    // they were measured. Recomputing is the price of `measure`
+                    // taking no allocator: per-child extents cannot be held
+                    // anywhere between here and there.
+                    const fit = rowFit(r, c.children, self.gap, avail_w);
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) x += self.gap;
                         x += ch.space_before;
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, avail_w);
-                        const w = rowChildWidth(cs, total_w, total_min, avail_w);
-                        try ch.paint(r, .{ .x = x, .y = rect.y + self.pad, .w = w, .h = inner_h }, child_clip, ptr, hits, gpa, hov, th);
+                        const w = rowWidth(cs, ch, fit);
+                        // Measured again only when the placement actually needs
+                        // it: `stretch` paints the full height regardless, and
+                        // an extra measure per child per frame is not free.
+                        const ch_h: f32 = if (self.row_align == .stretch) inner_h else blk_h: {
+                            const at = if (w < cs.w) ch.measure(r, w) else cs;
+                            break :blk_h at.h;
+                        };
+                        const y = switch (self.row_align) {
+                            .center => rect.y + self.pad + @max(0, (inner_h - ch_h) * 0.5),
+                            .stretch, .start => rect.y + self.pad,
+                        };
+                        try ch.paint(r, .{ .x = x, .y = y, .w = w, .h = ch_h }, child_clip, ptr, hits, gpa, hov, th);
                         x += w;
                         x += ch.space_after;
                     }
@@ -3685,5 +3742,96 @@ test "tab walks document order, skips a disabled control, and wraps" {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
         try std.testing.expectEqual(@as(?u64, null), f.focusStep(null, true));
+    }
+}
+
+const FlexMsg = enum { fixed, filler };
+
+fn flexView(_: *u8, ui: *Ui(FlexMsg)) *Element(FlexMsg) {
+    const fixed = ui.button(.{ .label = "fixed", .msg = .fixed, .key = 1, .width = 100 });
+    const filler = ui.button(.{ .label = "fill", .msg = .filler, .key = 2 });
+    filler.grow = true;
+    const row = ui.row(.{ .children = &.{ fixed, filler } });
+    row.width = 300;
+    return row;
+}
+
+fn flexUpdate(m: *u8, msg: FlexMsg) Action(FlexMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+fn rectOfKey(f: anytype, k: u64) Rect {
+    for (f.hits) |h| {
+        if (h.key) |hk| {
+            if (hk == k) return h.rect;
+        }
+    }
+    return .{ .x = -1, .y = -1, .w = -1, .h = -1 };
+}
+
+test "a grow child takes the leftover width and the others keep theirs" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(u8, FlexMsg).init(gpa, 0, flexUpdate, flexView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 400, .h = 120 }, nominalRenderer());
+    defer f.deinit();
+
+    const fixed = rectOfKey(f, 1);
+    const filler = rectOfKey(f, 2);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), fixed.w, 0.5);
+    // 300 of row, 100 taken by the fixed child, no gap: the rest is the share.
+    try std.testing.expectApproxEqAbs(@as(f32, 200), filler.w, 0.5);
+    // And they do not overlap: the filler starts where the fixed one ends.
+    try std.testing.expectApproxEqAbs(fixed.x + fixed.w, filler.x, 0.5);
+}
+
+const AlignMsg = enum { tall, short };
+const AlignState = struct { align_mode: RowAlign = .stretch };
+
+fn alignUpdate(m: *AlignState, msg: AlignMsg) Action(AlignMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+fn alignView(s: *AlignState, ui: *Ui(AlignMsg)) *Element(AlignMsg) {
+    const tall = ui.button(.{ .label = "tall", .msg = .tall, .key = 1, .height = 60 });
+    const short = ui.button(.{ .label = "short", .msg = .short, .key = 2, .height = 20 });
+    const row = ui.row(.{ .children = &.{ tall, short } });
+    row.row_align = s.align_mode;
+    return row;
+}
+
+test "a row places a short child according to row_align" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(AlignState, AlignMsg).init(gpa, .{}, alignUpdate, alignView);
+    defer rt.deinit();
+
+    // Stretch is the default, so this is the old behaviour: the short child is
+    // given the full row height whatever it asked for.
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectApproxEqAbs(@as(f32, 60), rectOfKey(f, 2).h, 0.5);
+        try std.testing.expectApproxEqAbs(rectOfKey(f, 1).y, rectOfKey(f, 2).y, 0.5);
+    }
+    // Center: own height, sitting in the middle of the taller neighbour.
+    rt.state.align_mode = .center;
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectApproxEqAbs(@as(f32, 20), rectOfKey(f, 2).h, 0.5);
+        try std.testing.expectApproxEqAbs(rectOfKey(f, 1).y + 20, rectOfKey(f, 2).y, 0.5);
+    }
+    // Start: own height, top edge level with the neighbour.
+    rt.state.align_mode = .start;
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectApproxEqAbs(@as(f32, 20), rectOfKey(f, 2).h, 0.5);
+        try std.testing.expectApproxEqAbs(rectOfKey(f, 1).y, rectOfKey(f, 2).y, 0.5);
     }
 }

@@ -643,7 +643,11 @@ pub fn run(
 
             .pointer_up => |p| {
                 rt.pointer.pos = p;
-                dirty = true;
+                // Only a press that was actually CLAIMED can change paint: the
+                // release drops that control's pressed look. A release over
+                // empty space changes nothing, and marking dirty for it billed
+                // a full frame to every stray click.
+                dirty = dirty or rt.press.captured != null;
                 if (rt.press.up(p)) |msg| {
                     const action = rt.dispatch(msg);
                     stats.messages += 1;
@@ -2253,4 +2257,73 @@ test "tab falls through to the app when nothing can take focus" {
     try std.testing.expectEqual(@as(?u64, null), rt.focus);
     try std.testing.expectEqual(@as(u32, 1), rt.state.claimed);
     try std.testing.expectEqual(@as(u32, 1), stats.messages);
+}
+
+test "a release that claimed nothing does not repaint" {
+    const gpa = std.testing.allocator;
+    const RMsg = enum { hit };
+
+    const Hooks = struct {
+        fn update(s: *u8, m: RMsg) elmz.Action(RMsg) {
+            _ = s;
+            _ = m;
+            return .{};
+        }
+        fn view(s: *u8, ui: *elmz.Ui(RMsg)) *elmz.Element(RMsg) {
+            _ = s;
+            return ui.button(.{ .label = "go", .msg = .hit, .key = 1, .width = 60, .height = 24 });
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 120, 80);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(u8, RMsg).init(gpa, 0, Hooks.update, Hooks.view);
+    defer rt.deinit();
+
+    // A release with no press before it, over empty space: nothing is claimed,
+    // so nothing can look different and there is nothing to paint.
+    var fake = Fake{
+        .events = &.{
+            .{ .pointer_up = .{ 110, 70 } },
+            .quit,
+        },
+        .idle = 2,
+    };
+    const stats = try run(struct {}, u8, RMsg, &rt, &canvas, fake.window(), .{});
+
+    try std.testing.expectEqual(@as(u32, 1), stats.frames); // the first paint only
+}
+
+test "a press and release on a control still repaints twice" {
+    const gpa = std.testing.allocator;
+    const RepaintMsg = enum { hit };
+
+    const Hooks = struct {
+        fn update(s: *u8, m: RepaintMsg) elmz.Action(RepaintMsg) {
+            _ = s;
+            _ = m;
+            return .{};
+        }
+        fn view(s: *u8, ui: *elmz.Ui(RepaintMsg)) *elmz.Element(RepaintMsg) {
+            _ = s;
+            return ui.button(.{ .label = "go", .msg = .hit, .key = 1, .width = 60, .height = 24 });
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 120, 80);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(u8, RepaintMsg).init(gpa, 0, Hooks.update, Hooks.view);
+    defer rt.deinit();
+
+    var fake = Fake{
+        .events = &.{
+            .{ .pointer_down = .{ 10, 10 } }, // claims the button: pressed look
+            .{ .pointer_up = .{ 11, 11 } }, // releases it: look comes off
+            .quit,
+        },
+        .idle = 2,
+    };
+    const stats = try run(struct {}, u8, RepaintMsg, &rt, &canvas, fake.window(), .{});
+
+    try std.testing.expectEqual(@as(u32, 3), stats.frames); // initial, press, release
 }
