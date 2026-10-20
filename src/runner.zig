@@ -1663,3 +1663,42 @@ test "editing the base re-applies the override on top of it" {
     watch.poll(&ui, io, gpa);
     try std.testing.expect(std.meta.eql(settled, ui.theme));
 }
+
+test "a gradient written into the file reaches the Ui, and leaves when edited out" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Colours and gradients are separate questions, so this is the seam that
+    // would otherwise be dead: `Ui.gradients` is only worth having if a poll
+    // actually fills it.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "theme.zon",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa }, .gradients = .{ .accent = .{ .linear = .{ .dir = .diagonal, .from = 0x89b4fa, .to = 0xf5c2e7 } } } } }",
+    });
+
+    var bb: [128]u8 = undefined;
+    var ub: [128]u8 = undefined;
+    // No base file: the compiled floor is enough, and this isolates the override.
+    var watch = ThemeWatch.init(.{}, try tmpPath(&bb, tmp, "theme.defaults.zon"), try tmpPath(&ub, tmp, "theme.zon"));
+
+    var ui = elmz.Ui(u8).init(gpa);
+    defer ui.deinit();
+
+    watch.poll(&ui, io, gpa);
+    const g = ui.gradients.accent orelse return error.GradientMissing;
+    try std.testing.expectEqual(elmz.Fill.linear, std.meta.activeTag(g));
+    // Colours still load alongside it -- the two halves are not exclusive.
+    try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0x89b4fa)));
+
+    // Drop the gradient but keep the colour: the Ui must follow, or a stale
+    // gradient would outlive the line that declared it.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "theme.zon",
+        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }",
+    });
+    watch.poll(&ui, io, gpa);
+    try std.testing.expect(ui.gradients.accent == null);
+    try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0x89b4fa)));
+}
