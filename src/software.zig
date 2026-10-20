@@ -678,13 +678,24 @@ pub const Canvas = struct {
             .w = shape.w + grow * 2,
             .h = shape.h + grow * 2,
         };
-        // A wide rim light is the one case where the metric matters: see
-        // `circularity`. Only inner glows blend -- an outward ramp already rounds
-        // itself off naturally, growing `blur/2` on every side takes an 80x60 box
-        // from 1.27 aspect to 1.14 and the radius grows with it.
+        // A rim light keeps the shape where it MEETS it and loses it as it decays
+        // inward. That is the whole of `circularity`'s gate: zero for a narrow rim,
+        // which is tracing the outline and should keep the corners it is attached
+        // to, rising as the falloff becomes a real fraction of the shape.
+        //
+        // Only inner glows blend. An outward ramp already rounds itself off without
+        // help: growing `blur/2` on every side takes an 80x60 box from 1.27 aspect
+        // to 1.14 and the corner radius grows with it, so its tail is round already.
         const circular: f32 = if (h.mode == .inner_glow) circularity(shape.w, shape.h, blur) else 0;
         const ea = shape.w * 0.5;
         const eb = shape.h * 0.5;
+        // Depth is measured against the reach actually available, not against
+        // `blur` alone: on a face shorter than the falloff the ramp never gets to
+        // run its full length, and normalising by `blur` there would leave the
+        // blend at a fraction of where it needs to be. `min` of the two means the
+        // tail is fully pooled by the time the glow reaches the middle, whichever
+        // is smaller.
+        const reach = @min(blur, @min(ea, eb));
 
         const sp = self.clipSpan(ring, clip) orelse return;
 
@@ -701,18 +712,39 @@ pub const Canvas = struct {
                 const d = @sqrt(ax * ax + ay * ay) + @min(@max(qx, qy), 0) - r;
                 // Nothing to draw once the ramp has run out, and nothing to
                 // draw deep inside: the shape is opaque there.
+                // Cutting an outer rim against the element is a silhouette, so it
+                // has to be feathered like one. A binary inside/outside test steps
+                // a whole pixel; the fill underneath was antialiased against the
+                // background and the rim is bright, so that single step is the
+                // rough edge. `cut` is the element's own coverage inverted: the rim
+                // keeps whatever the fill did not cover.
+                var cut: f32 = 1;
                 if (h.mode == .outer_glow) {
                     const ex = @abs(@as(f32, @floatFromInt(x)) + 0.5 - ecx) - ehx;
                     const ey = @abs(@as(f32, @floatFromInt(y)) + 0.5 - ecy) - ehy;
                     const de = @sqrt(@max(ex, 0) * @max(ex, 0) + @max(ey, 0) * @max(ey, 0)) + @min(@max(ex, ey), 0) - er;
-                    if (de < 0) continue;
+                    if (de < -1) continue;
+                    cut = std.math.clamp(0.5 + de, 0, 1);
                 }
-                const rd = if (circular > 0)
-                    d + (ellipseDistance(px, py, ea, eb) - d) * circular
-                else
-                    d;
+                // Depth-gated blend: at the boundary the metric IS the shape's, so
+                // the rim sits on the corners it belongs to; by the far end of the
+                // falloff it has become the inscribed ellipse, which has none.
+                var rd = d;
+                if (circular > 0) {
+                    const t = std.math.clamp(-d / reach, 0, 1) * circular;
+                    rd = d + (ellipseDistance(px, py, ea, eb) - d) * t;
+                }
                 const w = if (h.light != null) lightWidth(blur, px, py, hx, hy, cast) else blur;
-                const cov = ramp(h.mode, rd, w);
+                var cov = ramp(h.mode, rd, w);
+                if (cov > 0) {
+                    cov *= switch (h.mode) {
+                        // A rim inside the face still has to stop at the face's own
+                        // antialiased boundary, not one pixel past or short of it.
+                        .inner_glow => std.math.clamp(0.5 - d, 0, 1),
+                        .glow => 1,
+                        .outer_glow => cut,
+                    };
+                }
                 if (cov > 0) self.blendCoverage(x, y, h.color, cov);
             }
         }
@@ -1975,18 +2007,17 @@ test "the stencil and the distance field put the ramp in the same place" {
     }
 }
 
-test "a wide inner glow stops tracing the corners and pools in the middle" {
+test "a wide inner glow keeps the corners it is attached to" {
     const gpa = std.testing.allocator;
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
     const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
 
     // (42,70) is a pixel inside the left edge at mid-height; (44,44) is 4px in
-    // from the top-left corner along the diagonal. The inscribed ellipse touches
-    // the first and runs well clear of the second, so these two readings
-    // separate "tracing the outline" from "pooling toward the middle".
-    var mid: [2]f32 = undefined;
-    var corner: [2]f32 = undefined;
-    inline for (.{ 40, 14 }, 0..) |blur, i| {
+    // from the top-left corner on the diagonal. A rim light has to be bright at
+    // both: it is attached to the shape, and the shape has corners. What the
+    // blend changes is further in, where the falloff is decaying -- the outline
+    // is no longer legible there and the pool rounds off.
+    inline for (.{ 30, 14 }) |blur| {
         var c = try Canvas.init(gpa, 200, 160);
         defer c.deinit();
         const r = c.renderer();
@@ -1997,20 +2028,44 @@ test "a wide inner glow stops tracing the corners and pools in the middle" {
             .mode = .inner_glow,
             .quality = .sdf,
         }, clip);
-        mid[i] = @floatFromInt(testRgb(&c, 42, 70)[0]);
-        corner[i] = @floatFromInt(testRgb(&c, 44, 44)[0]);
-    }
 
-    // A narrow rim still follows the shape: the corner is lit, because at
-    // blur 14 the corner radius is still 1px positive and the band is thin.
-    try std.testing.expect(corner[1] > 150);
-    // A wide one does not. At blur 40 the inward offset has driven the corner
-    // radius to zero -- a distance field can only draw sharper corners -- so the
-    // metric blends to the inscribed ellipse and the corner falls away instead.
-    try std.testing.expect(mid[0] > 200);
-    try std.testing.expect(corner[0] < 50);
-    // The edge itself stays lit either way: this is a rim, not a vignette.
-    try std.testing.expect(mid[0] > corner[0] + 150);
+        const edge: f32 = @floatFromInt(testRgb(&c, 42, 70)[0]);
+        const corner: f32 = @floatFromInt(testRgb(&c, 44, 44)[0]);
+        const middle: f32 = @floatFromInt(testRgb(&c, 80, 70)[0]);
+
+        // The rim is on the corner at every width. Uniformly blending the metric
+        // (the first attempt) drove this to zero and hollowed the button out.
+        try std.testing.expect(corner > 150);
+        // ...and it decays: this is a rim, not a wash.
+        try std.testing.expect(edge > middle);
+    }
+}
+
+test "an outer rim is feathered where it meets the element" {
+    const gpa = std.testing.allocator;
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
+
+    var c = try Canvas.init(gpa, 200, 160);
+    defer c.deinit();
+    const r = c.renderer();
+    r.quad(rect, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
+    r.halo(rect, 8, .{
+        .color = .{ .r = 255, .g = 255, .b = 255, .a = 255 },
+        .blur = 24,
+        .spread = 3,
+        .mode = .outer_glow,
+        .quality = .sdf,
+    }, clip);
+
+    // A binary inside/outside cut gives one step from fill to rim at the shape's
+    // boundary -- the worst place for it is the rounded corner, where the fill was
+    // antialiased and the rim was not. One pixel outside the corner is partially
+    // covered by the element, so the rim has to be partial there too.
+    const just_outside: f32 = @floatFromInt(testRgb(&c, 39, 39)[0]);
+    const clear_of_it: f32 = @floatFromInt(testRgb(&c, 30, 30)[0]);
+    try std.testing.expect(just_outside > clear_of_it);
+    try std.testing.expect(just_outside < 255);
 }
 
 test "an inner glow starts at full strength and reaches a whole blur inward" {
