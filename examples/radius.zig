@@ -17,7 +17,7 @@ fn cards(ui: *elmz.Ui(Msg), filled: bool) *elmz.Element(Msg) {
     const radii = [_]f32{ 0, 3, 6, 14, 28 };
     var items: [radii.len]*elmz.Element(Msg) = undefined;
     for (radii, 0..) |rad, i| {
-        const c = ui.rect(56, 56);
+        const c = ui.rect(.{ .width = 56, .height = 56 });
         c.radius = rad;
         if (filled) {
             c.bg = ui.theme.control;
@@ -26,21 +26,18 @@ fn cards(ui: *elmz.Ui(Msg), filled: bool) *elmz.Element(Msg) {
         }
         items[i] = c;
     }
-    const row = ui.row(&items);
+    const row = ui.row(.{ .children = &items });
     row.gap = 14;
     return row;
 }
 
 fn view(_: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-    const caption = ui.muted(
-        "the same 1px outline follows the curve instead of four quads",
-        10,
-    );
+    const caption = ui.text(.{ .label = "the same 1px outline follows the curve instead of four quads", .size = 10, .tone = .muted });
     caption.wrap = true;
-    const inner = ui.column(&.{
-        ui.text("radius", 18),
+    const inner = ui.column(.{ .children = &.{
+        ui.text(.{ .label = "radius", .size = 18 }),
         caption,
-    });
+    } });
     inner.pad = 14;
     // the card holds the paragraph to 300, which is what the paragraph used to
     // be told directly; now the container's width is the only place it can come
@@ -51,12 +48,12 @@ fn view(_: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     inner.border = ui.theme.text_muted;
     inner.radius = 18;
 
-    const col = ui.column(&.{
-        ui.text("corner radii", 22),
+    const col = ui.column(.{ .children = &.{
+        ui.text(.{ .label = "corner radii", .size = 22 }),
         ui.spaceBefore(cards(ui, true), 4),
         ui.spaceBefore(cards(ui, false), 6),
         ui.spaceBefore(inner, 10),
-    });
+    } });
     col.pad = 24;
     col.gap = 4;
     col.bg = ui.theme.bg;

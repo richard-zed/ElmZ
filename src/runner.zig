@@ -510,10 +510,10 @@ fn tUpdate(s: *TState, m: TMsg) elmz.Action(TMsg) {
 fn tView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     // A row, so the button is measured at its natural width; a column would
     // stretch every child to the full inner width and hide the metrics.
-    const r = ui.row(&.{
+    const r = ui.row(.{ .children = &.{
         ui.textFmt("{d}", .{s.n}, 20),
-        ui.button("inc", .inc),
-    });
+        ui.button(.{ .label = "inc", .msg = .inc }),
+    } });
     r.gap = 10;
     return r;
 }
@@ -784,20 +784,20 @@ fn checkFrame(f: anytype, size: elmz.Size) !void {
 // a layout with every feature that can push a rect out of bounds
 fn sView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const inner = ui.row(&.{
-        ui.rect(8, 20),
-        ui.text("nested", 10),
-        ui.button("inc", .inc),
-    });
+    const inner = ui.row(.{ .children = &.{
+        ui.rect(.{ .width = 8, .height = 20 }),
+        ui.text(.{ .label = "nested", .size = 10 }),
+        ui.button(.{ .label = "inc", .msg = .inc }),
+    } });
     inner.gap = 6;
     inner.pad = 4;
     inner.border = ui.theme.accent;
 
-    const box = ui.column(&.{
-        ui.text("stress", 14),
+    const box = ui.column(.{ .children = &.{
+        ui.text(.{ .label = "stress", .size = 14 }),
         ui.spaceBefore(inner, 4),
-        ui.bar(0.5),
-    });
+        ui.bar(.{ .value = 0.5 }),
+    } });
     box.pad = 10;
     box.gap = 2;
     box.bg = ui.theme.panel;
@@ -859,10 +859,10 @@ fn cUpdate(s: *CState, m: CMsg) elmz.Action(CMsg) {
 }
 
 fn cView(s: *CState, ui: *elmz.Ui(CMsg)) *elmz.Element(CMsg) {
-    return ui.row(&.{
+    return ui.row(.{ .children = &.{
         ui.textFmt("{d}", .{s.got}, 12),
-        ui.button("go", .{ .press = {} }),
-    });
+        ui.button(.{ .label = "go", .msg = .{ .press = {} } }),
+    } });
 }
 
 test "run() drains a command's result while polling, with no further events" {
@@ -899,7 +899,7 @@ fn pairView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     // TMsg has a single member, so both buttons dispatch `inc`. That is
     // enough: the question is whether a message is produced at all, not which
     // one -- under capture, zero messages is the only correct answer.
-    const r = ui.row(&.{ ui.button("-", .inc), ui.button("+", .inc) });
+    const r = ui.row(.{ .children = &.{ ui.button(.{ .label = "-", .msg = .inc }), ui.button(.{ .label = "+", .msg = .inc }) } });
     r.gap = 10;
     return r;
 }
@@ -982,12 +982,12 @@ test "only the region that owns the press stays lit" {
 /// on": the card overlaps every pixel of its button.
 fn cardView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const b = ui.button("x", .inc);
+    const b = ui.button(.{ .label = "x", .msg = .inc });
     b.width = 60;
 
-    const card = ui.column(&.{
+    const card = ui.column(.{ .children = &.{
         b,
-    });
+    } });
     card.width = 200;
     card.pad = 20;
     card.bg = ui.theme.control;
@@ -1155,16 +1155,16 @@ test "the same event script produces the same frames and the same pixels" {
 // no width of its own: the column is 120 wide and layout passes that down, so
 // this also covers measure() taking the width it is measured into.
 fn wrapped(ui: *elmz.Ui(TMsg), bytes: []const u8) *elmz.Element(TMsg) {
-    const e = ui.text(bytes, 12);
+    const e = ui.text(.{ .label = bytes, .size = 12 });
     e.wrap = true;
     return e;
 }
 
 fn pView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const inner = ui.column(&.{
+    const inner = ui.column(.{ .children = &.{
         wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going"),
-    });
+    } });
     inner.width = 120;
     return inner;
 }
@@ -1213,18 +1213,18 @@ test "a paragraph wraps to its width and paints one prim per line" {
 /// below the bottom edge.
 fn clipView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const a = ui.rect(600, 60);
+    const a = ui.rect(.{ .width = 600, .height = 60 });
     a.bg = ui.theme.accent;
-    const b = ui.rect(600, 20);
+    const b = ui.rect(.{ .width = 600, .height = 20 });
     b.bg = ui.theme.accent;
-    const c = ui.rect(600, 20);
+    const c = ui.rect(.{ .width = 600, .height = 20 });
     c.bg = ui.theme.accent; // starts at y = 90, wholly outside
-    const box = ui.column(&.{ a, b, ui.spaceBefore(c, 10) });
+    const box = ui.column(.{ .children = &.{ a, b, ui.spaceBefore(c, 10) } });
     box.width = 120;
     box.height = 80;
     box.clips = true;
     // nested, so the box is painted at the size it measured
-    return ui.column(&.{box});
+    return ui.column(.{ .children = &.{box} });
 }
 
 test "a clipping container confines every primitive to its own box" {
@@ -1282,11 +1282,11 @@ test "a clipping container confines every primitive to its own box" {
 /// A button 32 tall in a box only 16 tall: its lower half is outside the clip.
 fn clipHitView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const box = ui.column(&.{ui.button("inc", .inc)});
+    const box = ui.column(.{ .children = &.{ui.button(.{ .label = "inc", .msg = .inc })} });
     box.width = 120;
     box.height = 16;
     box.clips = true;
-    return ui.column(&.{box});
+    return ui.column(.{ .children = &.{box} });
 }
 
 test "a press outside a clipping container is not a hit" {
@@ -1312,13 +1312,13 @@ test "a press outside a clipping container is not a hit" {
 
 fn noopClipOff(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const blk = ui.rect(40, 10);
+    const blk = ui.rect(.{ .width = 40, .height = 10 });
     blk.bg = ui.theme.accent;
-    const box = ui.column(&.{ ui.text("fits", 12), blk });
+    const box = ui.column(.{ .children = &.{ ui.text(.{ .label = "fits", .size = 12 }), blk } });
     box.width = 120;
     box.height = 60;
     box.bg = ui.theme.panel;
-    return ui.column(&.{box});
+    return ui.column(.{ .children = &.{box} });
 }
 
 fn noopClipOn(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
@@ -1361,14 +1361,14 @@ test "clipping that does not bind changes nothing on screen" {
 
 fn paraNarrow(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const c = ui.column(&.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")});
+    const c = ui.column(.{ .children = &.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")} });
     c.width = 100;
     return c;
 }
 
 fn paraWide(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const c = ui.column(&.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")});
+    const c = ui.column(.{ .children = &.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")} });
     c.width = 400;
     return c;
 }
@@ -1420,11 +1420,11 @@ test "a paragraph takes the width layout gives it, and never exceeds it" {
 // ---------------------------------------------------------------------------
 
 fn oneButtonView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    return ui.button("x", .inc);
+    return ui.button(.{ .label = "x", .msg = .inc });
 }
 
 fn oneBarView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    return ui.bar(0.5);
+    return ui.bar(.{ .value = 0.5 });
 }
 
 test "a button paints exactly one fill and one label" {
@@ -1479,19 +1479,19 @@ test "a bar paints a track and a value fill, and nothing twice" {
 }
 
 fn bgView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(40, 20);
+    const r = ui.rect(.{ .width = 40, .height = 20 });
     r.bg = ui.theme.panel;
     return r;
 }
 
 fn borderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(40, 20);
+    const r = ui.rect(.{ .width = 40, .height = 20 });
     r.border = ui.theme.accent;
     return r;
 }
 
 fn bgAndBorderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(40, 20);
+    const r = ui.rect(.{ .width = 40, .height = 20 });
     r.bg = ui.theme.panel;
     r.border = ui.theme.accent;
     return r;

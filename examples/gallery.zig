@@ -60,30 +60,30 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 }
 
 fn navButton(ui: *elmz.Ui(Msg), label: []const u8, t: Tab, active: bool) !*elmz.Element(Msg) {
-    const b = ui.button(label, .{ .tab = t });
+    const b = ui.button(.{ .label = label, .msg = .{ .tab = t } });
     b.border = if (active) ui.theme.accent else ui.theme.border;
     if (active) b.bg = ui.theme.selected;
     return b;
 }
 
 fn overviewBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
-    const controls = ui.row(&.{
-        ui.button("-", .dec),
-        ui.button("+", .inc),
-        ui.button("reset", .reset),
-    });
+    const controls = ui.row(.{ .children = &.{
+        ui.button(.{ .label = "-", .msg = .dec }),
+        ui.button(.{ .label = "+", .msg = .inc }),
+        ui.button(.{ .label = "reset", .msg = .reset }),
+    } });
     controls.gap = 8;
 
-    const meter = ui.bar(@as(f32, @floatFromInt(m.level)) / 10.0);
+    const meter = ui.bar(.{ .value = @as(f32, @floatFromInt(m.level)) / 10.0 });
     meter.height = 12;
 
-    return ui.column(&.{
-        ui.muted("PRIMITIVES", 10),
-        ui.text("text / quad / bar", 14),
+    return ui.column(.{ .children = &.{
+        ui.text(.{ .label = "PRIMITIVES", .size = 10, .tone = .muted }),
+        ui.text(.{ .label = "text / quad / bar", .size = 14 }),
         ui.spaceBefore(ui.textFmt("level {d} of 10", .{m.level}, 14), 6),
         meter,
         ui.spaceBefore(controls, 10),
-    });
+    } });
 }
 
 fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
@@ -93,12 +93,12 @@ fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
 
         // A 4px accent block doubles as the selection marker: `bar` with a
         // width override is the only way to draw a small solid quad.
-        const marker = ui.bar(1);
+        const marker = ui.bar(.{ .value = 1 });
         marker.width = 4;
         marker.height = 14;
         if (!selected) marker.bg = ui.theme.panel;
 
-        const line = ui.row(&.{ marker, ui.textFmt("{d}   {s}", .{ i + 1, name }, 14) });
+        const line = ui.row(.{ .children = &.{ marker, ui.textFmt("{d}   {s}", .{ i + 1, name }, 14) } });
         line.pad = 8;
         line.gap = 10;
         line.on_press = .{ .select = i };
@@ -110,35 +110,35 @@ fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
         rows[i] = line;
     }
 
-    return ui.column(&.{
-        ui.muted("A LIST", 10),
+    return ui.column(.{ .children = &.{
+        ui.text(.{ .label = "A LIST", .size = 10, .tone = .muted }),
         ui.spaceBefore(rows[0], 2),
         rows[1],
         rows[2],
         rows[3],
         ui.spaceBefore(ui.textFmt("selected {s}", .{names[m.selected]}, 10), 4),
-    });
+    } });
 }
 
 fn aboutBody(ui: *elmz.Ui(Msg)) !*elmz.Element(Msg) {
-    return ui.column(&.{
-        ui.muted("HOW IT WORKS", 10),
-        ui.text("NO RETAINED TREE", 14),
-        ui.spaceBefore(ui.muted("view returns a tree of values.", 10), 4),
-        ui.muted("no widgets; just elements, gaps, pads.", 10),
-        ui.muted("layout measures it, paint emits", 10),
-        ui.muted("quads and text, and the backend", 10),
-        ui.muted("turns those into pixels.", 10),
-        ui.muted("nothing survives the frame.", 10),
-    });
+    return ui.column(.{ .children = &.{
+        ui.text(.{ .label = "HOW IT WORKS", .size = 10, .tone = .muted }),
+        ui.text(.{ .label = "NO RETAINED TREE", .size = 14 }),
+        ui.spaceBefore(ui.text(.{ .label = "view returns a tree of values.", .size = 10, .tone = .muted }), 4),
+        ui.text(.{ .label = "no widgets; just elements, gaps, pads.", .size = 10, .tone = .muted }),
+        ui.text(.{ .label = "layout measures it, paint emits", .size = 10, .tone = .muted }),
+        ui.text(.{ .label = "quads and text, and the backend", .size = 10, .tone = .muted }),
+        ui.text(.{ .label = "turns those into pixels.", .size = 10, .tone = .muted }),
+        ui.text(.{ .label = "nothing survives the frame.", .size = 10, .tone = .muted }),
+    } });
 }
 
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-    const nav = ui.row(&.{
+    const nav = ui.row(.{ .children = &.{
         try navButton(ui, "overview", .overview, m.tab == .overview),
         try navButton(ui, "list", .list, m.tab == .list),
         try navButton(ui, "about", .about, m.tab == .about),
-    });
+    } });
     nav.gap = 8;
 
     const body = switch (m.tab) {
@@ -147,21 +147,21 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .about => try aboutBody(ui),
     };
 
-    const panel = ui.column(&.{body});
+    const panel = ui.column(.{ .children = &.{body} });
     panel.pad = 16;
     panel.gap = 6;
     panel.bg = ui.theme.panel;
     panel.border = ui.theme.border;
 
-    const root = ui.column(&.{
-        ui.text("ELMZ GALLERY", 22),
-        ui.muted("a runtime above its backend", 10),
+    const root = ui.column(.{ .children = &.{
+        ui.text(.{ .label = "ELMZ GALLERY", .size = 22 }),
+        ui.text(.{ .label = "a runtime above its backend", .size = 10, .tone = .muted }),
         ui.spaceBefore(nav, 8),
         ui.spaceBefore(panel, 6),
         ui.spaceBefore(ui.textFmt("clicks {d}   view {s}   level {d}", .{
             m.clicks, @tagName(m.tab), m.level,
         }, 10), 8),
-    });
+    } });
     root.pad = 22;
     root.gap = 4;
     return root;

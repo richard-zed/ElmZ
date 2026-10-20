@@ -65,7 +65,7 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 /// A nav tab is a text element with a fill and padding -- not a widget. The
 /// only thing that makes it "selected" is which theme role it is filled with.
 fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *elmz.Element(Msg) {
-    const e = ui.text(label, 14);
+    const e = ui.text(.{ .label = label, .size = 14 });
     e.pad = 11;
     e.radius = 8;
     e.bg = if (active) ui.theme.selected else ui.theme.control;
@@ -76,13 +76,13 @@ fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *
 }
 
 fn listRow(ui: *elmz.Ui(Msg), label: []const u8, meta: []const u8, msg: Msg, key: u64) *elmz.Element(Msg) {
-    const name = ui.text(label, 14);
+    const name = ui.text(.{ .label = label, .size = 14 });
     name.key = key;
     name.on_press = msg;
 
-    const note = ui.muted(meta, 11);
+    const note = ui.text(.{ .label = meta, .size = 11, .tone = .muted });
 
-    const row = ui.row(&.{ name, ui.spaceBefore(note, 10) });
+    const row = ui.row(.{ .children = &.{ name, ui.spaceBefore(note, 10) } });
     row.pad = 6;
     row.radius = 6;
     return row;
@@ -94,47 +94,47 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const green = elmz.Color.rgbHex(0xa6e3a1);
 
     // -- header ------------------------------------------------------------
-    const title = ui.text("elmz", 28);
+    const title = ui.text(.{ .label = "elmz", .size = 28 });
     title.fg_grad = elmz.Fill.hgrad(th.accent, pink);
 
-    const sub = ui.muted("one frame: layout, fills, states, keys, theme", 12);
+    const sub = ui.text(.{ .label = "one frame: layout, fills, states, keys, theme", .size = 12, .tone = .muted });
 
-    const head = ui.column(&.{ title, sub });
+    const head = ui.column(.{ .children = &.{ title, sub } });
     head.gap = 2;
 
     // -- nav ---------------------------------------------------------------
-    const nav = ui.row(&.{
+    const nav = ui.row(.{ .children = &.{
         tab(ui, "Files", m.tab == 0, .tab_files, 1),
         tab(ui, "Activity", m.tab == 1, .tab_activity, 2),
         tab(ui, "Settings", m.tab == 2, .tab_settings, 3),
-    });
+    } });
     nav.gap = 8;
 
     // -- left card: a list where every row is its own hit region -----------
-    const card_head = ui.text("recent", 12);
+    const card_head = ui.text(.{ .label = "recent", .size = 12 });
     card_head.fg = th.text_muted;
 
-    const rows = ui.column(&.{
+    const rows = ui.column(.{ .children = &.{
         listRow(ui, "counter.zig", "12 prims", .pick_a, 10),
         listRow(ui, "tasks.zig", "38 prims", .pick_b, 11),
         listRow(ui, "gallery.zig", "37 prims", .pick_c, 12),
-    });
+    } });
     rows.gap = 2;
 
-    const progress = ui.bar(0.62);
+    const progress = ui.bar(.{ .value = 0.62 });
     progress.width = 308;
     progress.height = 12;
     progress.radius = 6;
     progress.fg_grad = elmz.Fill.hgrad(th.accent, green);
 
-    const usage = ui.muted("62% of a week of frames", 11);
+    const usage = ui.text(.{ .label = "62% of a week of frames", .size = 11, .tone = .muted });
 
-    const left = ui.column(&.{
+    const left = ui.column(.{ .children = &.{
         card_head,
         ui.spaceBefore(rows, 10),
         ui.spaceBefore(progress, 14),
         ui.spaceBefore(usage, 8),
-    });
+    } });
     left.pad = 16;
     left.width = 340;
     left.bg = th.panel;
@@ -142,33 +142,30 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     left.border = th.border;
 
     // -- right card: actions, one of them inert ----------------------------
-    const actions_head = ui.text("actions", 12);
+    const actions_head = ui.text(.{ .label = "actions", .size = 12 });
     actions_head.fg = th.text_muted;
 
-    const primary = ui.button("Sync now", .primary);
+    const primary = ui.button(.{ .label = "Sync now", .msg = .primary });
     primary.key = 4;
     primary.width = 188;
     primary.bg_grad = elmz.Fill.hgrad(th.control, th.selected);
     primary.fg = th.text;
 
-    const inert = ui.button("Unavailable", .primary);
+    const inert = ui.button(.{ .label = "Unavailable", .msg = .primary });
     inert.key = 5;
     inert.width = 188;
     inert.disabled = true;
 
-    const inert_note = ui.muted(
-        "the second button stays in the hit list with active = false, so a click cannot land on whatever is behind it",
-        11,
-    );
+    const inert_note = ui.text(.{ .label = "the second button stays in the hit list with active = false, so a click cannot land on whatever is behind it", .size = 11, .tone = .muted });
     inert_note.wrap = true;
     inert_note.width = 188;
 
-    const right = ui.column(&.{
+    const right = ui.column(.{ .children = &.{
         actions_head,
         ui.spaceBefore(primary, 10),
         ui.spaceBefore(inert, 8),
         ui.spaceBefore(inert_note, 12),
-    });
+    } });
     right.pad = 16;
     right.width = 216;
     right.bg = th.panel;
@@ -176,17 +173,17 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     right.border_grad = elmz.Fill.hgrad(pink, th.accent);
 
     // -- body and page -----------------------------------------------------
-    const body = ui.row(&.{ left, right });
+    const body = ui.row(.{ .children = &.{ left, right } });
     body.gap = 16;
 
-    const footer = ui.muted("frames: showcase.png, showcase-hover.png, showcase-error.png", 11);
+    const footer = ui.text(.{ .label = "frames: showcase.png, showcase-hover.png, showcase-error.png", .size = 11, .tone = .muted });
 
-    const root = ui.column(&.{
+    const root = ui.column(.{ .children = &.{
         head,
         ui.spaceBefore(nav, 16),
         ui.spaceBefore(body, 14),
         ui.spaceBefore(footer, 16),
-    });
+    } });
     root.pad = 24;
     return root;
 }

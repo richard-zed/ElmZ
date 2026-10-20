@@ -67,45 +67,42 @@ fn whichName(w: Which) []const u8 {
 }
 
 fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-    const a = ui.button("A", .a);
+    const a = ui.button(.{ .label = "A", .msg = .a });
     a.width = 120;
     a.height = 56;
     // The last button that fired stays tinted, so a click that went nowhere
     // looks like nowhere: neither counter moves and neither button lights.
     a.bg = if (m.last == .a) ui.theme.accent else ui.theme.control;
 
-    const b = ui.button("B", .b);
+    const b = ui.button(.{ .label = "B", .msg = .b });
     b.width = 120;
     b.height = 56;
     b.bg = if (m.last == .b) ui.theme.accent else ui.theme.control;
 
-    const reset = ui.button("reset", .reset);
+    const reset = ui.button(.{ .label = "reset", .msg = .reset });
     reset.width = 92;
 
-    const pair = ui.row(&.{ a, ui.spaceBefore(b, 16) });
+    const pair = ui.row(.{ .children = &.{ a, ui.spaceBefore(b, 16) } });
 
     const tally = ui.textFmt("last fired: {s}      total: {d}", .{ whichName(m.last), m.total }, 12);
     tally.fg = ui.theme.text_muted;
 
-    const body = ui.muted(
-        "Hover a button and it lights up. Press it: it stays lit even if " ++
-            "you drag onto the other one, and the button under the cursor " ++
-            "stays dark, because the press owns the click. Release " ++
-            "elsewhere and nothing fires; release back on it and it does.",
-        12,
-    );
+    const body = ui.text(.{ .label = "Hover a button and it lights up. Press it: it stays lit even if " ++
+        "you drag onto the other one, and the button under the cursor " ++
+        "stays dark, because the press owns the click. Release " ++
+        "elsewhere and nothing fires; release back on it and it does.", .size = 12, .tone = .muted });
     body.wrap = true;
 
-    const root = ui.column(&.{
-        ui.text("ELMZ", 22),
-        ui.muted("the press owns the click, not the release", 12),
+    const root = ui.column(.{ .children = &.{
+        ui.text(.{ .label = "ELMZ", .size = 22 }),
+        ui.text(.{ .label = "the press owns the click, not the release", .size = 12, .tone = .muted }),
         ui.spaceBefore(pair, 14),
         ui.spaceBefore(ui.textFmt("A fired {d}  ·  B fired {d}", .{ m.a, m.b }, 18), 14),
         ui.spaceBefore(tally, 4),
         ui.spaceBefore(reset, 16),
         ui.spaceBefore(body, 18),
-        ui.spaceBefore(ui.muted("Esc quits.", 12), 12),
-    });
+        ui.spaceBefore(ui.text(.{ .label = "Esc quits.", .size = 12, .tone = .muted }), 12),
+    } });
     root.pad = 24;
     return root;
 }

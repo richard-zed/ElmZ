@@ -44,23 +44,23 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 }
 
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-    const dec = ui.button("-", .dec);
+    const dec = ui.button(.{ .label = "-", .msg = .dec });
     dec.width = 56;
-    const inc = ui.button("+", .inc);
+    const inc = ui.button(.{ .label = "+", .msg = .inc });
     inc.width = 56;
-    const reset = ui.button("reset", .reset);
+    const reset = ui.button(.{ .label = "reset", .msg = .reset });
     reset.width = 92;
 
-    const acts = ui.row(&.{ dec, ui.spaceBefore(inc, 8), ui.spaceBefore(reset, 14) });
+    const acts = ui.row(.{ .children = &.{ dec, ui.spaceBefore(inc, 8), ui.spaceBefore(reset, 14) } });
 
-    const root = ui.column(&.{
-        ui.text("ELMZ", 22),
-        ui.muted("an elm-shaped runtime, zig 0.16", 12),
+    const root = ui.column(.{ .children = &.{
+        ui.text(.{ .label = "ELMZ", .size = 22 }),
+        ui.text(.{ .label = "an elm-shaped runtime, zig 0.16", .size = 12, .tone = .muted }),
         ui.spaceBefore(ui.textFmt("{d}", .{m.count}, 42), 10),
         ui.spaceBefore(acts, 8),
-        ui.spaceBefore(ui.bar(@as(f32, @floatFromInt(m.count + 3)) / 8.0), 16),
+        ui.spaceBefore(ui.bar(.{ .value = @as(f32, @floatFromInt(m.count + 3)) / 8.0 }), 16),
         ui.spaceBefore(ui.textFmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }, 12), 10),
-    });
+    } });
     root.pad = 24;
     return root;
 }
