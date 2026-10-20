@@ -767,12 +767,18 @@ pub const Canvas = struct {
                 var cov = ramp(h.mode, rd, w, core);
                 if (cov > 0) {
                     cov *= switch (h.mode) {
-                        // Not feathered. The face's own fill already antialiases
-                        // this boundary, and the rim underneath it is SOFT there
-                        // (zero slope at the edge, see `ramp`), so multiplying by
-                        // the boundary coverage as well just halves the rim's last
-                        // pixel and leaves a seam where the two disagree.
-                        .inner_glow => 1,
+                        // The rim lives on the face, so it has to stop where the
+                        // face stops -- and the face's own edge is antialiased.
+                        // Multiply by the coverage the fill would have at this
+                        // pixel and the rim composites exactly as if it were part
+                        // of the fill.
+                        //
+                        // This feather was removed once before and deserved to be:
+                        // it was measuring against the INSET silhouette, so the
+                        // half-strength ring landed three pixels inside the face, in
+                        // the middle of the rim, and read as a seam. The shape is
+                        // the element now, so it lands on the edge.
+                        .inner_glow => std.math.clamp(0.5 - d, 0, 1),
                         .glow => 1,
                         .outer_glow => cut,
                     };
