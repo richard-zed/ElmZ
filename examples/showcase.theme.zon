@@ -1,0 +1,25 @@
+// This is the file that ships as the project's live `theme.zon` (both are in
+// the project root, next to build.zig, which is where every example run step
+// looks because their cwd is pinned there).
+//
+// Edit `theme.zon` and rerun -- or leave the window open and save, since the
+// runner stats the file once per loop. `zig build theme` restores this copy,
+// so it is also the reset button.
+//
+// Every role is optional -- an omitted one inherits the library default, so
+// this file could list only `.accent` and still be legal.
+.{
+    .version = 1,
+    .theme = .{
+        .bg = 0x1f1a14,
+        .panel = 0x2b241b,
+        .border = 0x8a7a63,
+        .text = 0xf2e6d8,
+        .text_muted = 0xb9a892,
+        .control = 0x3a3126,
+        .hover = 0x5c4f3d,
+        .pressed = 0x6f6049,
+        .selected = 0x473b2c,
+        .accent = 0xe0b060,
+    },
+}
