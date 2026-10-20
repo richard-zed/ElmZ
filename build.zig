@@ -412,6 +412,27 @@ pub fn build(b: *std.Build) void {
         &runExample(b, clicks_win).step,
     );
 
+    const glow_win = b.addExecutable(.{
+        .name = "glow-sdl3",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/glow_window.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+                .{ .name = "platform_sdl3", .module = sdl_mod },
+            },
+        }),
+    });
+    b.step("glow-sdl3", "build the glow demo in an SDL3 window (needs libsdl3-dev)").dependOn(
+        &b.addInstallArtifact(glow_win, .{}).step,
+    );
+    b.step("run-glow-sdl3", "run the glow demo in an SDL3 window").dependOn(
+        &runExample(b, glow_win).step,
+    );
+
     const paint_win = b.addExecutable(.{
         .name = "paint-sdl3",
         .root_module = b.createModule(.{

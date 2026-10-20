@@ -30,6 +30,20 @@ const software = @import("software");
 const W = 460;
 const H = 216;
 
+/// The app declaration the window composition binds to. Same shape as every
+/// other example: title, size, state, and optionally the keys a `theme.zon`
+/// may set that the library knows nothing about.
+pub const app = .{
+    .title = "elmz - glow, sdf vs baked",
+    .theme_path = "theme.zon",
+    .theme_tokens = Tokens,
+    .size = .{ .w = W, .h = H },
+    .Model = Model,
+    .Msg = Msg,
+    .update = update,
+    .view = view,
+};
+
 pub const Model = struct {
     /// set from the theme file's `.app` tier at startup
     title_size: f32 = 30,
