@@ -28,14 +28,16 @@
             .accent = 0xe0b060,
         },
 
-        // Gradients are per role and optional. Uncomment to see what the
-        // renderer can do that a flat token cannot -- every place this role is
-        // used as a FILL picks it up, and the flat `.colors` entry above stays
-        // as the fallback and for text/borders.
+        // Gradients are per role and optional: every place the role is used as
+        // a FILL picks this up, and the `.colors` entry above stays as the
+        // fallback and for text and borders.
         //
-        // .gradients = .{
-        //     .accent = .{ .linear = .{ .dir = .diagonal, .from = 0xe0b060, .to = 0x8a5a2b } },
-        //     .panel = .{ .radial = .{ .inner = 0x3a3126, .outer = 0x1f1a14, .radius = 0.7 } },
-        // },
+        // `from` is omitted on purpose. An omitted end inherits the role's own
+        // colour, so this follows `.accent` if you edit it above -- name only
+        // the end that differs and the gradient cannot drift from the palette.
+        .gradients = .{
+            .accent = .{ .linear = .{ .dir = .horizontal, .to = 0x8a5a2b } },
+            .panel = .{ .radial = .{ .outer = 0x1f1a14, .radius = 0.7 } },
+        },
     },
 }

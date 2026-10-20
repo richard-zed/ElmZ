@@ -143,14 +143,18 @@ pub const Dir = enum { vertical, horizontal, diagonal };
 
 pub const LinearSpec = struct {
     dir: Dir = .vertical,
-    from: u32,
-    to: u32,
+    /// `null` inherits the role's own colour from `.colors`. Leaving an end
+    /// out is how a gradient stays tied to the palette instead of holding a
+    /// second copy of the same hex.
+    from: ?u32 = null,
+    to: ?u32 = null,
 };
 
 pub const RadialSpec = struct {
-    /// The colour at the centre and the colour it falls off to.
-    inner: u32,
-    outer: u32,
+    /// The colour at the centre and the colour it falls off to. `null`
+    /// inherits the role's own colour, same as the linear ends.
+    inner: ?u32 = null,
+    outer: ?u32 = null,
     /// Fraction of the box WIDTH, matching `Fill.Radial`.
     radius: f32 = 0.5,
 };
@@ -164,15 +168,23 @@ pub const GradientSpec = union(enum) {
     linear: LinearSpec,
     radial: RadialSpec,
 
-    pub fn resolve(self: GradientSpec) elmz.Fill {
+    /// `fallback` is the role's resolved colour, used for whichever end the
+    /// file left out.
+    pub fn resolve(self: GradientSpec, fallback: Color) elmz.Fill {
         return switch (self) {
-            .linear => |l| switch (l.dir) {
-                .vertical => elmz.Fill.vgrad(Color.rgbHex(l.from), Color.rgbHex(l.to)),
-                .horizontal => elmz.Fill.hgrad(Color.rgbHex(l.from), Color.rgbHex(l.to)),
-                .diagonal => elmz.Fill.diag(Color.rgbHex(l.from), Color.rgbHex(l.to)),
+            .linear => |l| blk: {
+                const a = if (l.from) |h| Color.rgbHex(h) else fallback;
+                const b = if (l.to) |h| Color.rgbHex(h) else fallback;
+                break :blk switch (l.dir) {
+                    .vertical => elmz.Fill.vgrad(a, b),
+                    .horizontal => elmz.Fill.hgrad(a, b),
+                    .diagonal => elmz.Fill.diag(a, b),
+                };
             },
             .radial => |r| blk: {
-                var f = elmz.Fill.radialFill(Color.rgbHex(r.inner), Color.rgbHex(r.outer));
+                const a = if (r.inner) |h| Color.rgbHex(h) else fallback;
+                const b = if (r.outer) |h| Color.rgbHex(h) else fallback;
+                var f = elmz.Fill.radialFill(a, b);
                 f.radial.radius = r.radius;
                 break :blk f;
             },
@@ -268,10 +280,15 @@ pub const ThemeSpec = struct {
         return self.colors.overlay(base);
     }
 
-    pub fn resolveGradients(self: ThemeSpec) Gradients {
+    /// `theme` is the already-resolved palette, which is where an omitted
+    /// gradient end gets its colour. Passing it here rather than at paint time
+    /// means a gradient and the palette can never disagree.
+    pub fn resolveGradients(self: ThemeSpec, theme: Theme) Gradients {
         var out: Gradients = .{};
         inline for (@typeInfo(GradientsSpec).@"struct".fields) |f| {
-            if (@field(self.gradients, f.name)) |spec| @field(out, f.name) = spec.resolve();
+            if (@field(self.gradients, f.name)) |spec| {
+                @field(out, f.name) = spec.resolve(@field(theme, f.name));
+            }
         }
         return out;
     }
@@ -384,13 +401,7 @@ pub fn loadTheme(
         return error.Palette;
     };
 
-    return .{ .theme = theme, .gradients = file.theme.resolveGradients(), .app = file.app };
-}
-
-/// The library palette: the embedded listing laid over the compiled floor.
-pub fn defaultTheme(gpa: Allocator, diag: *ThemeDiag) ThemeLoadError!Theme {
-    const loaded = try loadTheme(struct {}, gpa, "theme.defaults.zon", defaults_zon, Theme{}, diag);
-    return loaded.theme;
+    return .{ .theme = theme, .gradients = file.theme.resolveGradients(theme), .app = file.app };
 }
 
 // ---------------------------------------------------------------------------
@@ -444,8 +455,8 @@ test "the shipped defaults list every role" {
 
 test "the shipped defaults resolve to the compiled palette" {
     var diag: ThemeDiag = .{};
-    const t = try defaultTheme(std.testing.allocator, &diag);
-    try std.testing.expect(std.meta.eql(@as(Theme, .{}), t));
+    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.defaults.zon", defaults_zon, Theme{}, &diag);
+    try std.testing.expect(std.meta.eql(@as(Theme, .{}), loaded.theme));
 }
 
 test "an override replaces exactly one role" {
@@ -481,6 +492,54 @@ test "a gradient resolves to the fill a theme could never express before" {
     // And lookup by role name works, so an app need not know the shape.
     try std.testing.expect(loaded.gradients.get("accent") != null);
     try std.testing.expect(loaded.gradients.get("nothing") == null);
+}
+
+test "an omitted gradient end inherits the role colour" {
+    // The drift this removes: a gradient that spells both ends holds a second
+    // copy of the palette, so editing `.colors` leaves it behind. Naming only
+    // the end that differs keeps it tied to the palette.
+    const only_to =
+        \\.{ .version = 2, .theme = .{
+        \\    .colors = .{ .accent = 0x112233 },
+        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = .horizontal, .to = 0xffffff } } },
+        \\} }
+    ;
+    var diag: ThemeDiag = .{};
+    const a = try loadTheme(struct {}, std.testing.allocator, "theme.zon", only_to, Theme{}, &diag);
+    try std.testing.expect(std.meta.eql(
+        a.gradients.accent.?,
+        elmz.Fill.hgrad(Color.rgbHex(0x112233), Color.rgbHex(0xffffff)),
+    ));
+
+    // Same gradient, different palette role: the inherited end moves with it.
+    const other =
+        \\.{ .version = 2, .theme = .{
+        \\    .colors = .{ .accent = 0x445566 },
+        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = .horizontal, .to = 0xffffff } } },
+        \\} }
+    ;
+    var diag2: ThemeDiag = .{};
+    const b = try loadTheme(struct {}, std.testing.allocator, "theme.zon", other, Theme{}, &diag2);
+    try std.testing.expect(std.meta.eql(
+        b.gradients.accent.?,
+        elmz.Fill.hgrad(Color.rgbHex(0x445566), Color.rgbHex(0xffffff)),
+    ));
+
+    // A radial with nothing named is the role colour at both ends: legal, and
+    // visibly a no-op rather than an error.
+    const bare =
+        \\.{ .version = 2, .theme = .{
+        \\    .gradients = .{ .panel = .{ .radial = .{ .radius = 0.4 } } },
+        \\} }
+    ;
+    var diag3: ThemeDiag = .{};
+    const c = try loadTheme(struct {}, std.testing.allocator, "theme.zon", bare, Theme{}, &diag3);
+    // The radius came from the file, so the expectation has to carry it too --
+    // comparing against the default 0.5 is the mistake this assertion made
+    // first, and it failed for that reason rather than because inheritance broke.
+    var expected = elmz.Fill.radialFill((Theme{}).panel, (Theme{}).panel);
+    expected.radial.radius = 0.4;
+    try std.testing.expect(std.meta.eql(c.gradients.panel.?, expected));
 }
 
 test "a gradient direction typo is a parse error, not a fallback" {

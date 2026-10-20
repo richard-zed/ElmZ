@@ -432,7 +432,6 @@ pub const ThemeLoadError = theme.ThemeLoadError;
 pub const theme_version = theme.theme_version;
 pub const defaults_zon = theme.defaults_zon;
 pub const loadTheme = theme.loadTheme;
-pub const defaultTheme = theme.defaultTheme;
 pub const checkPalette = theme.checkPalette;
 
 test {

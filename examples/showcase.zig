@@ -83,8 +83,16 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const pink = elmz.Color.rgbHex(0xf5c2e7);
     const green = elmz.Color.rgbHex(0xa6e3a1);
 
+    // Theme gradients win, and the app-composed ones are the fallback. This is
+    // the whole point of `.gradients` existing: the file gets to restyle a
+    // surface the app already paints, without the app knowing what it chose.
+    // A theme with no `.gradients` section renders exactly as before.
+    const accent_fill = ui.gradients.get("accent") orelse elmz.Fill.hgrad(th.accent, pink);
+    const bar_fill = ui.gradients.get("accent") orelse elmz.Fill.hgrad(th.accent, green);
+    const edge_fill = ui.gradients.get("panel") orelse elmz.Fill.hgrad(pink, th.accent);
+
     // -- header ------------------------------------------------------------
-    const title = ui.text(.{ .label = "elmz", .size = 28, .style = .{ .fg_grad = elmz.Fill.hgrad(th.accent, pink) } });
+    const title = ui.text(.{ .label = "elmz", .size = 28, .style = .{ .fg_grad = accent_fill } });
 
     const sub = ui.text(.{ .label = "one frame: layout, fills, states, keys, theme", .size = 12, .tone = .muted });
 
@@ -106,7 +114,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         listRow(ui, "gallery.zig", "37 prims", .pick_c, 12),
     }, .gap = 2 });
 
-    const progress = ui.bar(.{ .value = 0.62, .width = 308, .height = 12, .style = .{ .radius = 6, .fg_grad = elmz.Fill.hgrad(th.accent, green) } });
+    const progress = ui.bar(.{ .value = 0.62, .width = 308, .height = 12, .style = .{ .radius = 6, .fg_grad = bar_fill } });
 
     const usage = ui.text(.{ .label = "62% of a week of frames", .size = 11, .tone = .muted });
 
@@ -131,7 +139,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         ui.spaceBefore(primary, 10),
         ui.spaceBefore(inert, 8),
         ui.spaceBefore(inert_note, 12),
-    }, .width = 216, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border_grad = elmz.Fill.hgrad(pink, th.accent) } });
+    }, .width = 216, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border_grad = edge_fill } });
 
     // -- body and page -----------------------------------------------------
     const body = ui.row(.{ .children = &.{ left, right }, .gap = 16 });
@@ -177,6 +185,9 @@ pub fn main(init: std.process.Init) !void {
 
     const chain = runner.resolveChain(gpa, io, .{}, base_owned, user_owned);
     rt.ui.theme = chain.theme;
+    // Both halves of a loaded theme, or a file's `.gradients` would be parsed
+    // and then dropped on the one path that draws a picture of it.
+    rt.ui.gradients = chain.gradients;
     if (chain.base_from_file) theme_name = "theme.defaults.zon";
     if (chain.user_from_file) theme_name = "theme.zon";
     if (chain.message()) |m| {
