@@ -113,6 +113,23 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&exe_install.step);
     b.step("counter", "build the headless counter").dependOn(&exe_install.step);
 
+    const fonts = b.addExecutable(.{
+        .name = "fonts",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/fonts.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+            },
+        }),
+    });
+    const fonts_install = b.addInstallArtifact(fonts, .{});
+    b.getInstallStep().dependOn(&fonts_install.step);
+    b.step("fonts", "build the headless font demo").dependOn(&fonts_install.step);
+
     const gallery = b.addExecutable(.{
         .name = "gallery",
         .root_module = b.createModule(.{
@@ -309,6 +326,10 @@ pub fn build(b: *std.Build) void {
     b.step("clicks", "build the headless clicks app").dependOn(&clicks_install.step);
     b.step("run-clicks", "run the click-ownership app headlessly (asserts the cases, writes clicks.png)").dependOn(
         &runExample(b, clicks).step,
+    );
+
+    b.step("run-fonts", "render the font demo headlessly (writes fonts*.png)").dependOn(
+        &runExample(b, fonts).step,
     );
 
     const run = runExample(b, exe);
