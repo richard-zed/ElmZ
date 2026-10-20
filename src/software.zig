@@ -416,7 +416,10 @@ pub const Canvas = struct {
         // second-guess is not an escape hatch, so `.sdf` is honoured even where
         // a stencil would be cheaper.
         //
-        // `.auto` is BAKED, always -- there is no longer a crossover to tune.
+        // Two paths, no policy: `baked` is the default value and the fast one,
+        // and there is no size threshold left to second-guess it. A heuristic
+        // that "improves" the default is the thing that made a low-blur halo
+        // slow for a year, so the choice is the caller's or nobody's.
         // The old rule sent blur < 10 to the distance field on the argument
         // that "the ramp has few pixels left to cache, and baking would cost
         // more than it saves". That was reasoning about a mask the size of the
@@ -436,7 +439,6 @@ pub const Canvas = struct {
         const use_sdf = switch (h.quality) {
             .sdf => true,
             .baked => false,
-            .auto => false,
         };
         if (use_sdf) return self.haloSdf(rect, corner, h, clip);
         self.haloBaked(rect, corner, h, clip);
@@ -1377,7 +1379,7 @@ test "a blit clipped by the destination edge drops the rest" {
     dst.blitFrom(&src, .{ 2, 0 });
 }
 
-test "auto always bakes, and an explicit .sdf never touches the cache" {
+test "the default bakes, and an explicit .sdf never touches the cache" {
     var c = try Canvas.init(std.testing.allocator, 200, 160);
     defer c.deinit();
 
@@ -1389,17 +1391,17 @@ test "auto always bakes, and an explicit .sdf never touches the cache" {
     // A small blur used to be handed to the distance field, on the argument
     // that baking a mask would cost more than the ramp saved. It does not any
     // more: a template bake is small and independent of the silhouette.
-    c.halo(rect, 8, .{ .color = color, .blur = 6, .mode = .glow, .quality = .auto }, clip);
+    c.halo(rect, 8, .{ .color = color, .blur = 6, .mode = .glow }, clip);
     try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
     try std.testing.expectEqual(@as(usize, 1), c.bakes);
 
     // A different blur is a different stencil, and the second draw of it must
     // find the first rather than bake again. `bakes` is what tells a hit from
     // a re-bake; the entry count alone cannot.
-    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
+    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow }, clip);
     try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
     try std.testing.expectEqual(@as(usize, 2), c.bakes);
-    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
+    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow }, clip);
     try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
     try std.testing.expectEqual(@as(usize, 2), c.bakes);
 

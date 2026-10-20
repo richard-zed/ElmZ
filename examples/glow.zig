@@ -87,9 +87,10 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     });
 
     // Two buttons, identical in every visible respect -- same colour, same blur,
-    // same spread -- differing ONLY in which renderer is asked for. `.auto`
-    // would bake both; forcing `.sdf` on the left is deliberately the slow path,
-    // which is the only way a side-by-side can show that the two paths agree.
+    // same spread -- differing ONLY in which renderer is asked for. Leaving the
+    // default alone would bake both; forcing `.sdf` on the left is deliberately
+    // the slow path, which is the only way a side-by-side can show that the two
+    // paths agree.
     //
     // If they ever diverge, it will be here first: the stencil quantises
     // coverage to a byte and the distance field does not.

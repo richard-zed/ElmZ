@@ -331,22 +331,25 @@ pub const Halo = struct {
     spread: f32 = 0,
     offset: [2]f32 = .{ 0, 0 },
     mode: Mode = .glow,
-    /// How the halo is computed. An explicit `sdf` or `baked` is a REQUEST and
-    /// takes priority over anything the renderer would have picked -- it is an
-    /// escape hatch, and an escape hatch that a heuristic can overrule is not
-    /// one.
+    /// How the halo is computed. `baked` is the default and the fast path: a
+    /// stencil is built once and blitted, 9-sliced so its cost does not scale
+    /// with the silhouette.
     ///
-    /// `auto` bakes. There is no size threshold any more: one was tried, on the
-    /// argument that a small ramp leaves too little to cache, and the benchmark
-    /// inverted it at every blur measured -- baked wins cold as well as hot, and
-    /// still wins when the cache thrashes. `.sdf` remains the escape hatch for
-    /// the cases where a stencil cannot exist at all (no allocator, or a
-    /// silhouette past the mask cap), and the two paths must stay within
-    /// tolerance of each other, which the agreement tests pin.
-    quality: Quality = .auto,
+    /// There is deliberately no `auto`. One existed to hide a size threshold --
+    /// small ramps went to the distance field on the argument that they left too
+    /// little to cache -- and the benchmark inverted that at every blur measured:
+    /// baked wins cold as well as hot, and still wins when the cache thrashes.
+    /// A value that always resolves to the default is a synonym, not a choice,
+    /// so it was deleted rather than left to imply a distinction.
+    ///
+    /// `.sdf` is the escape hatch, and it is also the fallback: when a stencil
+    /// cannot exist at all -- no allocator, or a silhouette past the mask cap --
+    /// the renderer drops to the distance field itself. The two paths must stay
+    /// within tolerance of each other, which the agreement tests pin.
+    quality: Quality = .baked,
 
     pub const Mode = enum { glow, shadow };
-    pub const Quality = enum { auto, sdf, baked };
+    pub const Quality = enum { baked, sdf };
 };
 
 pub const Primitive = union(enum) {
