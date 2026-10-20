@@ -7,7 +7,12 @@
 //!   2. a SHADOW under a card, offset down, which is the silhouette of the
 //!      card drawn behind it;
 //!   3. a BUTTON THAT GLOWS ON HOVER -- the halo is derived during paint from
-//!      the pointer, exactly like `hover_bg` is, so `view` never sees it.
+//!      the pointer, exactly like `hover_bg` is, so `view` never sees it;
+//!   4. TWO BUTTONS THAT ARE THE SAME BUTTON, one asking the distance field
+//!      for its halo and one asking for a baked stencil. Same blur, same
+//!      spread, same colour: if the two renderers ever disagree, a person sees
+//!      both in one glance instead of having to remember the last one. The
+//!      pixel-level agreement claim lives in the test suite, not in the eye.
 //!
 //! Everything here is tokens plus geometry. There is not a single hex literal
 //! in `view`, which is the whole point of a theme protocol: swap the file, get
@@ -67,27 +72,57 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .width = W - 2 * 28 - 200 - 16,
     });
 
-    const primary = ui.button(.{
-        .label = "hover me",
+    // Two buttons, identical in every visible respect -- same colour, same blur,
+    // same spread -- differing ONLY in which renderer is asked for. Blur 26 sits
+    // past the 10px crossover, so `.auto` would bake both; forcing `.sdf` on the
+    // left is deliberately the expensive path, which is the only way a
+    // side-by-side can show that the two paths agree.
+    //
+    // If they ever diverge, it will be here first: the stencil quantises
+    // coverage to a byte and the distance field does not.
+    const halo = elmz.Halo{ .color = glow_color, .blur = 14, .spread = 2, .mode = .glow };
+
+    const sdf_button = ui.button(.{
+        .label = "sdf",
         .msg = .primary,
         .key = 1,
-        .width = 140,
+        .width = 68,
         .style = .{
             .bg = th.accent,
             .fg = th.bg,
             .radius = 10,
-            .halo = .{ .color = shadow_color, .blur = 12, .offset = .{ 0, 5 }, .mode = .shadow },
+            .halo = .{ .color = halo.color, .blur = halo.blur, .spread = halo.spread, .mode = halo.mode, .quality = .sdf },
         },
         // hover replaces the halo rather than adding one: a shadow sits UNDER
         // a thing, a glow spreads AROUND it, and the same element does not
         // want both at once.
-        .hover_halo = .{ .color = glow_color, .blur = 26, .spread = 2, .mode = .glow },
+        .hover_halo = .{ .color = glow_color, .blur = 18, .spread = 2, .mode = .glow },
     });
+
+    const baked_button = ui.button(.{
+        .label = "baked",
+        .msg = .primary,
+        .key = 2,
+        .width = 68,
+        .style = .{
+            .bg = th.accent,
+            .fg = th.bg,
+            .radius = 10,
+            // Same numbers, different path: one stencil built once and blitted,
+            // instead of a distance field evaluated per pixel every frame.
+            .halo = .{ .color = halo.color, .blur = halo.blur, .spread = halo.spread, .mode = halo.mode, .quality = .baked },
+        },
+        .hover_halo = .{ .color = glow_color, .blur = 18, .spread = 2, .mode = .glow },
+    });
+
+    // 24px apart: two 14px halos at an 8px gap overlap each other and read as one
+    // blob, which defeats the point of putting them side by side at all.
+    const buttons = ui.row(.{ .children = &.{ sdf_button, baked_button }, .gap = 24 });
 
     const card_inner = ui.column(.{
         .children = &.{
             ui.text(.{ .label = "a card with a shadow", .size = 14, .tone = .normal }),
-            ui.spaceBefore(primary, 16),
+            ui.spaceBefore(buttons, 16),
         },
     });
     const card = ui.column(.{
@@ -161,7 +196,14 @@ pub fn main(init: std.process.Init) !void {
         try canvas.writePng(io, gpa, "glow.png");
         const halos = countHalos(f.prims);
         try out.print("glow.png        {d} primitives, {d} halo(s), theme: {s}\n", .{ f.prims.len, halos, name });
+        // Two stencils: the card's shadow, and ONE shared by both buttons --
+        // they have identical geometry and blur, so the second bake is a cache
+        // hit. The SDF button would add a third if it were not on the other path.
+        try out.print("baked stencils in cache: {d} (card shadow + 1 shared by both buttons)\n", .{canvas.masks.items.len});
         for (f.hits) |h| {
+            if (h.key) |k| {
+                try out.print("  key {d}: x {d}..{d}, y {d}..{d}\n", .{ k, h.rect.x, h.rect.x + h.rect.w, h.rect.y, h.rect.y + h.rect.h });
+            }
             if (h.key == 1) button_rect = h.rect;
         }
     }
