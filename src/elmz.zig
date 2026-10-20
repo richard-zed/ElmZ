@@ -1205,6 +1205,11 @@ pub fn Ui(comptime M: type) type {
         /// Per-role gradient overrides from the theme file. Empty means every
         /// role paints its flat colour, which is the default look.
         gradients: Gradients = .{},
+        /// Which key holds focus, mirrored from the runtime before `view` runs.
+        /// The READ half of `Action.focus`: a widget can ask whether the caret
+        /// belongs to it, and the app does not have to keep a second copy of
+        /// the answer in its Model. Null means nothing holds focus.
+        focus: ?u64 = null,
         /// set when an allocation failed. The frame is then structurally
         /// degraded rather than aborted, which is what lets `view` be
         /// infallible. The runner reports it.
@@ -1834,12 +1839,32 @@ fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
 // ---------------------------------------------------------------------------
 
 /// What `update` asks the runtime to do after a message.
+/// A change the app asks the runtime to make to focus. Three-state, like every
+/// "unset means leave it alone" field in the library: `null` in `Action.focus`
+/// keeps whatever focus there was, `.set` names a keyed element, `.clear` gives
+/// focus up.
+pub const FocusChange = union(enum) {
+    set: u64,
+    clear,
+};
+
 pub fn Action(comptime M: type) type {
     return struct {
         repaint: bool = true,
         quit: bool = false,
         /// work to run off the UI thread; its result comes back as a message
         cmd: ?Cmd(M) = null,
+        /// Move focus, or give it up. Focus is RUNTIME state because the
+        /// runtime is what reflects it into paint, and the app is what decides
+        /// it -- so an effect is the only bridge between the two. Same shape as
+        /// `quit`: something the runtime does on the app's behalf, not a
+        /// message the app receives.
+        ///
+        /// This is what makes focus reachable from `runApp` at all. A hook gets
+        /// `*Model` and `update` returns an Action; neither ever sees the
+        /// runtime, so without this field the app could declare a focusable
+        /// element and never focus it.
+        focus: ?FocusChange = null,
 
         pub fn then(c: Cmd(M)) @This() {
             return .{ .cmd = c };
@@ -2159,6 +2184,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
 
         pub fn dispatch(self: *Self, msg: M) Action(M) {
             const action = self.updateFn(&self.state, msg);
+            if (action.focus) |change| self.focus = switch (change) {
+                .set => |key| key,
+                .clear => null,
+            };
             if (action.cmd) |cmd| {
                 if (self.exec == null) self.exec = Executor(M){ .gpa = self.gpa };
                 self.exec.?.submit(cmd);
@@ -2209,6 +2238,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             var arena = std.heap.ArenaAllocator.init(self.gpa);
             errdefer arena.deinit();
             const a = arena.allocator();
+
+            // The read side of `Action.focus`. Mirrored every frame, so view
+            // never has to remember what it asked for.
+            self.ui.focus = self.focus;
 
             const root = self.viewFn(&self.state, &self.ui);
 
@@ -3221,6 +3254,74 @@ test "an unkeyed element cannot be focused even when it says it is focusable" {
     var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
     defer f.deinit();
     try std.testing.expectEqual(@as(usize, 0), countAccentPrims(f.prims, th));
+}
+
+const FocusActionState = struct {
+    request: ?u64 = null,
+    seen: ?u64 = null,
+};
+
+fn focusActionUpdate(m: *FocusActionState, msg: FocusMsg) Action(FocusMsg) {
+    _ = msg;
+    if (m.request) |key| return .{ .focus = .{ .set = key } };
+    return .{ .focus = .clear };
+}
+
+fn focusActionView(m: *FocusActionState, ui: *Ui(FocusMsg)) *Element(FocusMsg) {
+    m.seen = ui.focus;
+    const b = ui.button(.{ .label = "ok", .msg = .nop });
+    b.focusable = true;
+    b.radius = 8;
+    b.key = focus_key;
+    return ui.column(.{ .children = &.{b} });
+}
+
+test "an action moves focus, view can read it, and the ring follows" {
+    const gpa = std.testing.allocator;
+    const th = Theme{};
+
+    var rt = Runtime(FocusActionState, FocusMsg).init(gpa, .{}, focusActionUpdate, focusActionView);
+    defer rt.deinit();
+
+    // Nothing holds focus, and an explicit clear is a no-op rather than an error.
+    try std.testing.expectEqual(@as(?u64, null), rt.focus);
+    _ = rt.dispatch(.nop);
+    try std.testing.expectEqual(@as(?u64, null), rt.focus);
+
+    // The app asks for focus by key; the runtime holds it, view sees it, and
+    // the element carrying that key paints the accent border.
+    rt.state.request = focus_key;
+    _ = rt.dispatch(.nop);
+    try std.testing.expectEqual(@as(?u64, focus_key), rt.focus);
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?u64, focus_key), rt.state.seen);
+        try std.testing.expectEqual(@as(usize, 1), countAccentPrims(f.prims, th));
+    }
+
+    // A key no element carries is still held by the runtime -- focusing
+    // something that scrolled away is not a bug -- but nothing paints.
+    rt.state.request = 999;
+    _ = rt.dispatch(.nop);
+    try std.testing.expectEqual(@as(?u64, 999), rt.focus);
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?u64, 999), rt.state.seen);
+        try std.testing.expectEqual(@as(usize, 0), countAccentPrims(f.prims, th));
+    }
+
+    // Giving focus up reaches view as null and takes the ring with it.
+    rt.state.request = null;
+    _ = rt.dispatch(.nop);
+    try std.testing.expectEqual(@as(?u64, null), rt.focus);
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?u64, null), rt.state.seen);
+        try std.testing.expectEqual(@as(usize, 0), countAccentPrims(f.prims, th));
+    }
 }
 
 test "a font failure names the path in the band" {
