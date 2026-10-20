@@ -2232,6 +2232,23 @@ pub const Key = struct {
     repeat: bool = false,
 };
 
+/// Scroll wheel movement, in the platform's own units.
+///
+/// The deltas are NOT normalised. A notched wheel reports whole steps, a
+/// trackpad reports fractions per event, and the backend has already applied
+/// the user's scroll-speed setting. Dividing by a magic number so the two
+/// "compare" is how a library ends up scrolling at a different speed than
+/// every native app on the same machine.
+///
+/// `x`/`y` are the pointer at the time of the event: scroll has a target even
+/// though it is not a click, and the target is whatever is under the cursor.
+pub const Wheel = struct {
+    dx: f32 = 0,
+    dy: f32 = 0,
+    x: f32 = 0,
+    y: f32 = 0,
+};
+
 pub const Event = union(enum) {
     /// window wants to close; the runner stops.
     quit,
@@ -2256,6 +2273,11 @@ pub const Event = union(enum) {
     /// The bytes are BORROWED from the backend and are only valid until the
     /// dispatch that carries them returns. Copy anything kept past `update`.
     text: []const u8,
+    /// Wheel movement. Deliberately its own event rather than a field on
+    /// `pointer_move`: a wheel event that reports no movement is normal, and
+    /// folding it into motion would make every scroll look like the pointer
+    /// jumped.
+    wheel: Wheel,
 };
 
 /// Which half of a keystroke an `on_key` hook is being told about. `repeat`
@@ -2369,6 +2391,12 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// Same contract for typed text; see `Event.text` for why it is not
         /// derivable from keys and why the slice is borrowed.
         on_text: ?*const fn (*S, []const u8) ?M = null,
+        /// Scroll wheel, delivered raw and unclassified. Which container the
+        /// deltas apply to is the APP's business until there is a scroll
+        /// container: the offset has to live in the Model, because `view` must
+        /// read it to clip and translate, and the runtime cannot hold state
+        /// `view` needs privately the way it does with hover.
+        on_wheel: ?*const fn (*S, Wheel) ?M = null,
 
         pub fn init(
             gpa: Allocator,

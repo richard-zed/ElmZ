@@ -437,6 +437,7 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     // runtime has no focus ring, so it cannot pick a destination.
     if (@hasField(@TypeOf(app), "on_key")) rt.on_key = app.on_key;
     if (@hasField(@TypeOf(app), "on_text")) rt.on_text = app.on_text;
+    if (@hasField(@TypeOf(app), "on_wheel")) rt.on_wheel = app.on_wheel;
 
     // Same optional-field trick as `state`: an app that wants a theme file
     // declares `theme_path` in its struct, and one that does not never sees it.
@@ -722,6 +723,17 @@ pub fn run(
             // Typed text, not keysyms. Borrowed for this dispatch only, which is
             // fine here because the app sees it before the backend reuses the
             // buffer; `update` copies anything it keeps.
+            // Wheel deltas are the app's, because the scroll OFFSET is model
+            // state: `view` reads it to clip and translate, so the runtime
+            // cannot keep it privately the way it keeps hover.
+            .wheel => |w| if (rt.on_wheel) |hook| {
+                if (hook(&rt.state, w)) |msg| {
+                    const action = rt.dispatch(msg);
+                    stats.messages += 1;
+                    if (action.quit) running = false;
+                    dirty = dirty or action.repaint;
+                }
+            },
             .text => |bytes| if (rt.on_text) |hook| {
                 if (hook(&rt.state, bytes)) |msg| {
                     const action = rt.dispatch(msg);
@@ -2326,4 +2338,78 @@ test "a press and release on a control still repaints twice" {
     const stats = try run(struct {}, u8, RepaintMsg, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(u32, 3), stats.frames); // initial, press, release
+}
+
+test "a wheel event reaches the app's hook and an unclaimed one repaints nothing" {
+    const gpa = std.testing.allocator;
+    const WMsg = enum { scrolled };
+    const WState = struct { dy: f32 = 0, dx: f32 = 0, at_x: f32 = 0, calls: u32 = 0, claim: bool = true };
+
+    const Hooks = struct {
+        fn update(s: *WState, m: WMsg) elmz.Action(WMsg) {
+            _ = m;
+            s.calls += 1;
+            return .{};
+        }
+        fn view(s: *WState, ui: *elmz.Ui(WMsg)) *elmz.Element(WMsg) {
+            _ = s;
+            return ui.text(.{ .label = "scrollable", .size = 14 });
+        }
+        fn onWheel(s: *WState, w: elmz.Wheel) ?WMsg {
+            s.dy = w.dy;
+            s.dx = w.dx;
+            s.at_x = w.x;
+            s.calls += 100; // reached at all
+            if (!s.claim) return null;
+            return .scrolled;
+        }
+    };
+
+    // Claimed: the app gets the deltas AND its message, exactly once.
+    {
+        var canvas = try testCanvas(gpa, 120, 80);
+        defer canvas.deinit();
+        var rt = elmz.Runtime(WState, WMsg).init(gpa, .{ .claim = true }, Hooks.update, Hooks.view);
+        defer rt.deinit();
+        rt.on_wheel = Hooks.onWheel;
+
+        var fake = Fake{
+            .events = &.{
+                .{ .wheel = .{ .dx = -1, .dy = 2.5, .x = 40, .y = 30 } },
+                .quit,
+            },
+            .idle = 2,
+        };
+        const stats = try run(struct {}, WState, WMsg, &rt, &canvas, fake.window(), .{});
+
+        try std.testing.expectEqual(@as(f32, 2.5), rt.state.dy); // deltas arrive unnormalised
+        try std.testing.expectEqual(@as(f32, -1), rt.state.dx);
+        try std.testing.expectEqual(@as(f32, 40), rt.state.at_x); // and with their target
+        try std.testing.expectEqual(@as(u32, 1), stats.messages);
+    }
+
+    // Unclaimed: the hook still sees it, and costs no frame. Scrolling over a
+    // widget that does not scroll must not repaint at scroll-event rate.
+    {
+        var canvas = try testCanvas(gpa, 120, 80);
+        defer canvas.deinit();
+        var rt = elmz.Runtime(WState, WMsg).init(gpa, .{ .claim = false }, Hooks.update, Hooks.view);
+        defer rt.deinit();
+        rt.on_wheel = Hooks.onWheel;
+
+        var fake = Fake{
+            .events = &.{
+                .{ .wheel = .{ .dy = 1 } },
+                .{ .wheel = .{ .dy = 1 } },
+                .{ .wheel = .{ .dy = 1 } },
+                .quit,
+            },
+            .idle = 2,
+        };
+        const stats = try run(struct {}, WState, WMsg, &rt, &canvas, fake.window(), .{});
+
+        try std.testing.expectEqual(@as(u32, 300), rt.state.calls); // three wheel events, no messages
+        try std.testing.expectEqual(@as(u32, 0), stats.messages);
+        try std.testing.expectEqual(@as(u32, 1), stats.frames); // the first paint only
+    }
 }

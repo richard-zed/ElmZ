@@ -212,6 +212,16 @@ pub const Windows = struct {
             // (pre-edit, underlined composition) is deliberately not forwarded
             // yet -- that is a candidate list, and a field that cannot draw one
             // would be lying about what it supports.
+            // Scroll has a TARGET without being a click: the deltas apply to
+            // whatever is under the cursor, so the position rides along.
+            // UNVERIFIED IN THIS SANDBOX (no SDL headers here) -- the field
+            // names are SDL3's documented SDL_MouseWheelEvent.
+            c.SDL_EVENT_MOUSE_WHEEL => return .{ .wheel = .{
+                .dx = ev.wheel.x,
+                .dy = ev.wheel.y,
+                .x = ev.wheel.mouse_x,
+                .y = ev.wheel.mouse_y,
+            } },
             c.SDL_EVENT_TEXT_INPUT => return .{ .text = std.mem.span(ev.text.text) },
             else => return null,
         }
