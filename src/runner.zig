@@ -378,6 +378,29 @@ pub const Stats = struct {
     messages: u32 = 0,
 };
 
+/// Attach the app's declared typeface, or say why it is not there.
+///
+/// A path the app NAMED and the filesystem cannot produce is a fault: text
+/// measures at zero, every text prim vanishes, and the window reads as a
+/// renderer bug rather than a missing file. So it raises the band and keeps
+/// running, same rule as the theme chain. An app that declares no `font_path`
+/// never reaches here -- one font is a choice, a broken path is not.
+///
+/// The face stays attached on failure (`Font.none`), which is the honest
+/// render: invisible text, not a crash and not a substituted typeface.
+fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
+    const bytes = software.loadFont(gpa, io, path) catch {
+        // Both attempts are plain reads, so any failure means the app named a
+        // typeface that cannot be produced from disk: absent, unreadable or a
+        // directory. The band carries the path, because that is the one thing
+        // the author can act on.
+        ui.failExternal(.font, "cannot read font: {s}", .{path});
+        return null;
+    };
+    canvas.setFont(bytes);
+    return bytes;
+}
+
 /// Compose a whole app onto a window backend.
 ///
 /// Everything the glue files used to duplicate -- canvas size, background
@@ -391,23 +414,21 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     const M = app.Msg;
 
     var canvas = try software.Canvas.init(gpa, @intCast(app.size.w), @intCast(app.size.h));
+    defer canvas.deinit();
     var font_bytes: ?[]u8 = null;
     defer if (font_bytes) |b| gpa.free(b);
-    if (@hasField(@TypeOf(app), "font_path")) {
-        if (io) |i| {
-            if (software.loadFont(gpa, i, app.font_path)) |b| {
-                font_bytes = b;
-                canvas.setFont(b);
-            } else |_| {}
-        }
-    }
-    defer canvas.deinit();
 
     var rt = if (@hasField(@TypeOf(app), "state"))
         elmz.Runtime(S, M).init(gpa, app.state, app.update, app.view)
     else
         elmz.Runtime(S, M).init(gpa, .{}, app.update, app.view);
     defer rt.deinit();
+    // A declared typeface loads once the runtime exists, so a path that cannot
+    // be read can name itself in the error band instead of silently measuring
+    // every glyph at zero.
+    if (@hasField(@TypeOf(app), "font_path")) {
+        if (io) |i| font_bytes = attachFont(&rt.ui, &canvas, gpa, i, app.font_path);
+    }
 
     var opts: Options = .{ .io = io, .gpa = gpa, .overlay = default_overlay };
     // Keystrokes and typed text, same optional-field trick as `state`: an app
@@ -2084,4 +2105,39 @@ test "keystrokes and typed text reach the app's hooks, and null does not repaint
     try std.testing.expectEqual(@as(u8, 'h'), rt.state.first);
     // Two messages, not four: the unhandled key and the release returned null.
     try std.testing.expectEqual(@as(u32, 2), stats.messages);
+}
+
+test "a declared font path that cannot be read raises the band" {
+    const gpa = std.testing.allocator;
+    var canvas = try software.Canvas.init(gpa, 200, 120);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
+    defer rt.deinit();
+
+    var threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+
+    const bytes = attachFont(&rt.ui, &canvas, gpa, threaded.io(), "no-such-font.ttf");
+    try std.testing.expect(bytes == null);
+
+    // The band is painted from per-frame state, so the failure only becomes
+    // visible once a frame runs -- asserting earlier would test the staging
+    // area instead of what the user sees.
+    var frame = try paintInto(TState, TMsg, &rt, &canvas);
+    defer frame.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, rt.ui.failMessage(), "cannot read font: no-such-font.ttf") != null);
+}
+
+test "an app that declares no font path stays silent" {
+    const gpa = std.testing.allocator;
+    var canvas = try software.Canvas.init(gpa, 200, 120);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
+    defer rt.deinit();
+
+    var frame = try paintInto(TState, TMsg, &rt, &canvas);
+    defer frame.deinit();
+    try std.testing.expect(rt.ui.failed == false);
 }

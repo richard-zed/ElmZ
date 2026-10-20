@@ -665,6 +665,10 @@ pub const FailKind = enum {
     layout_allocation,
     /// two hit regions declared the same `key`, so identity is ambiguous
     duplicate_key,
+    /// the typeface the app asked for could not be read; the band carries the
+    /// path, because a window of invisible text with no explanation is the
+    /// worst possible answer to a missing font file
+    font,
     /// the theme file could not be parsed or resolved; the detail in the band
     /// carries the file, line and column, because "theme error" alone gives
     /// the author nothing to aim at
@@ -677,6 +681,7 @@ pub const FailKind = enum {
             .layout_allocation => "render failed: layout allocation",
             .duplicate_key => "render failed: duplicate key",
             .theme => "render failed: theme",
+            .font => "render failed: font",
         };
     }
 };
@@ -844,6 +849,10 @@ pub fn Element(comptime M: type) type {
         /// drawing are untouched, so a disabled control keeps its shape and
         /// only loses its affordances and its contrast.
         disabled: bool = false,
+        /// Whether this element may hold focus. Focus is only meaningful for a
+        /// KEYED element: focus names an identity, and an unkeyed element has
+        /// none, so `focusable` alone draws nothing.
+        focusable: bool = false,
         /// identity for keyed children. When set, a press that starts here
         /// re-binds to the element carrying the same key on later frames
         /// rather than to a rectangle, so it survives reordering. Unique among
@@ -1044,7 +1053,17 @@ pub fn Element(comptime M: type) type {
             // signal it gets, since the theme has no disabled colour and
             // cannot get one without duplicating a Mocha step.
             const fg_now: Fill = if (self.disabled) .{ .solid = th.text_muted } else self.style().fgFill(.{ .solid = th.text }).?;
-            const border_now: ?Fill = self.style().borderFill(null);
+            // Focus is the third derived appearance, after press and hover: the
+            // runtime names a key, the element asks whether it is that key. A
+            // focused control shows the accent as its border, so apps never
+            // paint a ring themselves and the theme still owns the colour.
+            // Focus names an IDENTITY, not a rectangle: the runtime says which
+            // key holds it, and each element asks whether that key is its own.
+            // An unkeyed element can never match, so `focusable` alone draws
+            // nothing -- which is the intended contract, not a special case.
+            const focused = self.focusable and !self.disabled and
+                self.key != null and hov.focus != null and hov.focus.? == self.key.?;
+            const border_now: ?Fill = if (focused and !self.disabled) .{ .solid = th.accent } else self.style().borderFill(null);
             const fill_now: ?Fill = bg_now orelse switch (self.kind) {
                 .button, .bar => .{ .solid = th.control },
                 else => null,
@@ -2035,6 +2054,10 @@ pub const PointerView = struct {
 const Hover = struct {
     out: ?*std.ArrayList(Region) = null,
     target: ?Region = null,
+    /// Which key the runtime considers focused. Focus is DERIVED in paint, the
+    /// same way hover is: the runtime says which identity holds focus, and each
+    /// element decides whether that is it. Nothing is written back.
+    focus: ?u64 = null,
 };
 
 /// The platform layer, expressed in elmz terms only. A backend (SDL3, Wayland
@@ -2092,6 +2115,12 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// press belongs to the region it started on, not to wherever the
         /// pointer happens to be when the button comes back up.
         press: Press(M) = .{},
+        /// Which keyed element currently holds focus, or null for none. The app
+        /// DECIDES this (it sets the field from its own Msg handlers); the
+        /// runtime only reflects it into the paint pass. Deliberately a bare
+        /// `?u64` rather than a focus ring with a destination, so the tree stays
+        /// a value and no widget needs a closure to ask "am I focused".
+        focus: ?u64 = null,
         /// Optional keystroke hooks, wired by `runApp` from the app declaration.
         ///
         /// The app owns FOCUS -- which element a keystroke belongs to -- because
@@ -2221,7 +2250,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 }
             }
 
-            try root.paint(r, root_rect, Rect.unbounded, view, &hits, a, .{ .target = resolved }, self.ui.theme);
+            try root.paint(r, root_rect, Rect.unbounded, view, &hits, a, .{ .target = resolved, .focus = self.focus }, self.ui.theme);
 
             // Keys are identity, and identity that collides is worse than no
             // identity: `rebind` would bind a press to whichever twin it met
@@ -3101,4 +3130,125 @@ test "a square control still claims its full rect" {
 
 fn sqView(_: *RoundState, ui: *Ui(RoundMsg)) *Element(RoundMsg) {
     return ui.button(.{ .label = "square", .msg = .press, .width = 120, .height = 60, .key = 1 });
+}
+
+// ---------------------------------------------------------------------------
+// focus: derived, like hover and press
+// ---------------------------------------------------------------------------
+
+const FocusState = struct {};
+const FocusMsg = enum { nop };
+
+fn focusUpdate(m: *FocusState, msg: FocusMsg) Action(FocusMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+/// One button, optionally keyed. `focusable` without a key is the case that
+/// matters: focus names an identity, so an anonymous element cannot hold it.
+fn focusView(m: *FocusState, ui: *Ui(FocusMsg)) *Element(FocusMsg) {
+    _ = m;
+    const b = ui.button(.{ .label = "ok", .msg = .nop });
+    b.focusable = true;
+    b.radius = 8; // a square border is four quads; a rounded one is a single stroke
+    b.key = focus_key;
+    return ui.column(.{ .children = &.{b} });
+}
+
+fn anonymousView(m: *FocusState, ui: *Ui(FocusMsg)) *Element(FocusMsg) {
+    _ = m;
+    const b = ui.button(.{ .label = "ok", .msg = .nop });
+    b.radius = 8;
+    b.focusable = true; // focusable, but no key to name it by
+    return ui.column(.{ .children = &.{b} });
+}
+
+const focus_key: u64 = 7;
+
+fn countAccentPrims(prims: anytype, th: Theme) usize {
+    var n: usize = 0;
+    for (prims) |p| switch (p) {
+        .quad => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = th.accent })) n += 1;
+        },
+        .rrect => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = th.accent })) n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+test "focus paints the accent border, and only on the element that holds it" {
+    const gpa = std.testing.allocator;
+    const th = Theme{};
+
+    var rt = Runtime(FocusState, FocusMsg).init(gpa, .{}, focusUpdate, focusView);
+    defer rt.deinit();
+
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(usize, 0), countAccentPrims(f.prims, th));
+    }
+
+    // Somebody else holds focus: still nothing.
+    rt.focus = 999;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(usize, 0), countAccentPrims(f.prims, th));
+    }
+
+    rt.focus = 7;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(usize, 1), countAccentPrims(f.prims, th));
+    }
+}
+
+test "an unkeyed element cannot be focused even when it says it is focusable" {
+    const gpa = std.testing.allocator;
+    const th = Theme{};
+    var rt = Runtime(FocusState, FocusMsg).init(gpa, .{}, focusUpdate, anonymousView);
+    defer rt.deinit();
+
+    // Focus is "some key", and this element has none, so no value of rt.focus
+    // can match it. The field alone is not a focus claim.
+    rt.focus = 0;
+    var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+    defer f.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countAccentPrims(f.prims, th));
+}
+
+test "a font failure names the path in the band" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(FocusState, FocusMsg).init(gpa, .{}, focusUpdate, focusView);
+    defer rt.deinit();
+
+    // Raised between frames, the way runApp raises a failed load -- so this
+    // also re-covers the "external failure survives the frame reset" path for
+    // a second prong, not just `.theme`.
+    rt.ui.failExternal(.font, "font not found: {s}", .{"src/font.ttf"});
+    // Staged, not raised: nothing has failed IN this frame yet, and a stale
+    // kind must not be visible before frame() folds the condition in.
+    try std.testing.expect(!rt.ui.failed);
+
+    var f = try rt.frame(.{ .w = 400, .h = 120 }, nominalRenderer());
+    defer f.deinit();
+
+    // frame() folds the external condition in, so only now is the detail legal
+    // to read. Before the frame it is staged, not raised.
+    try std.testing.expectEqualStrings("font not found: src/font.ttf", rt.ui.failMessage());
+
+    var band: usize = 0;
+    for (f.prims) |p| switch (p) {
+        .quad => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = band_bg })) band += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), band);
 }
