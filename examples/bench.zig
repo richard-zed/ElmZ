@@ -6,8 +6,8 @@
 //!   3. what does a hovering pointer cost on top of the first,
 //!   4. what each fill VARIANT costs per pixel (paint is area-bound, so this
 //!      is the only question that can move the frame time),
-//!   5. whether the halo crossover at 10px is priced right: distance field
-//!      per pixel against one bake plus a blit.
+//!   5. how the distance field and the baked stencil compare, including the
+//!      cache-pressure case where every stencil re-bakes every frame.
 //!
 //! Headless on purpose: the numbers are the output. `zig build run-bench`.
 //! No PNG -- a picture of a benchmark is a bar chart, and this prints one.
@@ -116,9 +116,55 @@ fn measureFill(io: std.Io, c: *software.Canvas, fill: elmz.Fill, iters: usize) u
 
 /// A halo is either a distance field evaluated per pixel or one baked stencil
 /// blitted. `cold` is the bake (cache miss, full silhouette built); `hot` is
-/// the blit. If `hot_baked` is not clearly cheaper than `sdf` at a given blur,
-/// the crossover is on the wrong side of it.
+/// the blit. If `hot_baked` ever loses to `sdf`, the default of always baking
+/// is on the wrong side of the evidence.
 const HaloCost = struct { cold: u64, hot: u64, stencils: usize };
+
+/// One frame of `k` distinct silhouettes, repeated. Distinct radii mean
+/// distinct cache entries, and the cache holds eight: past that a cyclic
+/// redraw pattern evicts every entry before it is reused, so every halo
+/// re-bakes every frame. That is the worst case for slicing, and the only case
+/// where the distance field could still win.
+const Stress = struct { ns: i128, bakes: usize, stencils: usize };
+
+fn measureStress(io: std.Io, gpa: std.mem.Allocator, quality: elmz.Halo.Quality, k: usize, iters: usize) !Stress {
+    var c = try software.Canvas.init(gpa, 480, 420);
+    defer c.deinit();
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 480, .h = 420 };
+    const col = elmz.Color{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 120 };
+
+    const draw = struct {
+        fn go(cv: *software.Canvas, cl: elmz.Rect, cc: elmz.Color, q: elmz.Halo.Quality, count: usize) void {
+            for (0..count) |i| {
+                const cx: f32 = @floatFromInt(i % 4);
+                const cy: f32 = @floatFromInt(i / 4);
+                const rect = elmz.Rect{
+                    .x = 10 + cx * 118,
+                    .y = 10 + cy * 100,
+                    .w = 100,
+                    .h = 60,
+                };
+                cv.halo(rect, 2 + @as(f32, @floatFromInt(i)), .{
+                    .color = cc,
+                    .blur = 24,
+                    .mode = .glow,
+                    .quality = q,
+                }, cl);
+            }
+        }
+    };
+
+    draw.go(&c, clip, col, quality, k); // one warm frame, so the first bake is not billed
+    c.bakes = 0;
+    const t0 = ns(io);
+    for (0..iters) |_| draw.go(&c, clip, col, quality, k);
+    const t1 = ns(io);
+    return .{
+        .ns = @divTrunc(t1 - t0, @as(i128, @intCast(iters))),
+        .bakes = c.bakes,
+        .stencils = c.masks.items.len,
+    };
+}
 
 fn measureHalo(io: std.Io, gpa: std.mem.Allocator, h: elmz.Halo, w: f32, ht: f32, iters: usize) !HaloCost {
     const cw: u32 = @intFromFloat(w + 120);
@@ -248,10 +294,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // -- halo: distance field or baked stencil -----------------------------
-    // The crossover is a constant in the renderer, so it needs a number under
-    // it. Below the crossover the field wins because a bake is an allocation
-    // and a full second silhouette; above it the field is quadratic in blur
-    // while a blit is flat.
+    // The renderer bakes by default, so this table is the standing argument for
+    // that choice: the field against one bake plus a blit, across the whole
+    // blur range rather than either side of a threshold.
     {
         try out.print("\n  halo, 200x120 at radius 8    (cold = bake, hot = blit)\n", .{});
         try out.print("  blur    sdf hot   baked cold   baked hot\n", .{});
@@ -271,9 +316,8 @@ pub fn main(init: std.process.Init) !void {
 
     // -- halo: does slicing hold up as the silhouette grows? ----------------
     // A full bake scales with AREA; a sliced one scales with the same area for
-    // the blit but only a fixed square for the bake. This sweep is what decides
-    // whether the distance field should stay the default anywhere above the
-    // crossover.
+    // the blit but only a fixed square for the bake. This sweep is what showed
+    // that the field is never the cheaper default.
     {
         try out.print("\n  halo, blur 24, radius 8, by silhouette   (stencils = entries kept)\n", .{});
         try out.print("  size          sdf hot   baked cold   baked hot  stencils\n", .{});
@@ -293,5 +337,26 @@ pub fn main(init: std.process.Init) !void {
             });
         }
     }
+
+    // -- halo: cache pressure, the last case that could favour the field ------
+    // Eight entries. A cyclic redraw of more distinct silhouettes than that
+    // misses every time, so `bakes/frame` should equal `shapes` from 9 up. If
+    // baked still wins this, nothing is left for the crossover to protect.
+    {
+        try out.print("\n  halo, distinct silhouettes redrawn every frame (blur 24, 100x60 each)\n", .{});
+        try out.print("  shapes   sdf/frame  baked/frame  bakes/frame  stencils\n", .{});
+        for ([_]usize{ 2, 6, 8, 10, 16 }) |k| {
+            const s = try measureStress(io, gpa, .sdf, k, 10);
+            const b = try measureStress(io, gpa, .baked, k, 10);
+            try out.print("  {d:>6}  {d:>8.3}ms  {d:>9.3}ms  {d:>11}  {d:>8}\n", .{
+                k,
+                @as(f64, @floatFromInt(s.ns)) / 1e6,
+                @as(f64, @floatFromInt(b.ns)) / 1e6,
+                b.bakes / 10,
+                b.stencils,
+            });
+        }
+    }
+
     try out.flush();
 }

@@ -336,15 +336,13 @@ pub const Halo = struct {
     /// escape hatch, and an escape hatch that a heuristic can overrule is not
     /// one.
     ///
-    /// `auto` is the only value that consults a size threshold, and the
-    /// threshold is a quality/cost tradeoff, not a correctness one: both paths
-    /// must land within tolerance of each other, which is what the crossover
-    /// test pins.
-    ///
-    /// KNOWN GAP: there is no baked path yet, so `baked` currently renders
-    /// exactly as `sdf` does. It is accepted rather than rejected so a caller
-    /// can write the code they mean, but nothing should claim fidelity it does
-    /// not have -- the bake cache has to land before that value means anything.
+    /// `auto` bakes. There is no size threshold any more: one was tried, on the
+    /// argument that a small ramp leaves too little to cache, and the benchmark
+    /// inverted it at every blur measured -- baked wins cold as well as hot, and
+    /// still wins when the cache thrashes. `.sdf` remains the escape hatch for
+    /// the cases where a stencil cannot exist at all (no allocator, or a
+    /// silhouette past the mask cap), and the two paths must stay within
+    /// tolerance of each other, which the agreement tests pin.
     quality: Quality = .auto,
 
     pub const Mode = enum { glow, shadow };

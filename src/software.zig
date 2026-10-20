@@ -22,10 +22,11 @@ pub const Canvas = struct {
     /// the distance field every frame.
     masks: std.ArrayListUnmanaged(Mask) = .empty,
 
-    /// Below this blur the distance field is cheaper than a mask: the ramp has
-    /// few pixels left to cache, and baking would cost more than it saves.
-    /// Only `.auto` consults it -- an explicit `quality` overrules it.
-    pub const sdf_crossover: f32 = 10;
+    /// How many stencils have been BAKED, as opposed to found in the cache.
+    /// Nothing in the renderer reads this -- it exists so a benchmark can tell
+    /// a cache hit from a re-bake. A cache hit is not evidence about dispatch,
+    /// and neither is a timing.
+    bakes: usize = 0,
 
     const Mask = struct {
         /// Shape size this stencil was baked at. `sw == 0` marks a SLICE
@@ -411,13 +412,31 @@ pub const Canvas = struct {
     /// circumference rather than to the area it wraps.
     pub fn halo(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         if (h.color.a == 0) return;
-        // Explicit beats the heuristic. A quality setting the library can
-        // second-guess is not an escape hatch, so `.auto` is the only mode the
-        // crossover is allowed to tune.
+        // Explicit beats the default. A quality setting the library can
+        // second-guess is not an escape hatch, so `.sdf` is honoured even where
+        // a stencil would be cheaper.
+        //
+        // `.auto` is BAKED, always -- there is no longer a crossover to tune.
+        // The old rule sent blur < 10 to the distance field on the argument
+        // that "the ramp has few pixels left to cache, and baking would cost
+        // more than it saves". That was reasoning about a mask the size of the
+        // shape. Slicing made a bake independent of area, and the benchmark
+        // then inverted it at every blur measured, cold as well as hot:
+        //
+        //     blur    sdf hot   baked cold   baked hot
+        //        4      68.5us       45.7us       39.0us
+        //       24     152.6us      108.8us       88.2us
+        //       40     219.5us      147.4us      106.2us
+        //
+        // The one case left that could favour the field is cache pressure, so
+        // it was measured too: 16 distinct silhouettes redrawn every frame
+        // (past the 8-entry cache, so LRU misses on every halo) still costs
+        // 0.915ms baked against 1.202ms for the field. Nothing is left for a
+        // heuristic to protect.
         const use_sdf = switch (h.quality) {
             .sdf => true,
             .baked => false,
-            .auto => h.blur < sdf_crossover,
+            .auto => false,
         };
         if (use_sdf) return self.haloSdf(rect, corner, h, clip);
         self.haloBaked(rect, corner, h, clip);
@@ -627,6 +646,7 @@ pub const Canvas = struct {
             if (@as(u64, rw) * @as(u64, rw) > 4_000_000) return null;
             const px = self.gpa.alloc(u8, @as(usize, rw) * rw) catch return null;
             bakeStencil(px, rw, rw, tsw, tsw, r, blur, grow);
+            self.bakes += 1;
             return self.admit(px, .{ .sw = 0, .sh = 0, .r = r, .blur = blur, .corner = corner, .rw = rw, .rh = rw });
         }
 
@@ -638,6 +658,7 @@ pub const Canvas = struct {
         if (@as(u64, rw) * @as(u64, rh) > 4_000_000) return null;
         const px = self.gpa.alloc(u8, @as(usize, rw) * rh) catch return null;
         bakeStencil(px, rw, rh, sw, sh, r, blur, grow);
+        self.bakes += 1;
         return self.admit(px, .{ .sw = sw, .sh = sh, .r = r, .blur = blur, .rw = rw, .rh = rh });
     }
 
@@ -1356,7 +1377,7 @@ test "a blit clipped by the destination edge drops the rest" {
     dst.blitFrom(&src, .{ 2, 0 });
 }
 
-test "auto takes the distance field below the crossover and a stencil above" {
+test "auto always bakes, and an explicit .sdf never touches the cache" {
     var c = try Canvas.init(std.testing.allocator, 200, 160);
     defer c.deinit();
 
@@ -1365,26 +1386,34 @@ test "auto takes the distance field below the crossover and a stencil above" {
     const color = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
     c.clear(elmz.Color{ .r = 20, .g = 20, .b = 20, .a = 255 });
 
-    // Under the crossover there is nothing worth caching.
+    // A small blur used to be handed to the distance field, on the argument
+    // that baking a mask would cost more than the ramp saved. It does not any
+    // more: a template bake is small and independent of the silhouette.
     c.halo(rect, 8, .{ .color = color, .blur = 6, .mode = .glow, .quality = .auto }, clip);
-    try std.testing.expectEqual(@as(usize, 0), c.masks.items.len);
-
-    // Over it, one stencil -- and the second draw must find it, not build it.
-    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
     try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
-    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
-    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    try std.testing.expectEqual(@as(usize, 1), c.bakes);
 
-    // ...while an explicit `.sdf` must NOT consult it. This is the precedence
-    // the switch exists for: the threshold is a default, not an override.
+    // A different blur is a different stencil, and the second draw of it must
+    // find the first rather than bake again. `bakes` is what tells a hit from
+    // a re-bake; the entry count alone cannot.
+    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
+    try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), c.bakes);
+    c.halo(rect, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .auto }, clip);
+    try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), c.bakes);
+
+    // ...while an explicit `.sdf` must not consult the cache at all. This is
+    // the precedence the switch exists for: the default is not an override.
     //
-    // The silhouette here is deliberately DIFFERENT from the one above. Asking
-    // for `.sdf` on the same geometry would find the existing stencil and
-    // leave the count unchanged even if the baked path ran -- a cache hit is
-    // not evidence about dispatch. A fresh shape is: if `.sdf` fell through to
-    // baked, this draw would have to build stencil number two.
+    // The silhouette here is deliberately DIFFERENT from the ones above. Asking
+    // for `.sdf` on the same geometry would find the existing stencil and leave
+    // the count unchanged even if the baked path ran -- a cache hit is not
+    // evidence about dispatch. A fresh shape is: if `.sdf` fell through to
+    // baked, this draw would have to build stencil number three.
     c.halo(elmz.Rect{ .x = 20, .y = 20, .w = 60, .h = 40 }, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .sdf }, clip);
-    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), c.bakes);
 }
 
 test "the baked stencil and the distance field agree" {
