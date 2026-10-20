@@ -1360,6 +1360,74 @@ pub fn Executor(comptime M: type) type {
     };
 }
 
+/// Which modifier keys were held when a key event was produced.
+pub const Mods = packed struct {
+    shift: bool = false,
+    ctrl: bool = false,
+    alt: bool = false,
+    gui: bool = false,
+};
+
+/// Keys worth naming, because binding to a raw code is how you get a shortcut
+/// that quietly stops working on another layout. This is a convenience list,
+/// not a filter: anything absent still arrives, in `Key.code`.
+pub const Named = enum {
+    enter,
+    escape,
+    tab,
+    backspace,
+    delete,
+    left,
+    right,
+    up,
+    down,
+    home,
+    end,
+    page_up,
+    page_down,
+    f1,
+    f2,
+    f3,
+    f4,
+    f5,
+    f6,
+    f7,
+    f8,
+    f9,
+    f10,
+    f11,
+    f12,
+};
+
+/// One key, described three ways because the three are not interchangeable.
+///
+/// `code` is the layout-dependent symbol -- what the key is LABELLED, and what
+/// a shortcut wants: on Dvorak the physical C position produces 'j', and
+/// Ctrl+Z means the label. `scancode` is physical POSITION, which is what
+/// W-A-S-D movement wants so it stays put across layouts. `named` is the
+/// common subset of both, so `update` does not compare magic numbers.
+///
+/// Typed text does NOT come from here. A dead-key accent, a compose sequence
+/// or an IME commit has no single key to derive from, so text arrives as its
+/// own event once a text field exists. A Ctrl chord produces no text at all --
+/// that asymmetry is why both paths are needed rather than one.
+///
+/// All three are u32 (SDL's keycode, SDL's scancode, xkbcommon's keysym).
+/// Narrowing this to u8 was not a simplification: SDLK_LEFT is 0x40000050, and
+/// truncating it yields the character 'P'.
+pub const Key = struct {
+    named: ?Named = null,
+    code: u32 = 0,
+    scancode: u32 = 0,
+    mods: Mods = .{},
+    /// True for the extra presses a backend synthesises while the key is held.
+    /// A flag rather than its own event type because the app cannot tell -- and
+    /// must not care -- whether the platform or the runner timed the repeat.
+    /// Wayland has no server-side repeat, so that answer does change per
+    /// backend; a flag keeps it from leaking into every `update`.
+    repeat: bool = false,
+};
+
 pub const Event = union(enum) {
     /// window wants to close; the runner stops.
     quit,
@@ -1370,7 +1438,9 @@ pub const Event = union(enum) {
     /// or the pointer left the window mid-drag. Without this the press claim
     /// outlives the gesture and the pressed element stays lit forever.
     pointer_cancel,
-    key: u8,
+    key: Key,
+    /// The release matching one `key`. Never repeats.
+    key_up: Key,
 };
 
 /// What the platform has told us about the pointer. Nothing here says who
@@ -2320,3 +2390,29 @@ test "a gradient override paints instead of the flat colour" {
 // ---------------------------------------------------------------------------
 // theme files
 // ---------------------------------------------------------------------------
+
+test "a key code is wide enough to survive SDLK_LEFT" {
+    // 0x40000050 is SDLK_LEFT, and SDLK_SCANCODE_MASK is 1 << 30. While the
+    // event carried a u8 this arrived as 'P' -- nothing caught it because no
+    // key was bound yet, so the only symptom would have been a shortcut that
+    // fired on an arrow key.
+    const left: Key = .{ .named = .left, .code = 0x40000050 };
+    try std.testing.expectEqual(@as(u32, 0x40000050), left.code);
+    try std.testing.expectEqual(@as(u32, 32), @bitSizeOf(@TypeOf(left.code)));
+    try std.testing.expectEqual(@as(u8, 'P'), @as(u8, @truncate(left.code)));
+
+    // `named` is a convenience, not a filter: an unlisted key still arrives
+    // whole, which is what lets an app bind a character or an IME key.
+    const unlisted: Key = .{ .code = 0x010000E9 };
+    try std.testing.expectEqual(@as(?Named, null), unlisted.named);
+    try std.testing.expectEqual(@as(u32, 0x010000E9), unlisted.code);
+}
+
+test "modifier flags pack into one byte with no padding" {
+    // A packed struct keeps this at four bits; a plain struct would make the
+    // event 4 bytes wider and, worse, would not be comparable with ==.
+    const held: Mods = .{ .shift = true, .ctrl = true, .alt = true, .gui = true };
+    try std.testing.expectEqual(@as(u4, 0b1111), @as(u4, @bitCast(held)));
+    try std.testing.expectEqual(@as(Mods, .{ .ctrl = true }), Mods{ .ctrl = true });
+    try std.testing.expect(Mods{ .ctrl = true } != Mods{ .shift = true });
+}

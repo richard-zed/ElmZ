@@ -11,6 +11,64 @@ const c = @cImport({
     @cInclude("SDL3/SDL.h");
 });
 
+/// The keys elmz names, resolved from SCANCODE rather than keycode.
+///
+/// A scancode is a physical POSITION, so `left` stays left on AZERTY, where
+/// the keycode reported for that position is something else. Shortcuts want
+/// the opposite -- the label -- which is why `Key` carries both and this
+/// function picks the stable one for the names.
+fn namedKey(sc: c.SDL_Scancode) ?elmz.Named {
+    return switch (sc) {
+        c.SDL_SCANCODE_RETURN, c.SDL_SCANCODE_KP_ENTER => .enter,
+        c.SDL_SCANCODE_ESCAPE => .escape,
+        c.SDL_SCANCODE_TAB => .tab,
+        c.SDL_SCANCODE_BACKSPACE => .backspace,
+        c.SDL_SCANCODE_DELETE => .delete,
+        c.SDL_SCANCODE_LEFT => .left,
+        c.SDL_SCANCODE_RIGHT => .right,
+        c.SDL_SCANCODE_UP => .up,
+        c.SDL_SCANCODE_DOWN => .down,
+        c.SDL_SCANCODE_HOME => .home,
+        c.SDL_SCANCODE_END => .end,
+        c.SDL_SCANCODE_PAGEUP => .page_up,
+        c.SDL_SCANCODE_PAGEDOWN => .page_down,
+        c.SDL_SCANCODE_F1 => .f1,
+        c.SDL_SCANCODE_F2 => .f2,
+        c.SDL_SCANCODE_F3 => .f3,
+        c.SDL_SCANCODE_F4 => .f4,
+        c.SDL_SCANCODE_F5 => .f5,
+        c.SDL_SCANCODE_F6 => .f6,
+        c.SDL_SCANCODE_F7 => .f7,
+        c.SDL_SCANCODE_F8 => .f8,
+        c.SDL_SCANCODE_F9 => .f9,
+        c.SDL_SCANCODE_F10 => .f10,
+        c.SDL_SCANCODE_F11 => .f11,
+        c.SDL_SCANCODE_F12 => .f12,
+        else => null,
+    };
+}
+
+/// Widen, never narrow. `SDL_Keycode` is already Uint32 and `SDL_Scancode` is
+/// an enum with values like 0x40000050 -- the old `@truncate` to u8 turned the
+/// left arrow into 'P', which nothing noticed only because no key was bound.
+fn keyEvent(ev: c.SDL_KeyboardEvent) elmz.Key {
+    const m: u32 = @as(u32, ev.mod);
+    return .{
+        .named = namedKey(ev.scancode),
+        .code = ev.key,
+        // translate-c renders SDL_Scancode as c_uint, not an enum, so this
+        // is a plain widening rather than an @intFromEnum.
+        .scancode = ev.scancode,
+        .mods = .{
+            .shift = (m & c.SDL_KMOD_SHIFT) != 0,
+            .ctrl = (m & c.SDL_KMOD_CTRL) != 0,
+            .alt = (m & c.SDL_KMOD_ALT) != 0,
+            .gui = (m & c.SDL_KMOD_GUI) != 0,
+        },
+        .repeat = ev.repeat,
+    };
+}
+
 pub const Windows = struct {
     const Self = @This();
 
@@ -140,9 +198,9 @@ pub const Windows = struct {
                     self.quit = true;
                     return .quit;
                 }
-                const code: u32 = @bitCast(ev.key.key);
-                return .{ .key = @truncate(code) };
+                return .{ .key = keyEvent(ev.key) };
             },
+            c.SDL_EVENT_KEY_UP => return .{ .key_up = keyEvent(ev.key) },
             else => return null,
         }
     }

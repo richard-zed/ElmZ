@@ -255,13 +255,20 @@ pub const Canvas = struct {
         };
     }
 
-    /// Copy `src` into this canvas with its top-left at `at`.
+    /// Copy `src` into this canvas with its top-left at `at`, compositing by
+    /// `src`'s alpha.
     ///
     /// The 4-byte RGBA stride is this file's business, so callers should never
     /// restate it -- that is how the two previous hand-written copies of this
     /// loop ended up in example `main`s. Anything that would land outside the
     /// destination is dropped rather than erroring: compositing a contact sheet
     /// is the use, and a half-visible tile is more useful than a fatal error.
+    ///
+    /// This was a `@memcpy` until a transparent source was needed, which is the
+    /// one thing a straight copy cannot do: it writes the source's alpha over
+    /// the destination's instead of blending into it. A fully opaque source row
+    /// still takes the memcpy path, so the common case -- tiles, snapshots --
+    /// stays byte-identical to the canvas it came from and pays nothing.
     pub fn blitFrom(self: *Self, src: *const Self, at: [2]u32) void {
         if (at[0] >= self.w or at[1] >= self.h) return;
         const copy_w: usize = @min(src.w, self.w - at[0]);
@@ -271,8 +278,58 @@ pub const Canvas = struct {
             // usize throughout: w*h*4 overflows u32 on any canvas worth blitting.
             const dst_i = ((@as(usize, at[1]) + y) * self.w + at[0]) * 4;
             const src_i = (y * src.w) * 4;
-            @memcpy(self.px[dst_i..][0 .. copy_w * 4], src.px[src_i..][0 .. copy_w * 4]);
+            const drow = self.px[dst_i..][0 .. copy_w * 4];
+            const srow = src.px[src_i..][0 .. copy_w * 4];
+            if (rowOpaque(srow)) {
+                @memcpy(drow, srow);
+                continue;
+            }
+            var x: usize = 0;
+            while (x < copy_w) : (x += 1) {
+                const o = x * 4;
+                if (srow[o + 3] == 0) continue; // invisible: leave the destination alone
+                composite(drow[o..][0..4], srow[o..][0..4]);
+            }
         }
+    }
+
+    /// True when every pixel in a row of RGBA bytes is fully opaque.
+    fn rowOpaque(row: []const u8) bool {
+        var i: usize = 3;
+        while (i < row.len) : (i += 4) {
+            if (row[i] != 255) return false;
+        }
+        return true;
+    }
+
+    /// Source-over one pixel, straight (non-premultiplied) alpha.
+    ///
+    /// Destination alpha is tracked rather than assumed opaque: a canvas made
+    /// by `init` starts at alpha 0, and compositing onto one of those is the
+    /// case that silently produced black before. With an opaque destination
+    /// this reduces to `blendPixel`'s arithmetic, so a composited blit and a
+    /// painted quad of the same colour land on the same byte.
+    fn composite(dst: *[4]u8, src: *const [4]u8) void {
+        const sa: f32 = @as(f32, @floatFromInt(src[3])) / 255.0;
+        const da: f32 = @as(f32, @floatFromInt(dst[3])) / 255.0;
+        const out_a: f32 = sa + da * (1 - sa);
+        if (out_a <= 0) {
+            dst.* = .{ 0, 0, 0, 0 };
+            return;
+        }
+        const dst_w: f32 = da * (1 - sa);
+        inline for (0..3) |ch| {
+            const s: f32 = @floatFromInt(src[ch]);
+            const d: f32 = @floatFromInt(dst[ch]);
+            dst[ch] = toByte((s * sa + d * dst_w) / out_a);
+        }
+        dst[3] = toByte(out_a * 255.0);
+    }
+
+    /// `@intFromFloat` traps outside the type, and a rounding error one ulp
+    /// above 255 would be a crash in the paint loop rather than a wrong pixel.
+    fn toByte(v: f32) u8 {
+        return @intFromFloat(@min(255.0, @max(0.0, v)));
     }
 
     /// Encode to PNG and write it to the working directory.
@@ -766,4 +823,130 @@ test "text takes a gradient fill, not just a solid colour" {
     // The ramp must actually run ACROSS the run, not restart per glyph.
     try std.testing.expect(left_red > right_red + 20);
     try std.testing.expect(right_blue > left_blue + 20);
+}
+
+test "a blit composites by source alpha instead of stamping it" {
+    const gpa = std.testing.allocator;
+    var dst = try Canvas.init(gpa, 4, 1);
+    defer dst.deinit();
+    dst.clear(.{ .r = 255, .g = 255, .b = 255 });
+
+    var src = try Canvas.init(gpa, 4, 1);
+    defer src.deinit();
+    src.clear(.{ .r = 0, .g = 0, .b = 0 });
+    // 0: half-alpha black -- must land halfway between white and black
+    src.px[0] = 0;
+    src.px[1] = 0;
+    src.px[2] = 0;
+    src.px[3] = 128;
+    // 1: fully transparent, loud colour -- must not touch the destination
+    src.px[4] = 255;
+    src.px[5] = 0;
+    src.px[6] = 255;
+    src.px[7] = 0;
+    // 2: opaque red -- must be an exact copy
+    src.px[8] = 255;
+    src.px[9] = 0;
+    src.px[10] = 0;
+    src.px[11] = 255;
+
+    dst.blitFrom(&src, .{ 0, 0 });
+
+    // 128/255 over white. Not 127: `blendPixel` truncates rather than rounds,
+    // so it lands on 126, and a blit that disagreed with the paint path by one
+    // byte would be a visible seam wherever an image abuts a quad. That
+    // equivalence is asserted directly below rather than trusted here.
+    try std.testing.expectEqual(@as(u8, 126), dst.px[0]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[3]);
+    // invisible source pixels leave the destination pristine
+    try std.testing.expectEqual(@as(u8, 255), dst.px[4]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[5]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[6]);
+    // opaque source pixels copy exactly
+    try std.testing.expectEqual(@as(u8, 255), dst.px[8]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[9]);
+}
+
+test "a blitted pixel and a painted pixel of the same alpha agree" {
+    const gpa = std.testing.allocator;
+    const half = elmz.Color{ .r = 0, .g = 0, .b = 0, .a = 128 };
+
+    // painted: the normal quad path
+    var painted = try Canvas.init(gpa, 1, 1);
+    defer painted.deinit();
+    painted.clear(.{ .r = 255, .g = 255, .b = 255 });
+    painted.blendPixel(0, 0, half);
+
+    // blitted: a one-pixel canvas with the same colour composited in
+    var blitted = try Canvas.init(gpa, 1, 1);
+    defer blitted.deinit();
+    blitted.clear(.{ .r = 255, .g = 255, .b = 255 });
+
+    var src = try Canvas.init(gpa, 1, 1);
+    defer src.deinit();
+    src.px[0] = half.r;
+    src.px[1] = half.g;
+    src.px[2] = half.b;
+    src.px[3] = half.a;
+    blitted.blitFrom(&src, .{ 0, 0 });
+
+    try std.testing.expectEqualSlices(u8, painted.px, blitted.px);
+}
+
+test "an opaque blit is still a byte-exact copy" {
+    const gpa = std.testing.allocator;
+    var dst = try Canvas.init(gpa, 3, 2);
+    defer dst.deinit();
+    dst.clear(.{ .r = 7, .g = 8, .b = 9 });
+
+    var src = try Canvas.init(gpa, 3, 2);
+    defer src.deinit();
+    src.clear(.{ .r = 200, .g = 100, .b = 50 });
+    // a non-uniform second row, so a row-offset bug cannot pass
+    const row1: usize = @as(usize, src.w) * 4;
+    src.px[row1 + 0] = 1;
+    src.px[row1 + 5] = 2;
+
+    dst.blitFrom(&src, .{ 0, 0 });
+    try std.testing.expectEqualSlices(u8, src.px, dst.px);
+}
+
+test "compositing onto a transparent canvas keeps the colour, not black" {
+    const gpa = std.testing.allocator;
+    // init() memsets to zero, so this destination starts at alpha 0 -- the case
+    // a blend that forgets to normalise by the OUTPUT alpha turns into black.
+    var dst = try Canvas.init(gpa, 1, 1);
+    defer dst.deinit();
+
+    var src = try Canvas.init(gpa, 1, 1);
+    defer src.deinit();
+    src.px[0] = 0;
+    src.px[1] = 200;
+    src.px[2] = 0;
+    src.px[3] = 128;
+
+    dst.blitFrom(&src, .{ 0, 0 });
+    try std.testing.expectEqual(@as(u8, 0), dst.px[0]);
+    try std.testing.expectEqual(@as(u8, 200), dst.px[1]);
+    try std.testing.expectEqual(@as(u8, 128), dst.px[3]);
+}
+
+test "a blit clipped by the destination edge drops the rest" {
+    const gpa = std.testing.allocator;
+    var dst = try Canvas.init(gpa, 2, 2);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+
+    var src = try Canvas.init(gpa, 4, 4);
+    defer src.deinit();
+    src.clear(.{ .r = 255, .g = 0, .b = 0 });
+
+    dst.blitFrom(&src, .{ 1, 1 });
+    // only the source's top-left pixel lands, at the destination's far corner
+    try std.testing.expectEqual(@as(u8, 255), dst.px[((1 * 2) + 1) * 4]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[0]);
+
+    // an origin outside the destination is a no-op, not a crash
+    dst.blitFrom(&src, .{ 9, 9 });
+    dst.blitFrom(&src, .{ 2, 0 });
 }

@@ -470,7 +470,12 @@ pub fn run(
                 dirty = true;
             },
 
-            .key => {},
+            // Keys have no destination yet: `Event` carries them, and nothing
+            // dispatches. Focus is what gives them one -- a key event belongs
+            // to the focused element, and there is no focus ring to consult
+            // until that lands. Deliberately not marked dirty: an unhandled
+            // key must not force a repaint.
+            .key, .key_up => {},
         }
 
         if (opts.max_events) |max| {
