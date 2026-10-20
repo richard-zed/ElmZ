@@ -967,12 +967,12 @@ pub fn Ui(comptime M: type) type {
         /// buffer. `noinline` is not needed -- this is cold -- but it is
         /// deliberately allocation-free, so a failing frame can always report
         /// itself even when the allocator is what failed.
-        pub fn failFmt(self: *Self, kind: FailKind, comptime fmt: []const u8, args: anytype) void {
+        pub fn failFmt(self: *Self, kind: FailKind, comptime f: []const u8, args: anytype) void {
             self.failed = true;
             self.fail_kind = kind;
             // Truncation is fine here: the band is one line, and a message
             // that long is a diagnostic nobody could read in it anyway.
-            const written = std.fmt.bufPrint(&self.fail_buf, fmt, args) catch self.fail_buf[0..];
+            const written = std.fmt.bufPrint(&self.fail_buf, f, args) catch self.fail_buf[0..];
             self.fail_len = written.len;
         }
 
@@ -983,9 +983,9 @@ pub fn Ui(comptime M: type) type {
         /// nothing else. A theme file that will not parse is not a property of
         /// a build: the runner discovers it between frames, and the band has to
         /// still be saying so on the frame after. Same band, two lifetimes.
-        pub fn failExternal(self: *Self, kind: FailKind, comptime fmt: []const u8, args: anytype) void {
+        pub fn failExternal(self: *Self, kind: FailKind, comptime f: []const u8, args: anytype) void {
             self.ext_kind = kind;
-            const written = std.fmt.bufPrint(&self.ext_buf, fmt, args) catch self.ext_buf[0..];
+            const written = std.fmt.bufPrint(&self.ext_buf, f, args) catch self.ext_buf[0..];
             self.ext_len = written.len;
         }
 
@@ -1038,6 +1038,13 @@ pub fn Ui(comptime M: type) type {
             e.space_after += o.space_after;
             if (o.key) |k| e.key = k;
             if (o.disabled) e.disabled = true;
+            // Any element is pressable once it carries a message; that is the
+            // generic hit path, not a button privilege. Buttons pass it in as
+            // `msg`, everything else through this.
+            if (o.on_press) |msg| e.on_press = msg;
+            if (o.clips) e.clips = true;
+            if (o.hover_bg) |v| e.hover_bg = v;
+            if (o.press_bg) |v| e.press_bg = v;
             // Caller last: a caller who set a field meant it, and `mergeStyle`
             // writes only the fields they actually set.
             e.mergeStyle(o.style);
@@ -1050,21 +1057,32 @@ pub fn Ui(comptime M: type) type {
             tone: Tone = .normal,
             wrap: bool = false,
             on_press: ?M = null,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+            width: ?f32 = null,
+            height: ?f32 = null,
             style: Style = .{},
             space_before: f32 = 0,
             space_after: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
+            clips: bool = false,
         };
 
         pub const ColumnOpts = struct {
             children: []const *Elem,
             gap: f32 = 0,
+            on_press: ?M = null,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+            width: ?f32 = null,
+            height: ?f32 = null,
             style: Style = .{},
             space_before: f32 = 0,
             space_after: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
+            clips: bool = false,
         };
 
         /// A row is a column with the axis swapped: identical options, and
@@ -1075,41 +1093,61 @@ pub fn Ui(comptime M: type) type {
             label: []const u8,
             msg: M,
             size: f32 = 16,
+            on_press: ?M = null,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+            width: ?f32 = null,
+            height: ?f32 = null,
             style: Style = .{},
             space_before: f32 = 0,
             space_after: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
+            clips: bool = false,
         };
 
         pub const BarOpts = struct {
             value: f32,
+            on_press: ?M = null,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+            width: ?f32 = null,
+            height: ?f32 = null,
             style: Style = .{},
             space_before: f32 = 0,
             space_after: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
+            clips: bool = false,
         };
 
         pub const RectOpts = struct {
             width: f32,
             height: f32,
+            on_press: ?M = null,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
             style: Style = .{},
             space_before: f32 = 0,
             space_after: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
+            clips: bool = false,
         };
 
         pub fn column(self: *Self, o: ColumnOpts) *Elem {
             const e = self.mk(.{ .column = .{ .children = self.dupeKids(o.children) } });
             e.gap = o.gap;
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
             return self.finish(e, o);
         }
 
         pub fn row(self: *Self, o: RowOpts) *Elem {
             const e = self.mk(.{ .row = .{ .children = self.dupeKids(o.children) } });
             e.gap = o.gap;
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
             return self.finish(e, o);
         }
 
@@ -1118,20 +1156,31 @@ pub fn Ui(comptime M: type) type {
         pub fn text(self: *Self, o: TextOpts) *Elem {
             const e = self.mk(.{ .text = .{ .bytes = o.label, .size = o.size } });
             e.wrap = o.wrap;
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
             if (o.tone == .muted) e.fg = self.theme.text_muted;
-            if (o.on_press) |msg| e.on_press = msg;
             return self.finish(e, o);
         }
 
-        /// Formatted text stays positional: it is about building the string,
-        /// not about appearance, and threading a comptime fmt through an
-        /// options struct buys nothing.
-        pub fn textFmt(self: *Self, comptime fmt: []const u8, args: anytype, size: f32) *Elem {
-            const s = std.fmt.allocPrint(self.alloc(), fmt, args) catch {
+        /// Format into the frame arena and hand back the slice.
+        ///
+        /// This is what makes a formatted label a first-class citizen: it lives
+        /// as long as the frame (a stack buffer would dangle, since the tree
+        /// outlives `view`), and the caller can then use a full opts struct --
+        /// including `tone` -- instead of being stuck with a positional
+        /// builder that has no appearance surface.
+        pub fn fmt(self: *Self, comptime f: []const u8, args: anytype) []const u8 {
+            return std.fmt.allocPrint(self.alloc(), f, args) catch {
                 self.failWith(.layout_allocation);
-                return &self.dead;
+                return "";
             };
-            return self.text(.{ .label = s, .size = size });
+        }
+
+        /// The short form for the common case: formatted text at one size, no
+        /// other appearance. Kept because it is two thirds of the call sites,
+        /// and because `fmt` reads worse when nothing else is set.
+        pub fn textFmt(self: *Self, comptime f: []const u8, args: anytype, size: f32) *Elem {
+            return self.text(.{ .label = self.fmt(f, args), .size = size });
         }
 
         pub fn button(self: *Self, o: ButtonOpts) *Elem {
@@ -1140,6 +1189,8 @@ pub fn Ui(comptime M: type) type {
             // `on_press` hit path already registers it, so the button kind
             // does not need to carry the message as well.
             e.on_press = o.msg;
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
             e.hover_bg = .{ .solid = self.theme.hover };
             e.press_bg = .{ .solid = self.theme.pressed };
             // The kind's own look, then the caller's overlay.
@@ -1149,6 +1200,8 @@ pub fn Ui(comptime M: type) type {
 
         pub fn bar(self: *Self, o: BarOpts) *Elem {
             const e = self.mk(.{ .bar = .{ .value = o.value } });
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
             e.applyStyle(.{ .bg = self.theme.control, .fg = self.theme.accent });
             return self.finish(e, o);
         }
@@ -1891,10 +1944,8 @@ fn tUpdate(s: *TState, m: TMsg) Action(TMsg) {
 }
 
 fn tView(s: *TState, ui: *Ui(TMsg)) *Element(TMsg) {
-    const minus = ui.button(.{ .label = "-", .msg = .dec });
-    minus.width = 40;
-    const plus = ui.button(.{ .label = "+", .msg = .inc });
-    plus.width = 40;
+    const minus = ui.button(.{ .label = "-", .msg = .dec, .width = 40 });
+    const plus = ui.button(.{ .label = "+", .msg = .inc, .width = 40 });
     return ui.column(.{ .children = &.{
         ui.textFmt("{d}", .{s.n}, 20),
         ui.row(.{ .children = &.{ minus, plus } }),
@@ -2015,8 +2066,7 @@ test "a press released inside its own region fires exactly once" {
 fn reflowView(s: *TState, ui: *Ui(TMsg)) *Element(TMsg) {
     const spacer = ui.rect(.{ .width = 10, .height = 10 });
     spacer.height = 10 + @as(f32, @floatFromInt(@mod(s.n, 4))) * 20;
-    const b = ui.button(.{ .label = "-", .msg = .dec });
-    b.width = 40;
+    const b = ui.button(.{ .label = "-", .msg = .dec, .width = 40 });
     return ui.column(.{ .children = &.{ spacer, b } });
 }
 
@@ -2204,22 +2254,14 @@ fn kUpdate(_: *KState, _: KMsg) Action(KMsg) {
 }
 
 fn gradView(_: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
-    const box = ui.rect(.{ .width = 80, .height = 40 });
-    box.bg = ui.theme.panel;
-    box.bg_grad = Fill.vgrad(ui.theme.accent, ui.theme.bg);
-    box.border = ui.theme.border;
-    box.border_grad = Fill.hgrad(ui.theme.accent, ui.theme.text_muted);
-    const label = ui.text(.{ .label = "grad", .size = 12 });
-    label.fg_grad = Fill.hgrad(ui.theme.accent, ui.theme.text_muted);
+    const box = ui.rect(.{ .width = 80, .height = 40, .style = .{ .bg = ui.theme.panel, .bg_grad = Fill.vgrad(ui.theme.accent, ui.theme.bg), .border = ui.theme.border, .border_grad = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
+    const label = ui.text(.{ .label = "grad", .size = 12, .style = .{ .fg_grad = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
     return ui.column(.{ .children = &.{ box, label } });
 }
 
 fn kView(s: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
-    const a = ui.button(.{ .label = "a", .msg = .first });
-    a.key = 1;
-    const b = ui.button(.{ .label = "b", .msg = .second });
-    b.key = 2;
-    b.disabled = s.disabled;
+    const a = ui.button(.{ .label = "a", .msg = .first, .key = 1 });
+    const b = ui.button(.{ .label = "b", .msg = .second, .key = 2, .disabled = s.disabled });
     return switch (s.mode) {
         .normal => ui.column(.{ .children = &.{ a, b } }),
         .swapped => ui.column(.{ .children = &.{ b, a } }),
@@ -2229,24 +2271,20 @@ fn kView(s: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
 
 /// No keys: the rect-based path, which must keep working exactly as before.
 fn plainView(s: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
-    const a = ui.button(.{ .label = "a", .msg = .first });
-    a.disabled = s.disabled;
+    const a = ui.button(.{ .label = "a", .msg = .first, .disabled = s.disabled });
     return a;
 }
 
 fn parentOffView(_: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
     const a = ui.button(.{ .label = "a", .msg = .first });
     const b = ui.button(.{ .label = "b", .msg = .second });
-    const col = ui.column(.{ .children = &.{ a, b } });
-    col.disabled = true; // the container is off; the buttons never said so
+    const col = ui.column(.{ .children = &.{ a, b }, .disabled = true }); // the container is off; the buttons never said so
     return col;
 }
 
 fn dupView(_: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
-    const a = ui.button(.{ .label = "a", .msg = .first });
-    a.key = 7;
-    const b = ui.button(.{ .label = "b", .msg = .second });
-    b.key = 7;
+    const a = ui.button(.{ .label = "a", .msg = .first, .key = 7 });
+    const b = ui.button(.{ .label = "b", .msg = .second, .key = 7 });
     return ui.column(.{ .children = &.{ a, b } });
 }
 

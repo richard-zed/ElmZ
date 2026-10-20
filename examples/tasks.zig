@@ -54,10 +54,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // one row per item, built in a loop: no hand-unrolled children
     var rows: [m.items.len]*elmz.Element(Msg) = undefined;
     for (m.items, 0..) |item, i| {
-        const mark = ui.bar(.{ .value = 1 });
-        mark.width = 3;
-        mark.height = 14;
-        mark.bg = if (item.done) ui.theme.accent else ui.theme.border;
+        const mark = ui.bar(.{ .value = 1, .width = 3, .height = 14, .style = .{ .bg = if (item.done) ui.theme.accent else ui.theme.border } });
 
         // done rows go FLAT (page colour) and drop to muted text instead of
         // using a dim fill: Mocha has no step between base and surface0, so a
@@ -66,20 +63,13 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         const label = ui.text(.{ .label = item.label, .size = 14 });
         if (item.done) label.fg = ui.theme.text_muted;
 
-        const row = ui.row(.{ .children = &.{ mark, label } });
-        row.pad = 10;
-        row.gap = 10;
-        row.bg = if (item.done) ui.theme.bg else ui.theme.panel;
-        row.border = ui.theme.border;
-        row.on_press = .{ .toggle = i };
+        const row = ui.row(.{ .children = &.{ mark, label }, .gap = 10, .on_press = .{ .toggle = i }, .style = .{ .pad = 10, .bg = if (item.done) ui.theme.bg else ui.theme.panel, .border = ui.theme.border } });
         rows[i] = row;
     }
 
-    const list = ui.column(.{ .children = &rows });
-    list.gap = 6;
+    const list = ui.column(.{ .children = &rows, .gap = 6 });
 
-    const reset = ui.button(.{ .label = "reset", .msg = .reset });
-    reset.width = 68;
+    const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 68 });
 
     const foot = ui.row(.{ .children = &.{
         ui.text(.{ .label = "click a row to toggle", .size = 10, .tone = .muted }),
@@ -92,9 +82,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         ui.text(.{ .label = "one model, one update, one view", .size = 10, .tone = .muted }),
         ui.spaceBefore(list, 10),
         ui.spaceBefore(foot, 10),
-    } });
-    root.pad = 18;
-    root.gap = 4;
+    }, .gap = 4, .style = .{ .pad = 18 } });
     return root;
 }
 

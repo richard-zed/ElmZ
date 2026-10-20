@@ -513,8 +513,7 @@ fn tView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     const r = ui.row(.{ .children = &.{
         ui.textFmt("{d}", .{s.n}, 20),
         ui.button(.{ .label = "inc", .msg = .inc }),
-    } });
-    r.gap = 10;
+    }, .gap = 10 });
     return r;
 }
 
@@ -788,20 +787,13 @@ fn sView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
         ui.rect(.{ .width = 8, .height = 20 }),
         ui.text(.{ .label = "nested", .size = 10 }),
         ui.button(.{ .label = "inc", .msg = .inc }),
-    } });
-    inner.gap = 6;
-    inner.pad = 4;
-    inner.border = ui.theme.accent;
+    }, .gap = 6, .style = .{ .pad = 4, .border = ui.theme.accent } });
 
     const box = ui.column(.{ .children = &.{
         ui.text(.{ .label = "stress", .size = 14 }),
         ui.spaceBefore(inner, 4),
         ui.bar(.{ .value = 0.5 }),
-    } });
-    box.pad = 10;
-    box.gap = 2;
-    box.bg = ui.theme.panel;
-    box.border = ui.theme.text_muted;
+    }, .gap = 2, .style = .{ .pad = 10, .bg = ui.theme.panel, .border = ui.theme.text_muted } });
     return box;
 }
 
@@ -899,8 +891,7 @@ fn pairView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     // TMsg has a single member, so both buttons dispatch `inc`. That is
     // enough: the question is whether a message is produced at all, not which
     // one -- under capture, zero messages is the only correct answer.
-    const r = ui.row(.{ .children = &.{ ui.button(.{ .label = "-", .msg = .inc }), ui.button(.{ .label = "+", .msg = .inc }) } });
-    r.gap = 10;
+    const r = ui.row(.{ .children = &.{ ui.button(.{ .label = "-", .msg = .inc }), ui.button(.{ .label = "+", .msg = .inc }) }, .gap = 10 });
     return r;
 }
 
@@ -982,17 +973,11 @@ test "only the region that owns the press stays lit" {
 /// on": the card overlaps every pixel of its button.
 fn cardView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const b = ui.button(.{ .label = "x", .msg = .inc });
-    b.width = 60;
+    const b = ui.button(.{ .label = "x", .msg = .inc, .width = 60 });
 
     const card = ui.column(.{ .children = &.{
         b,
-    } });
-    card.width = 200;
-    card.pad = 20;
-    card.bg = ui.theme.control;
-    card.hover_bg = .{ .solid = ui.theme.hover };
-    card.press_bg = .{ .solid = ui.theme.pressed };
+    }, .width = 200, .hover_bg = .{ .solid = ui.theme.hover }, .press_bg = .{ .solid = ui.theme.pressed }, .style = .{ .pad = 20, .bg = ui.theme.control } });
     return card;
 }
 
@@ -1155,8 +1140,7 @@ test "the same event script produces the same frames and the same pixels" {
 // no width of its own: the column is 120 wide and layout passes that down, so
 // this also covers measure() taking the width it is measured into.
 fn wrapped(ui: *elmz.Ui(TMsg), bytes: []const u8) *elmz.Element(TMsg) {
-    const e = ui.text(.{ .label = bytes, .size = 12 });
-    e.wrap = true;
+    const e = ui.text(.{ .label = bytes, .size = 12, .wrap = true });
     return e;
 }
 
@@ -1164,8 +1148,7 @@ fn pView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
     const inner = ui.column(.{ .children = &.{
         wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going"),
-    } });
-    inner.width = 120;
+    }, .width = 120 });
     return inner;
 }
 
@@ -1213,15 +1196,10 @@ test "a paragraph wraps to its width and paints one prim per line" {
 /// below the bottom edge.
 fn clipView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const a = ui.rect(.{ .width = 600, .height = 60 });
-    a.bg = ui.theme.accent;
-    const b = ui.rect(.{ .width = 600, .height = 20 });
-    b.bg = ui.theme.accent;
-    const c = ui.rect(.{ .width = 600, .height = 20 });
-    c.bg = ui.theme.accent; // starts at y = 90, wholly outside
-    const box = ui.column(.{ .children = &.{ a, b, ui.spaceBefore(c, 10) } });
-    box.width = 120;
-    box.height = 80;
+    const a = ui.rect(.{ .width = 600, .height = 60, .style = .{ .bg = ui.theme.accent } });
+    const b = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = ui.theme.accent } });
+    const c = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = ui.theme.accent } }); // starts at y = 90, wholly outside
+    const box = ui.column(.{ .children = &.{ a, b, ui.spaceBefore(c, 10) }, .width = 120, .height = 80 });
     box.clips = true;
     // nested, so the box is painted at the size it measured
     return ui.column(.{ .children = &.{box} });
@@ -1282,9 +1260,7 @@ test "a clipping container confines every primitive to its own box" {
 /// A button 32 tall in a box only 16 tall: its lower half is outside the clip.
 fn clipHitView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const box = ui.column(.{ .children = &.{ui.button(.{ .label = "inc", .msg = .inc })} });
-    box.width = 120;
-    box.height = 16;
+    const box = ui.column(.{ .children = &.{ui.button(.{ .label = "inc", .msg = .inc })}, .width = 120, .height = 16 });
     box.clips = true;
     return ui.column(.{ .children = &.{box} });
 }
@@ -1312,12 +1288,8 @@ test "a press outside a clipping container is not a hit" {
 
 fn noopClipOff(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const blk = ui.rect(.{ .width = 40, .height = 10 });
-    blk.bg = ui.theme.accent;
-    const box = ui.column(.{ .children = &.{ ui.text(.{ .label = "fits", .size = 12 }), blk } });
-    box.width = 120;
-    box.height = 60;
-    box.bg = ui.theme.panel;
+    const blk = ui.rect(.{ .width = 40, .height = 10, .style = .{ .bg = ui.theme.accent } });
+    const box = ui.column(.{ .children = &.{ ui.text(.{ .label = "fits", .size = 12 }), blk }, .width = 120, .height = 60, .style = .{ .bg = ui.theme.panel } });
     return ui.column(.{ .children = &.{box} });
 }
 
@@ -1361,15 +1333,13 @@ test "clipping that does not bind changes nothing on screen" {
 
 fn paraNarrow(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const c = ui.column(.{ .children = &.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")} });
-    c.width = 100;
+    const c = ui.column(.{ .children = &.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")}, .width = 100 });
     return c;
 }
 
 fn paraWide(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const c = ui.column(.{ .children = &.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")} });
-    c.width = 400;
+    const c = ui.column(.{ .children = &.{wrapped(ui, "the quick brown fox jumps over the lazy dog and keeps going")}, .width = 400 });
     return c;
 }
 
@@ -1479,21 +1449,17 @@ test "a bar paints a track and a value fill, and nothing twice" {
 }
 
 fn bgView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(.{ .width = 40, .height = 20 });
-    r.bg = ui.theme.panel;
+    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .bg = ui.theme.panel } });
     return r;
 }
 
 fn borderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(.{ .width = 40, .height = 20 });
-    r.border = ui.theme.accent;
+    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .border = ui.theme.accent } });
     return r;
 }
 
 fn bgAndBorderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(.{ .width = 40, .height = 20 });
-    r.bg = ui.theme.panel;
-    r.border = ui.theme.accent;
+    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .bg = ui.theme.panel, .border = ui.theme.accent } });
     return r;
 }
 

@@ -65,26 +65,16 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 /// A nav tab is a text element with a fill and padding -- not a widget. The
 /// only thing that makes it "selected" is which theme role it is filled with.
 fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *elmz.Element(Msg) {
-    const e = ui.text(.{ .label = label, .size = 14 });
-    e.pad = 11;
-    e.radius = 8;
-    e.bg = if (active) ui.theme.selected else ui.theme.control;
-    e.fg = if (active) ui.theme.text else ui.theme.text_muted;
-    e.on_press = msg;
-    e.key = key;
+    const e = ui.text(.{ .label = label, .size = 14, .on_press = msg, .key = key, .style = .{ .pad = 11, .radius = 8, .bg = if (active) ui.theme.selected else ui.theme.control, .fg = if (active) ui.theme.text else ui.theme.text_muted } });
     return e;
 }
 
 fn listRow(ui: *elmz.Ui(Msg), label: []const u8, meta: []const u8, msg: Msg, key: u64) *elmz.Element(Msg) {
-    const name = ui.text(.{ .label = label, .size = 14 });
-    name.key = key;
-    name.on_press = msg;
+    const name = ui.text(.{ .label = label, .size = 14, .key = key, .on_press = msg });
 
     const note = ui.text(.{ .label = meta, .size = 11, .tone = .muted });
 
-    const row = ui.row(.{ .children = &.{ name, ui.spaceBefore(note, 10) } });
-    row.pad = 6;
-    row.radius = 6;
+    const row = ui.row(.{ .children = &.{ name, ui.spaceBefore(note, 10) }, .style = .{ .pad = 6, .radius = 6 } });
     return row;
 }
 
@@ -94,38 +84,29 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const green = elmz.Color.rgbHex(0xa6e3a1);
 
     // -- header ------------------------------------------------------------
-    const title = ui.text(.{ .label = "elmz", .size = 28 });
-    title.fg_grad = elmz.Fill.hgrad(th.accent, pink);
+    const title = ui.text(.{ .label = "elmz", .size = 28, .style = .{ .fg_grad = elmz.Fill.hgrad(th.accent, pink) } });
 
     const sub = ui.text(.{ .label = "one frame: layout, fills, states, keys, theme", .size = 12, .tone = .muted });
 
-    const head = ui.column(.{ .children = &.{ title, sub } });
-    head.gap = 2;
+    const head = ui.column(.{ .children = &.{ title, sub }, .gap = 2 });
 
     // -- nav ---------------------------------------------------------------
     const nav = ui.row(.{ .children = &.{
         tab(ui, "Files", m.tab == 0, .tab_files, 1),
         tab(ui, "Activity", m.tab == 1, .tab_activity, 2),
         tab(ui, "Settings", m.tab == 2, .tab_settings, 3),
-    } });
-    nav.gap = 8;
+    }, .gap = 8 });
 
     // -- left card: a list where every row is its own hit region -----------
-    const card_head = ui.text(.{ .label = "recent", .size = 12 });
-    card_head.fg = th.text_muted;
+    const card_head = ui.text(.{ .label = "recent", .size = 12, .style = .{ .fg = th.text_muted } });
 
     const rows = ui.column(.{ .children = &.{
         listRow(ui, "counter.zig", "12 prims", .pick_a, 10),
         listRow(ui, "tasks.zig", "38 prims", .pick_b, 11),
         listRow(ui, "gallery.zig", "37 prims", .pick_c, 12),
-    } });
-    rows.gap = 2;
+    }, .gap = 2 });
 
-    const progress = ui.bar(.{ .value = 0.62 });
-    progress.width = 308;
-    progress.height = 12;
-    progress.radius = 6;
-    progress.fg_grad = elmz.Fill.hgrad(th.accent, green);
+    const progress = ui.bar(.{ .value = 0.62, .width = 308, .height = 12, .style = .{ .radius = 6, .fg_grad = elmz.Fill.hgrad(th.accent, green) } });
 
     const usage = ui.text(.{ .label = "62% of a week of frames", .size = 11, .tone = .muted });
 
@@ -134,47 +115,26 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         ui.spaceBefore(rows, 10),
         ui.spaceBefore(progress, 14),
         ui.spaceBefore(usage, 8),
-    } });
-    left.pad = 16;
-    left.width = 340;
-    left.bg = th.panel;
-    left.radius = 12;
-    left.border = th.border;
+    }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } });
 
     // -- right card: actions, one of them inert ----------------------------
-    const actions_head = ui.text(.{ .label = "actions", .size = 12 });
-    actions_head.fg = th.text_muted;
+    const actions_head = ui.text(.{ .label = "actions", .size = 12, .style = .{ .fg = th.text_muted } });
 
-    const primary = ui.button(.{ .label = "Sync now", .msg = .primary });
-    primary.key = 4;
-    primary.width = 188;
-    primary.bg_grad = elmz.Fill.hgrad(th.control, th.selected);
-    primary.fg = th.text;
+    const primary = ui.button(.{ .label = "Sync now", .msg = .primary, .key = 4, .width = 188, .style = .{ .bg_grad = elmz.Fill.hgrad(th.control, th.selected), .fg = th.text } });
 
-    const inert = ui.button(.{ .label = "Unavailable", .msg = .primary });
-    inert.key = 5;
-    inert.width = 188;
-    inert.disabled = true;
+    const inert = ui.button(.{ .label = "Unavailable", .msg = .primary, .key = 5, .width = 188, .disabled = true });
 
-    const inert_note = ui.text(.{ .label = "the second button stays in the hit list with active = false, so a click cannot land on whatever is behind it", .size = 11, .tone = .muted });
-    inert_note.wrap = true;
-    inert_note.width = 188;
+    const inert_note = ui.text(.{ .label = "the second button stays in the hit list with active = false, so a click cannot land on whatever is behind it", .size = 11, .tone = .muted, .wrap = true, .width = 188 });
 
     const right = ui.column(.{ .children = &.{
         actions_head,
         ui.spaceBefore(primary, 10),
         ui.spaceBefore(inert, 8),
         ui.spaceBefore(inert_note, 12),
-    } });
-    right.pad = 16;
-    right.width = 216;
-    right.bg = th.panel;
-    right.radius = 12;
-    right.border_grad = elmz.Fill.hgrad(pink, th.accent);
+    }, .width = 216, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border_grad = elmz.Fill.hgrad(pink, th.accent) } });
 
     // -- body and page -----------------------------------------------------
-    const body = ui.row(.{ .children = &.{ left, right } });
-    body.gap = 16;
+    const body = ui.row(.{ .children = &.{ left, right }, .gap = 16 });
 
     const footer = ui.text(.{ .label = "frames: showcase.png, showcase-hover.png, showcase-error.png", .size = 11, .tone = .muted });
 
@@ -183,8 +143,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         ui.spaceBefore(nav, 16),
         ui.spaceBefore(body, 14),
         ui.spaceBefore(footer, 16),
-    } });
-    root.pad = 24;
+    }, .style = .{ .pad = 24 } });
     return root;
 }
 

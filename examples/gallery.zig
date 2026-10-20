@@ -60,8 +60,7 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 }
 
 fn navButton(ui: *elmz.Ui(Msg), label: []const u8, t: Tab, active: bool) !*elmz.Element(Msg) {
-    const b = ui.button(.{ .label = label, .msg = .{ .tab = t } });
-    b.border = if (active) ui.theme.accent else ui.theme.border;
+    const b = ui.button(.{ .label = label, .msg = .{ .tab = t }, .style = .{ .border = if (active) ui.theme.accent else ui.theme.border } });
     if (active) b.bg = ui.theme.selected;
     return b;
 }
@@ -71,11 +70,9 @@ fn overviewBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
         ui.button(.{ .label = "-", .msg = .dec }),
         ui.button(.{ .label = "+", .msg = .inc }),
         ui.button(.{ .label = "reset", .msg = .reset }),
-    } });
-    controls.gap = 8;
+    }, .gap = 8 });
 
-    const meter = ui.bar(.{ .value = @as(f32, @floatFromInt(m.level)) / 10.0 });
-    meter.height = 12;
+    const meter = ui.bar(.{ .value = @as(f32, @floatFromInt(m.level)) / 10.0, .height = 12 });
 
     return ui.column(.{ .children = &.{
         ui.text(.{ .label = "PRIMITIVES", .size = 10, .tone = .muted }),
@@ -93,19 +90,16 @@ fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
 
         // A 4px accent block doubles as the selection marker: `bar` with a
         // width override is the only way to draw a small solid quad.
-        const marker = ui.bar(.{ .value = 1 });
-        marker.width = 4;
-        marker.height = 14;
+        const marker = ui.bar(.{ .value = 1, .width = 4, .height = 14 });
         if (!selected) marker.bg = ui.theme.panel;
 
-        const line = ui.row(.{ .children = &.{ marker, ui.textFmt("{d}   {s}", .{ i + 1, name }, 14) } });
-        line.pad = 8;
-        line.gap = 10;
-        line.on_press = .{ .select = i };
-        if (selected) {
-            line.bg = ui.theme.selected;
-            line.border = ui.theme.accent;
-        }
+        // A conditional tint is an optional: unset means "whatever the theme
+        // says", so the selected row and the plain row are one construction.
+        const line = ui.row(.{ .children = &.{ marker, ui.textFmt("{d}   {s}", .{ i + 1, name }, 14) }, .gap = 10, .on_press = .{ .select = i }, .style = .{
+            .pad = 8,
+            .bg = if (selected) ui.theme.selected else null,
+            .border = if (selected) ui.theme.accent else null,
+        } });
 
         rows[i] = line;
     }
@@ -138,8 +132,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         try navButton(ui, "overview", .overview, m.tab == .overview),
         try navButton(ui, "list", .list, m.tab == .list),
         try navButton(ui, "about", .about, m.tab == .about),
-    } });
-    nav.gap = 8;
+    }, .gap = 8 });
 
     const body = switch (m.tab) {
         .overview => try overviewBody(ui, m),
@@ -147,11 +140,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .about => try aboutBody(ui),
     };
 
-    const panel = ui.column(.{ .children = &.{body} });
-    panel.pad = 16;
-    panel.gap = 6;
-    panel.bg = ui.theme.panel;
-    panel.border = ui.theme.border;
+    const panel = ui.column(.{ .children = &.{body}, .gap = 6, .style = .{ .pad = 16, .bg = ui.theme.panel, .border = ui.theme.border } });
 
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ GALLERY", .size = 22 }),
@@ -161,9 +150,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         ui.spaceBefore(ui.textFmt("clicks {d}   view {s}   level {d}", .{
             m.clicks, @tagName(m.tab), m.level,
         }, 10), 8),
-    } });
-    root.pad = 22;
-    root.gap = 4;
+    }, .gap = 4, .style = .{ .pad = 22 } });
     return root;
 }
 
