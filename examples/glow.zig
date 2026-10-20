@@ -18,8 +18,12 @@ const elmz = @import("elmz");
 const runner = @import("runner");
 const software = @import("software");
 
-const W = 560;
-const H = 380;
+// Window size is measured against the content, not guessed: the card ends at
+// y=187 and its shadow tail fades out by ~215, so anything past 216 is empty
+// page. A window that dwarfs its content is the same mistake as a gradient
+// that only covers half the frame -- a size nobody derived.
+const W = 460;
+const H = 216;
 
 pub const Model = struct {
     /// set from the theme file's `.app` tier at startup
@@ -41,72 +45,80 @@ fn update(_: *Model, _: Msg) elmz.Action(Msg) {
 fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const th = ui.theme;
 
-    // A halo needs a colour with alpha, and the theme carries opaque tokens,
-    // so the app composes one. Shadows are the theme's own dark end pushed
-    // most of the way to transparent -- not black, which would read as a
-    // hole in a warm palette.
-    const shadow_color = elmz.Color{ .r = 0x0b, .g = 0x0a, .b = 0x12, .a = 150 };
-    const glow_color = elmz.Color{ .r = th.accent.r, .g = th.accent.g, .b = th.accent.b, .a = 110 };
+    // A gradient a theme file declares wins; a flat colour is the fallback.
+    // That is the protocol in one line: the FILE decides the look, the code
+    // only decides where the roles go.
+    const page_fill = ui.gradients.get("bg") orelse elmz.Fill.angled(115, th.bg, th.panel);
+    const card_fill = ui.gradients.get("panel") orelse elmz.Fill.vgrad(th.panel, th.bg);
+
+    const shadow_color = elmz.Color{ .r = 0x08, .g = 0x07, .b = 0x0e, .a = 190 };
+    const glow_color = elmz.Color{ .r = th.accent.r, .g = th.accent.g, .b = th.accent.b, .a = 120 };
 
     const title = ui.text(.{ .label = "glow + shadow", .size = m.title_size, .tone = .normal });
 
     const note = ui.text(.{
-        .label = "the page gradient, the card shadow and the button glow are all theme tokens; hover the button and the halo appears without view knowing",
+        .label = "the page gradient, the card shadow and the button glow are theme decisions. the pointer never reaches view, so the hover halo is derived during paint",
         .size = 12,
         .tone = .muted,
         .wrap = true,
-        .width = 300,
+        // W - 2*pad - card - gap, so the row ends exactly at the right pad.
+        // Leaving the column to size itself put all the slack on one side and
+        // the page looked off-centre for no reason anyone could name.
+        .width = W - 2 * 28 - 200 - 16,
     });
 
     const primary = ui.button(.{
         .label = "hover me",
         .msg = .primary,
         .key = 1,
-        .width = 150,
+        .width = 140,
         .style = .{
             .bg = th.accent,
             .fg = th.bg,
             .radius = 10,
-            // resting: a shadow, so the button sits on the card
-            .halo = .{ .color = shadow_color, .blur = 10, .offset = .{ 0, 4 }, .mode = .shadow },
+            .halo = .{ .color = shadow_color, .blur = 12, .offset = .{ 0, 5 }, .mode = .shadow },
         },
-        // hover: the shadow is replaced by a glow, which is why the hover halo
-        // is a whole `Halo` and not just a colour. A glow spreads around the
-        // shape; a shadow sits under it. Same type, different intent.
+        // hover replaces the halo rather than adding one: a shadow sits UNDER
+        // a thing, a glow spreads AROUND it, and the same element does not
+        // want both at once.
         .hover_halo = .{ .color = glow_color, .blur = 26, .spread = 2, .mode = .glow },
     });
 
-    // The card: no fill of its own beyond `panel`, but it casts the shadow the
-    // two buttons sit inside.
-    const card = ui.column(.{
+    const card_inner = ui.column(.{
         .children = &.{
             ui.text(.{ .label = "a card with a shadow", .size = 14, .tone = .normal }),
             ui.spaceBefore(primary, 16),
         },
+    });
+    const card = ui.column(.{
+        .children = &.{card_inner},
+        .width = 200,
         .style = .{
             .pad = 20,
-            .bg = th.panel,
+            .bg_grad = card_fill,
             .radius = 14,
             .border = th.border,
-            .halo = .{ .color = shadow_color, .blur = 24, .spread = 0, .offset = .{ 0, 10 }, .mode = .shadow },
+            // spread gives the shadow a solid core; without it the falloff
+            // starts at the edge and reads as a smudge, not an occlusion.
+            .halo = .{ .color = shadow_color, .blur = 22, .spread = 3, .offset = .{ 0, 10 }, .mode = .shadow },
         },
     });
 
-    const body = ui.row(.{ .children = &.{ note, ui.spaceBefore(card, 20) }, .gap = 10 });
+    const body = ui.row(.{ .children = &.{ note, ui.spaceBefore(card, 16) }, .width = W - 2 * 28 });
 
-    // No `bg` on the root: the frame is cleared to the theme's `bg`, and if a
-    // theme file sets a `.gradients.bg`, that is what shows through. The root
-    // gradient below is the app's own choice instead -- an angled ramp from
-    // `bg` toward `panel`, so the page has a light direction.
+    // The root FILLS the window. Without a height it is content-sized, the
+    // gradient stops at the content box, and the page gets a rectangular seam
+    // where the ramp ends -- the sizing artefact, not a gradient bug.
     return ui.column(.{
         .children = &.{
             title,
-            ui.spaceBefore(body, 22),
+            ui.spaceBefore(body, 24),
         },
+        .width = W,
+        .height = H,
         .style = .{
             .pad = 28,
-            .bg = null,
-            .bg_grad = elmz.Fill.angled(115, th.bg, th.panel),
+            .bg_grad = page_fill,
         },
     });
 }
