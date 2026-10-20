@@ -113,6 +113,15 @@ pub const Options = struct {
     /// times a second, which is cheaper than dragging a filesystem watcher
     /// into the composition layer.
     theme_poll_ms: i32 = 250,
+    /// Monotonic NANOSECONDS for the frame clock, injected. A headless run has
+    /// no io and a windowed one has no reason to be reproducible, but an
+    /// animation whose dt cannot be chosen cannot be tested at all -- so the
+    /// source is a parameter, not a global.
+    now_ns: ?*const fn () u64 = null,
+    /// Longest one poll may block while the app is animating. The loop
+    /// measures real elapsed time, so this bounds how stale a frame can get;
+    /// it is not a frame rate.
+    anim_poll_ms: i32 = 8,
     /// Draw the frame readout over the painted frame. OFF by default here and
     /// turned on by `runApp` when the binary is built in Debug, because the
     /// overlay costs a timestamp pair per repaint and a text render -- fine
@@ -365,11 +374,25 @@ pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8)
 /// Never unbounded while a file is being watched, and a command in flight keeps
 /// its 5ms budget -- blocking for a theme would starve the async result, which
 /// is the same bug in a different costume.
-fn effectiveTimeout(opts: Options, busy: bool, watching: bool) i32 {
+fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool) i32 {
     if (busy) return 5;
+    // An animation produces frames with no input at all, so blocking here is
+    // exactly the bug: it would freeze until the pointer moved.
+    if (animating) return opts.anim_poll_ms;
     if (!watching) return opts.poll_timeout_ms;
     if (opts.poll_timeout_ms < 0) return opts.theme_poll_ms;
     return @min(opts.poll_timeout_ms, opts.theme_poll_ms);
+}
+
+/// Monotonic nanoseconds: the injected source when there is one, else the io
+/// clock, else zero (no io, no clock, no dt -- and no animation without io).
+fn clockNs(opts: Options, io: ?std.Io) u64 {
+    if (opts.now_ns) |f| return f();
+    if (io) |i| {
+        const ns = std.Io.Timestamp.now(i, .awake).toNanoseconds();
+        return if (ns > 0) @intCast(ns) else 0;
+    }
+    return 0;
 }
 
 pub const Stats = struct {
@@ -438,6 +461,7 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     if (@hasField(@TypeOf(app), "on_key")) rt.on_key = app.on_key;
     if (@hasField(@TypeOf(app), "on_text")) rt.on_text = app.on_text;
     if (@hasField(@TypeOf(app), "on_wheel")) rt.on_wheel = app.on_wheel;
+    if (@hasField(@TypeOf(app), "on_tick")) rt.on_tick = app.on_tick;
 
     // Same optional-field trick as `state`: an app that wants a theme file
     // declares `theme_path` in its struct, and one that does not never sees it.
@@ -513,6 +537,7 @@ pub fn run(
     errdefer if (frame) |*f| f.deinit();
 
     var dirty = true;
+    var last_ns: u64 = clockNs(opts, opts.io);
     var running = true;
 
     // The claim lives in `rt.press`: one owner, so the colour shown while a
@@ -620,7 +645,23 @@ pub fn run(
 
         // While a command is in flight, poll briefly instead of blocking
         // forever, or its result would sit in the queue until the next input.
-        const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null);
+        // Frame clock. Runs whether or not anything else happened: an
+        // animation's entire point is to produce frames from nothing.
+        const now_ns = clockNs(opts, opts.io);
+        const dt_ns = now_ns -% last_ns;
+        last_ns = now_ns;
+        if (rt.animate and rt.on_tick != null) {
+            const secs: f32 = @floatFromInt(@min(dt_ns, std.time.ns_per_s));
+            const dt: f32 = @min(secs / std.time.ns_per_s, 0.1);
+            if (rt.on_tick.?(&rt.state, dt)) |msg| {
+                const action = rt.dispatch(msg);
+                stats.messages += 1;
+                if (action.quit) running = false;
+                dirty = dirty or action.repaint;
+            }
+        }
+
+        const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null, rt.animate);
         const ev = window.poll(timeout) orelse continue;
         stats.events += 1;
 
@@ -1789,13 +1830,18 @@ test "bg, border, and both, each emit the number of prims they cost" {
 
 test "the loop never blocks forever while a theme file is being watched" {
     // Nothing watched: an app is allowed to sleep until input, as before.
-    try std.testing.expectEqual(@as(i32, -1), effectiveTimeout(.{}, false, false));
+    try std.testing.expectEqual(@as(i32, -1), effectiveTimeout(.{}, false, false, false));
     // Watched: bounded, or an edit waits for the pointer to enter the window.
-    try std.testing.expectEqual(@as(i32, 250), effectiveTimeout(.{ .theme_path = "theme.zon" }, false, true));
+    try std.testing.expectEqual(@as(i32, 250), effectiveTimeout(.{ .theme_path = "theme.zon" }, false, true, false));
     // A command in flight keeps its own tighter budget.
-    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{ .theme_path = "theme.zon" }, true, true));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{ .theme_path = "theme.zon" }, true, true, false));
     // An app that already asked for less does not get slowed down.
-    try std.testing.expectEqual(@as(i32, 30), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, true));
+    try std.testing.expectEqual(@as(i32, 30), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, true, false));
+    // Animating outranks an idle block: a frame clock that waits for input is
+    // not a clock. Busy still wins, because a command result is due sooner.
+    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{}, false, false, true));
+    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, false, true));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, true));
 }
 
 test "a relative theme path resolves beside the executable, not the cwd" {
@@ -2412,4 +2458,81 @@ test "a wheel event reaches the app's hook and an unclaimed one repaints nothing
         try std.testing.expectEqual(@as(u32, 0), stats.messages);
         try std.testing.expectEqual(@as(u32, 1), stats.frames); // the first paint only
     }
+}
+
+var clock_now: u64 = 0;
+fn stepNow() u64 {
+    clock_now += 5 * std.time.ns_per_ms;
+    return clock_now;
+}
+
+test "the frame clock delivers dt while the app animates, and stops when told" {
+    const gpa = std.testing.allocator;
+    const ClockMsg = enum { ticked };
+    const ClockState = struct { ticks: u32 = 0, sum: f32 = 0, seen: u32 = 0 };
+
+    const Hooks = struct {
+        fn update(s: *ClockState, m: ClockMsg) elmz.Action(ClockMsg) {
+            _ = m;
+            s.seen += 1;
+            // Three ticks and it settles: the app, not the runtime, decides.
+            return .{ .animate = s.seen < 3 };
+        }
+        fn view(s: *ClockState, ui: *elmz.Ui(ClockMsg)) *elmz.Element(ClockMsg) {
+            _ = s;
+            return ui.text(.{ .label = "animating", .size = 14 });
+        }
+        fn onTick(s: *ClockState, dt: f32) ?ClockMsg {
+            s.ticks += 1;
+            s.sum += dt;
+            return .ticked;
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 120, 80);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(ClockState, ClockMsg).init(gpa, .{}, Hooks.update, Hooks.view);
+    defer rt.deinit();
+    rt.on_tick = Hooks.onTick;
+    rt.animate = true;
+
+    clock_now = 0;
+    var fake = Fake{ .events = &.{}, .idle = 3 };
+    const stats = try run(struct {}, ClockState, ClockMsg, &rt, &canvas, fake.window(), .{ .now_ns = stepNow });
+
+    try std.testing.expectEqual(@as(u32, 3), rt.state.ticks); // each tick asked for one more
+    try std.testing.expectApproxEqAbs(@as(f32, 0.015), rt.state.sum, 1e-5); // 3 x 5ms of real dt
+    try std.testing.expectEqual(@as(u32, 3), stats.messages);
+    try std.testing.expect(!rt.animate); // the runtime honoured animate = false
+}
+
+test "a clock that nobody listens to is not a clock: no on_tick, no ticks" {
+    const gpa = std.testing.allocator;
+    const QuietMsg = enum { none };
+    const QuietState = struct { seen: u32 = 0 };
+
+    const Hooks = struct {
+        fn update(s: *QuietState, m: QuietMsg) elmz.Action(QuietMsg) {
+            _ = m;
+            s.seen += 1;
+            return .{};
+        }
+        fn view(s: *QuietState, ui: *elmz.Ui(QuietMsg)) *elmz.Element(QuietMsg) {
+            _ = s;
+            return ui.text(.{ .label = "still", .size = 14 });
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 120, 80);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(QuietState, QuietMsg).init(gpa, .{}, Hooks.update, Hooks.view);
+    defer rt.deinit();
+    rt.animate = true; // wants frames, but declares no hook to receive them
+
+    clock_now = 0;
+    var fake = Fake{ .events = &.{}, .idle = 3 };
+    const stats = try run(struct {}, QuietState, QuietMsg, &rt, &canvas, fake.window(), .{ .now_ns = stepNow });
+
+    try std.testing.expectEqual(@as(u32, 0), rt.state.seen);
+    try std.testing.expectEqual(@as(u32, 1), stats.frames); // no message, no repaint
 }

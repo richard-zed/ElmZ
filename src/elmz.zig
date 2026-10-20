@@ -2062,6 +2062,16 @@ pub fn Action(comptime M: type) type {
         quit: bool = false,
         /// work to run off the UI thread; its result comes back as a message
         cmd: ?Cmd(M) = null,
+        /// Whether the frame clock keeps ticking. Tri-state on purpose: null
+        /// leaves it as it was, so an unrelated message cannot silently stop a
+        /// running animation, and `update` only has to say `true` while
+        /// something is moving and `false` when it settles.
+        ///
+        /// This is the ONLY route by which time reaches the app. There is no
+        /// clock to read in `view` -- making the tree a function of when it
+        /// happened to be built would be worse than useless -- and `update`
+        /// knows nothing else about the wall clock.
+        animate: ?bool = null,
         /// Move focus, or give it up. Focus is RUNTIME state because the
         /// runtime is what reflects it into paint, and the app is what decides
         /// it -- so an effect is the only bridge between the two. Same shape as
@@ -2397,6 +2407,14 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// read it to clip and translate, and the runtime cannot hold state
         /// `view` needs privately the way it does with hover.
         on_wheel: ?*const fn (*S, Wheel) ?M = null,
+        /// Frame clock: seconds since the previous tick, called at the top of
+        /// every loop iteration while the app is animating. Clamped by the
+        /// runner so a window that sat idle for a minute does not arrive as
+        /// one enormous step.
+        on_tick: ?*const fn (*S, f32) ?M = null,
+        /// True while the app wants frames without input. Lives here because
+        /// the loop consults it BEFORE it decides how long to block in poll.
+        animate: bool = false,
 
         pub fn init(
             gpa: Allocator,
@@ -2424,6 +2442,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 .set => |key| key,
                 .clear => null,
             };
+            if (action.animate) |v| self.animate = v;
             if (action.cmd) |cmd| {
                 if (self.exec == null) self.exec = Executor(M){ .gpa = self.gpa };
                 self.exec.?.submit(cmd);
