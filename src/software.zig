@@ -39,7 +39,7 @@ fn lightWidth(blur: f32, px: f32, py: f32, hx: f32, hy: f32, cast: [2]f32) f32 {
 /// Shared by the distance-field path and the stencil bake on purpose. A mode that
 /// meant two things depending on which path drew it would be two features wearing
 /// one name.
-fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32) f32 {
+fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32, core: f32) f32 {
     if (blur <= 0) return 1;
     return switch (mode) {
         // Both halves. `.outer_glow` is the same ramp: what makes it outer is
@@ -69,8 +69,13 @@ fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32) f32 {
         // A soft-at-both-ends curve (`(1-u^2)^2`) was tried and is the wrong way
         // round: peak brightness with zero slope at the boundary is a plateau, not a
         // rim, and the face reads flat.
+        // `core` is the flat part of the rim: full brightness for that many pixels
+        // before the decay starts. It is subtracted from the depth AFTER the sign
+        // test above, because adding it to `d` instead makes the boundary pixel
+        // read as "outside" and switches the rim off right where it should be
+        // brightest -- which is exactly how the first attempt failed.
         .inner_glow => if (d > 0) 0 else blk: {
-            const u = std.math.clamp(-d / blur, 0, 1);
+            const u = std.math.clamp((-d - core) / blur, 0, 1);
             const left = 1.0 - u;
             break :blk left * left;
         },
@@ -650,11 +655,14 @@ pub const Canvas = struct {
     fn haloSdf(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         const blur = @max(h.blur, 0);
         // The silhouette the ramp runs away from, after spread and offset.
-        // For an inner glow `spread` INSETS instead: "push the ramp outward" and
-        // "start it further in" are the same gesture when it runs inward, and a
-        // rim measured from a shape grown past the element would sit outside the
-        // element it is supposed to light.
-        const spread = if (h.mode == .inner_glow) -h.spread else h.spread;
+        // An inner glow never moves its silhouette. Shrinking it for `spread`
+        // (the first attempt) put the bright band three pixels inside the face, so
+        // the rim floated off the edge it is supposed to light and the button read
+        // as a stripe across the middle. Growing it instead throws light outside
+        // the element. So the shape stays the element and `spread` becomes what it
+        // says -- a flat core -- by holding the ramp at full brightness for that
+        // many pixels before it begins to decay.
+        const spread = if (h.mode == .inner_glow) 0 else h.spread;
         const shape = elmz.Rect{
             .x = rect.x + h.offset[0] - spread,
             .y = rect.y + h.offset[1] - spread,
@@ -752,7 +760,11 @@ pub const Canvas = struct {
                     rd = d + (ellipseDistance(px, py, ea, eb) - d) * t;
                 }
                 const w = if (h.light != null) lightWidth(blur, px, py, hx, hy, cast) else blur;
-                var cov = ramp(h.mode, rd, w);
+                // A flat core is a depth offset, not a bigger shape: the rim still
+                // starts on the element edge, it just stays at full brightness for
+                // `spread` before it starts to decay.
+                const core: f32 = if (h.mode == .inner_glow) h.spread else 0;
+                var cov = ramp(h.mode, rd, w, core);
                 if (cov > 0) {
                     cov *= switch (h.mode) {
                         // Not feathered. The face's own fill already antialiases
@@ -911,7 +923,7 @@ pub const Canvas = struct {
     fn haloBaked(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         const blur = @max(h.blur, 0);
         // Insets for an inner glow; see `haloSdf`.
-        const spread = if (h.mode == .inner_glow) -h.spread else h.spread;
+        const spread = if (h.mode == .inner_glow) 0 else h.spread;
         const shape = elmz.Rect{
             .x = rect.x + h.offset[0] - spread,
             .y = rect.y + h.offset[1] - spread,
@@ -922,6 +934,9 @@ pub const Canvas = struct {
         const r = @min(@max(corner + spread, 0), @min(shape.w, shape.h) * 0.5);
         const swi: i32 = @intFromFloat(@round(shape.w));
         const shi: i32 = @intFromFloat(@round(shape.h));
+        // A stencil is keyed on the silhouette and has nowhere to record a flat
+        // core, so an inner rim with any spread takes the field path.
+        if (h.mode == .inner_glow and h.spread != 0) return self.haloSdf(rect, corner, h, clip);
         const m = self.maskFor(swi, shi, r, blur, h.mode) orelse return self.haloSdf(rect, corner, h, clip);
 
         const grow = falloffReach(h.mode, blur, false) + 1;
@@ -1079,7 +1094,7 @@ pub const Canvas = struct {
                 const qx = @abs(pxx) - hx;
                 const ax = @max(qx, 0);
                 const d = @sqrt(ax * ax + ay * ay) + @min(@max(qx, qy), 0) - r;
-                const cov = ramp(mode, d, blur);
+                const cov = ramp(mode, d, blur, 0);
                 px[@as(usize, j) * rw + i] = @intFromFloat(cov * 255.0 + 0.5);
             }
         }
