@@ -509,4 +509,64 @@ pub fn build(b: *std.Build) void {
     b.step("run-showcase-sdl3", "run the showcase in an SDL3 window").dependOn(
         &runExample(b, show_win).step,
     );
+
+    // radius had a `view` and no `app` declaration, which is exactly why it had
+    // no window: the composition layer needs something to bind to.
+    const radius_win = b.addExecutable(.{
+        .name = "radius-sdl3",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/radius_window.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+                .{ .name = "platform_sdl3", .module = sdl_mod },
+            },
+        }),
+    });
+    const radius_win_install = b.addInstallArtifact(radius_win, .{});
+    b.step("radius-sdl3", "build the radii render in an SDL3 window (needs libsdl3-dev)").dependOn(&radius_win_install.step);
+    b.step("run-radius-sdl3", "run the radii render in an SDL3 window").dependOn(
+        &runExample(b, radius_win).step,
+    );
+
+    // ---------------------------------------------------------------------
+    // `zig build examples` -- EVERY example, headless and windowed.
+    //
+    // This is the compile gate the window binaries never had. `zig build test`
+    // builds only the declared test roots and `zig build` builds only what is
+    // in the install set, so a window example could rot for weeks while every
+    // suite stayed green -- the same false-green class as test-does-not-build-
+    // examples. Here they are all in one step, and a broken one fails it.
+    //
+    // It needs libsdl3-dev, or `--search-prefix` pointing at one. The headless
+    // set is what `zig build` installs, so a machine without SDL3 still has a
+    // working default build; this step is the deliberate, explicit ask.
+    // ---------------------------------------------------------------------
+    const examples_step = b.step("examples", "build every example: headless + all SDL3 windows (windows need libsdl3-dev)");
+
+    // headless
+    examples_step.dependOn(&exe_install.step);
+    examples_step.dependOn(&gallery_install.step);
+    examples_step.dependOn(&tasks_install.step);
+    examples_step.dependOn(&radius_exe_install.step);
+    examples_step.dependOn(&paint_exe_install.step);
+    examples_step.dependOn(&effects_exe_install.step);
+    examples_step.dependOn(&overlay_exe_install.step);
+    examples_step.dependOn(&bench_install.step);
+    examples_step.dependOn(&showcase_exe_install.step);
+    examples_step.dependOn(&glow_exe_install.step);
+    examples_step.dependOn(&clicks_install.step);
+
+    // sdl3 windows
+    examples_step.dependOn(&b.addInstallArtifact(win_exe, .{}).step);
+    examples_step.dependOn(&b.addInstallArtifact(tasks_win, .{}).step);
+    examples_step.dependOn(&b.addInstallArtifact(gal_win, .{}).step);
+    examples_step.dependOn(&b.addInstallArtifact(clicks_win, .{}).step);
+    examples_step.dependOn(&b.addInstallArtifact(glow_win, .{}).step);
+    examples_step.dependOn(&b.addInstallArtifact(paint_win, .{}).step);
+    examples_step.dependOn(&b.addInstallArtifact(show_win, .{}).step);
+    examples_step.dependOn(&radius_win_install.step);
 }

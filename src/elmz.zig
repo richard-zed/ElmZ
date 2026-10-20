@@ -172,18 +172,19 @@ pub const Fill = union(enum) {
         stops: Stops = .{},
     };
 
-    /// Vertical, top to bottom.
+    /// Vertical, top to bottom. Clock 180.
     pub fn vgrad(a: Color, b: Color) Fill {
         return .{ .linear = .{ .stops = Stops.two(a, b) } };
     }
 
-    /// Horizontal, left to right.
+    /// Horizontal, left to right. Clock 90.
     pub fn hgrad(a: Color, b: Color) Fill {
         return .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 0 }, .stops = Stops.two(a, b) } };
     }
 
-    /// Linear ramp at `deg` degrees, clockwise from "to the right" -- 0 is
-    /// left-to-right, 90 top-to-bottom, 22 whatever 22 means.
+    /// Linear ramp at `deg` degrees on a clock face: clockwise from 12 o'clock,
+    /// naming the direction the ramp TRAVELS. 0 is bottom-to-top, 90 left-to-right,
+    /// 180 top-to-bottom, 270 right-to-left, 22 whatever 22 means.
     ///
     /// Centred on the box and unit-length, so every angle spans the element and
     /// turning the ramp never shrinks it. `vgrad`/`hgrad`/`diag` are the three
@@ -191,7 +192,10 @@ pub const Fill = union(enum) {
     /// a ramp only cares about the projection, but they keep their old vectors
     /// so existing renders do not move.
     pub fn angled(deg: f32, a: Color, b: Color) Fill {
-        const rad = std.math.degreesToRadians(deg);
+        // Clock degrees -> the vector this always used. 0 used to mean "to the
+        // right", so subtracting 90 relabels every call site without moving a
+        // pixel: the f32 handed to cos/sin is the same number it was before.
+        const rad = std.math.degreesToRadians(deg - 90);
         const dx = @cos(rad) * 0.5;
         const dy = @sin(rad) * 0.5;
         return .{ .linear = .{
@@ -201,7 +205,7 @@ pub const Fill = union(enum) {
         } };
     }
 
-    /// Diagonal, corner to corner.
+    /// Diagonal, corner to corner: down and to the right. Clock 135.
     pub fn diag(a: Color, b: Color) Fill {
         return .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 1 }, .stops = Stops.two(a, b) } };
     }
@@ -360,9 +364,16 @@ pub const Halo = struct {
     /// it a blurred shadow of a filled shape is barely visible.
     spread: f32 = 0,
     offset: [2]f32 = .{ 0, 0 },
-    /// Degrees the light comes FROM, clockwise from "to the right" -- the same
-    /// sense as a gradient's `dir` and, like it, `90` is straight down. Null
-    /// means no light source and a symmetric ramp.
+    /// Degrees the light comes FROM, on the same clock face as a gradient's
+    /// `dir`: clockwise from 12 o'clock, so `0` is overhead, `90` to the right,
+    /// `180` directly below, `270` to the left. Null means no light source and a
+    /// symmetric ramp.
+    ///
+    /// The two agree on the clock but not on what the number names: a gradient's
+    /// `dir` is where the colour is GOING, a light is where the lamp SITS. At the
+    /// same number they point opposite ways -- `Fill.angled(0)` travels upward,
+    /// `.light = 0` is a lamp above. Both mean "the clock position of the thing
+    /// it names", which is why this reads correctly once you ask which thing.
     ///
     /// With a light the ramp is WIDER on the side the shadow is cast toward and
     /// narrower on the lit side, which is what makes an offset shadow look cast
@@ -398,17 +409,18 @@ pub const Halo = struct {
     /// points the wrong way for its own light reads as a mistake and there is no
     /// useful case for the combination.
     ///
-    /// `light_deg` is where the light comes FROM -- `270` is overhead, which is the
-    /// default and the one a UI wants. `dist` is how far the silhouette is
-    /// displaced, in pixels.
+    /// `light_deg` is where the light comes FROM on the clock -- `0` is overhead,
+    /// which is the one a UI wants almost always. `dist` is how far the silhouette
+    /// is displaced, in pixels.
     pub fn shadow(color: Color, light_deg: f32, dist: f32) Halo {
         const a = light_deg * std.math.pi / 180.0;
         return .{
             .color = color,
             .mode = .outer_glow,
             .light = light_deg,
-            // Away from the source, in screen pixels (y grows downward).
-            .offset = .{ -@cos(a) * dist, -@sin(a) * dist },
+            // Away from the source, in screen pixels (y grows downward). At
+            // clock 0 the lamp is above, so the shadow falls to +y.
+            .offset = .{ -@sin(a) * dist, @cos(a) * dist },
             .blur = 18,
             .spread = 2,
         };

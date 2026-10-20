@@ -272,8 +272,8 @@ pub fn main(init: std.process.Init) !void {
             .{ .name = "solid", .fill = .{ .solid = a } },
             .{ .name = "vertical", .fill = elmz.Fill.vgrad(a, b) },
             .{ .name = "horizontal", .fill = elmz.Fill.hgrad(a, b) },
-            .{ .name = "diagonal 45", .fill = elmz.Fill.angled(45, a, b) },
-            .{ .name = "diagonal 115", .fill = elmz.Fill.angled(115, a, b) },
+            .{ .name = "diagonal 135", .fill = elmz.Fill.angled(135, a, b) },
+            .{ .name = "diagonal 205", .fill = elmz.Fill.angled(205, a, b) },
             .{ .name = "radial", .fill = elmz.Fill.radialFill(a, b) },
         };
         try out.print("\n  640x480 full-canvas fill, {d} passes each\n", .{iters});

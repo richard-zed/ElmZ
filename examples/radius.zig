@@ -13,6 +13,18 @@ fn update(_: *Model, _: Msg) elmz.Action(Msg) {
     return .{};
 }
 
+/// The app declaration the window composition binds to. The headless `main`
+/// below builds its own Runtime from the same three functions, so the picture
+/// and the window cannot drift: one `view`, two ways to drive it.
+pub const app = .{
+    .title = "elmz - corner radii",
+    .size = .{ .w = 420, .h = 320 },
+    .Model = Model,
+    .Msg = Msg,
+    .update = update,
+    .view = view,
+};
+
 fn cards(ui: *elmz.Ui(Msg), filled: bool) *elmz.Element(Msg) {
     const radii = [_]f32{ 0, 3, 6, 14, 28 };
     var items: [radii.len]*elmz.Element(Msg) = undefined;

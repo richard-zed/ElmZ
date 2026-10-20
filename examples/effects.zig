@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
 
     const lit = elmz.Rect{ .x = 290, .y = 40, .w = 170, .h = 56 };
     r.quad(lit, .{ .solid = card }, clip);
-    r.halo(lit, 10, elmz.Halo.shadow(dark, 90, 10), clip); // light from below
+    r.halo(lit, 10, elmz.Halo.shadow(dark, 180, 10), clip); // clock 180: light from below
 
     try c.writePng(io, gpa, "effects.png");
 

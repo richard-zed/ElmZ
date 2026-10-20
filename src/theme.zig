@@ -137,22 +137,26 @@ pub const defaults_zon: [:0]const u8 = @embedFile("theme.defaults.zon");
 /// file is refused in one sentence instead of half-loading and looking wrong.
 pub const theme_version: u32 = 2;
 
-/// Gradient direction for the linear case. Names are ZON enum literals, so a
-/// typo is a parse error naming the key rather than a silent fallback.
-/// Degrees, clockwise from "to the right", which is the CSS convention and the
-/// one people already have in their heads:
+/// Gradient direction for the linear case: degrees on a clock face, clockwise
+/// from 12 o'clock, naming the direction the ramp TRAVELS.
 ///
-///   0   ->  left to right
-///   45  ->  down and to the right
-///   90  ->  top to bottom  (the default, and what `vertical` used to mean)
-///   180 ->  right to left
+///   0   ->  bottom to top
+///   45  ->  up and to the right
+///   90  ->  left to right
+///   135 ->  down and to the right
+///   180 ->  top to bottom  (the default, and what `vertical` used to mean)
+///   270 ->  right to left
 ///
-/// A float rather than a three-value enum because the enum could only ever
-/// express 0, 45 and 90 -- every other angle was unreachable, and the way out
-/// would have been to fake it with a radial. The renderer was never the limit:
-/// `Fill.Linear` is two vectors, so any angle it is given is exact.
+/// A float rather than a three-value enum because such an enum could only ever
+/// express three directions -- every other angle was unreachable, and the way
+/// out would have been to fake it with a radial. The renderer was never the
+/// limit: `Fill.Linear` is two vectors, so any angle it is given is exact.
+///
+/// Mind the sense: this names where the colour is GOING. `Halo.light` uses the
+/// same clock but names where the lamp SITS, so at the same number the two
+/// point opposite ways.
 pub const LinearSpec = struct {
-    dir: f32 = 90,
+    dir: f32 = 180,
     /// `null` inherits the role's own colour from `.colors`. Leaving an end
     /// out is how a gradient stays tied to the palette instead of holding a
     /// second copy of the same hex.
@@ -484,7 +488,7 @@ test "an override replaces exactly one role" {
 test "a gradient resolves to the fill a theme could never express before" {
     const src =
         \\.{ .version = 2, .theme = .{ .gradients = .{
-        \\    .accent = .{ .linear = .{ .dir = 45, .from = 0x89b4fa, .to = 0xf5c2e7 } },
+        \\    .accent = .{ .linear = .{ .dir = 135, .from = 0x89b4fa, .to = 0xf5c2e7 } },
         \\    .panel = .{ .radial = .{ .inner = 0x313244, .outer = 0x1e1e2e, .radius = 0.75 } },
         \\} } }
     ;
@@ -493,12 +497,12 @@ test "a gradient resolves to the fill a theme could never express before" {
 
     const accent = loaded.gradients.accent.?;
     try std.testing.expectEqual(elmz.Fill.linear, std.meta.activeTag(accent));
-    // 45 degrees is down-and-right, and the vector is unit length centred on
+    // 135 degrees is down-and-right, and the vector is unit length centred on
     // the box -- so it ends inside the box rather than at a corner. Comparing
     // against the shared helper keeps this honest if the mapping ever changes.
     try std.testing.expect(std.meta.eql(
         accent,
-        elmz.Fill.angled(45, Color.rgbHex(0x89b4fa), Color.rgbHex(0xf5c2e7)),
+        elmz.Fill.angled(135, Color.rgbHex(0x89b4fa), Color.rgbHex(0xf5c2e7)),
     ));
     try std.testing.expect(accent.linear.to[1] > 0.8);
 
@@ -525,17 +529,17 @@ test "a linear direction is an angle, and it spans the box at any angle" {
         }
     };
 
-    // 0 degrees runs left to right, exactly on the horizontal centre line.
+    // 90 degrees runs left to right, exactly on the horizontal centre line.
     const h = (try case.load(
-        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 0, .from = 0xff0000, .to = 0x0000ff } } } } }
+        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 90, .from = 0xff0000, .to = 0x0000ff } } } } }
     )).linear;
     try std.testing.expectApproxEqAbs(@as(f32, 0), h.from[0], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), h.to[0], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), h.from[1], 1e-6);
 
-    // 90 runs top to bottom -- what the old `vertical` default meant.
+    // 180 runs top to bottom -- clock 6, what the old `vertical` default meant.
     const v = (try case.load(
-        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 90, .from = 0xff0000, .to = 0x0000ff } } } } }
+        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 180, .from = 0xff0000, .to = 0x0000ff } } } } }
     )).linear;
     try std.testing.expectApproxEqAbs(@as(f32, 0), v.from[1], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), v.to[1], 1e-6);
@@ -549,7 +553,10 @@ test "a linear direction is an angle, and it spans the box at any angle" {
     const dx = a.to[0] - a.from[0];
     const dy = a.to[1] - a.from[1];
     try std.testing.expectApproxEqAbs(@as(f32, 1), @sqrt(dx * dx + dy * dy), 1e-6);
-    try std.testing.expect(dx > 0.9 and dy > 0.3 and dy < 0.4);
+    // Clock 22 is up and slightly to the right, so dx stays small and dy is
+    // negative -- the second half is what the old "to the right" sense had
+    // backwards, so this assertion would fail against a half-migrated helper.
+    try std.testing.expect(dx > 0.3 and dx < 0.4 and dy < -0.9);
 }
 
 test "a radial centre is a fraction of the box, not a pixel" {

@@ -597,12 +597,13 @@ pub const Canvas = struct {
         const ecx = rect.x + rect.w * 0.5;
         const ecy = rect.y + rect.h * 0.5;
 
-        // The direction the shadow is thrown. A light at `deg` travels toward the
-        // shape from that side, so the cast points the opposite way.
+        // The direction the shadow is thrown. A light at clock `deg` sits on that
+        // side and travels toward the shape, so the cast points the opposite way:
+        // at 0 the lamp is overhead and the cast points to +y.
         var cast: [2]f32 = .{ 0, 0 };
         if (h.light) |deg| {
             const a = deg * std.math.pi / 180.0;
-            cast = .{ -@cos(a), -@sin(a) };
+            cast = .{ -@sin(a), @cos(a) };
         }
 
         // Ring bounds: the shape grown by the falloff, plus one pixel for the
@@ -1843,7 +1844,7 @@ test "a cast shadow fills the strip under its element and never tints the face" 
         .blur = 24,
         .spread = 4,
         .offset = .{ 0, 12 },
-        .light = 270, // light from above, so the shadow is thrown downward
+        .light = 0, // clock 0 is overhead, so the shadow is thrown downward
         .mode = .outer_glow,
     }, clip);
 
@@ -1947,7 +1948,7 @@ test "a light source throws the ramp further on the away side" {
 
     var wa: usize = 0;
     var wb: usize = 0;
-    try Case.bands(270, &wa, &wb);
+    try Case.bands(0, &wa, &wb);
     var oa: usize = 0;
     var ob: usize = 0;
     try Case.bands(null, &oa, &ob);

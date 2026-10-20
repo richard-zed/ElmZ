@@ -54,7 +54,7 @@
         // library's default look is a flat palette. Both forms, for reference.
         //
         // .gradients = .{
-        //     .accent = .{ .linear = .{ .dir = .diagonal, .from = 0x89b4fa, .to = 0xf5c2e7 } },
+        //     .accent = .{ .linear = .{ .dir = 135, .from = 0x89b4fa, .to = 0xf5c2e7 } },
         //     .panel = .{ .radial = .{ .inner = 0x45475a, .outer = 0x313244, .radius = 0.7 } },
         // },
     },
