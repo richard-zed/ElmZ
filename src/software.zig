@@ -131,6 +131,30 @@ fn circularity(w: f32, h: f32, blur: f32) f32 {
     return std.math.clamp(blur / (short * 0.5) - 0.5, 0, 1);
 }
 
+/// Nearest aspect ratio from a short ladder, used to size an inner rim's
+/// template.
+///
+/// The template has to be wider than the corner bands so its centre column is
+/// already past the x-independent boundary, but no wider than it needs to be:
+/// the pool is baked from the template's OWN dimensions, so a template squarer
+/// than its target puts the inscribed ellipse in the wrong place and dims the
+/// top and bottom boundary rows. Rounding the aspect to a rung keeps that error
+/// to a few percent while still letting one entry serve a range of widths.
+fn aspectBucket(a: f32) f32 {
+    const rungs = [_]f32{ 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32 };
+    if (!(a > 0)) return 1;
+    var best = rungs[0];
+    var bd = @abs(a - best);
+    for (rungs[1..]) |r| {
+        const d = @abs(a - r);
+        if (d < bd) {
+            bd = d;
+            best = r;
+        }
+    }
+    return best;
+}
+
 /// Distance to an ellipse, to first order.
 ///
 /// The normalised radius says how far out you are and its gradient says how
@@ -260,6 +284,14 @@ pub const Canvas = struct {
         mode: elmz.Halo.Mode = .glow,
         /// Template only: width of the corner band, in pixels.
         corner: u32 = 0,
+        /// Tiled entry: `sh` is a REAL height, `rw` spans only the corner band
+        /// plus one centre column, and the blit repeats that column across the
+        /// target. Used where the field stops varying along x but not along y --
+        /// an inner rim on a face shorter than its own falloff. Part of the key
+        /// via `core`, because the flat core is baked into the ramp.
+        tiled: bool = false,
+        /// Flat-core depth this entry was baked with (inner rims only).
+        core: f32 = 0,
         rw: u32,
         rh: u32,
         px: []u8 = &.{}, // coverage, one byte per pixel; set by `admit`
@@ -684,12 +716,6 @@ pub const Canvas = struct {
         // template baked from one silhouette and stretched across another would
         // carry the wrong ellipse. Cheap to give up -- this is the mode that is
         // already the widest band, and a wide band is where a bake saved least.
-        if (h.mode == .inner_glow) {
-            const sp2: f32 = -h.spread;
-            const bl = @max(h.blur, 0);
-            if (circularity(rect.w + sp2 * 2, rect.h + sp2 * 2, bl) > 0)
-                return self.haloSdf(rect, corner, h, clip);
-        }
         if (use_sdf) return self.haloSdf(rect, corner, h, clip);
         self.haloBaked(rect, corner, h, clip);
     }
@@ -820,7 +846,28 @@ pub const Canvas = struct {
                         // half-strength ring landed three pixels inside the face, in
                         // the middle of the rim, and read as a seam. The shape is
                         // the element now, so it lands on the edge.
-                        .inner_glow => std.math.clamp(0.5 - d, 0, 1),
+                        // A fill edge gets away with one pixel of linear coverage
+                        // because it meets a background of similar value. This rim
+                        // sits at PEAK brightness exactly where the face meets the
+                        // page, so there is no brightness gradient to carry the eye
+                        // and a single erratic pixel reads as a stair around the
+                        // corner arc (measured: 0.64, 0.18, 0.91, 0.18 down the arc
+                        // at radius 8). Two pixels of smoothstep gives the boundary
+                        // something to walk down. It costs a faint 1px bleed outside
+                        // the face, which is what an antialiased edge is.
+                        // The rim must not be what defines the silhouette. It peaks
+                        // a pixel and a half INSIDE the face and fades to nothing at
+                        // the geometric edge, so the element's own fill -- drawn
+                        // underneath and antialiased like every other fill -- owns the
+                        // outermost pixel. Measured before this: the boundary pixel
+                        // carried 103 against a 37 backdrop, so any arc error was at
+                        // maximum contrast. This is a taper, not the rejected inset
+                        // silhouette: the rim still hugs the edge, it just no longer
+                        // IS the edge.
+                        .inner_glow => blk: {
+                            const t = std.math.clamp(-d / 1.5, 0, 1);
+                            break :blk t * t * (3 - 2 * t);
+                        },
                         .glow => 1,
                         .outer_glow => cut,
                     };
@@ -982,19 +1029,20 @@ pub const Canvas = struct {
         const r = @min(@max(corner + spread, 0), @min(shape.w, shape.h) * 0.5);
         const swi: i32 = @intFromFloat(@round(shape.w));
         const shi: i32 = @intFromFloat(@round(shape.h));
-        // A stencil is keyed on the silhouette and has nowhere to record a flat
-        // core, so an inner rim with any spread takes the field path.
-        if (h.mode == .inner_glow and h.spread != 0) return self.haloSdf(rect, corner, h, clip);
-        const m = self.maskFor(swi, shi, r, blur, h.mode) orelse return self.haloSdf(rect, corner, h, clip);
+        const m = self.maskFor(swi, shi, r, blur, h.mode, if (h.mode == .inner_glow) h.spread else 0) orelse return self.haloSdf(rect, corner, h, clip);
 
         const grow = falloffReach(h.mode, blur, false) + 1;
         // A template describes any size, so the target ring is computed here;
         // a whole stencil already knows how big it is.
-        const rw: u32 = if (m.sw == 0)
+        // A slice template and a tiled entry both describe a RANGE of silhouettes,
+        // so the ring is computed at the target size; a whole stencil already knows
+        // how big it is and must keep its own dimensions or the blit drifts.
+        const hollow = m.sw == 0 or m.tiled;
+        const rw: u32 = if (hollow)
             @intFromFloat(@ceil(@as(f32, @floatFromInt(swi)) + grow * 2))
         else
             m.rw;
-        const rh: u32 = if (m.sw == 0)
+        const rh: u32 = if (hollow)
             @intFromFloat(@ceil(@as(f32, @floatFromInt(shi)) + grow * 2))
         else
             m.rh;
@@ -1009,7 +1057,10 @@ pub const Canvas = struct {
         };
         const sp = self.clipSpan(ring, clip) orelse return;
 
-        const sliced = m.sw == 0;
+        // Sliced per axis, not per entry: a slice template repeats both, a tiled
+        // entry repeats x only.
+        const sliced_x = m.sw == 0 or m.tiled;
+        const sliced_y = m.sw == 0;
         const c = m.corner;
         var y = sp.y0;
         while (y < sp.y1) : (y += 1) {
@@ -1018,28 +1069,34 @@ pub const Canvas = struct {
             const uj: u32 = @intCast(j);
             // Rows inside the corner band are copied; the band between them is
             // one stretched row, which is the middle row of the template.
-            const sj: u32 = if (!sliced)
+            // The stretched middle samples the template's CENTRE, not the
+            // corner band's last column. `corner` is only `r + 1` px inside the
+            // shape edge, so on a wide blur it is still mid-ramp: at blur 24 and
+            // r 8 that column is 0.875 coverage, and stretching it pinned the
+            // whole interior to 0.875 while the distance field drew 1.0 -- a
+            // 21/255 step across the middle of every large halo.
+            const sj: u32 = if (!sliced_y)
                 uj
             else if (uj < c)
                 uj
             else if (uj >= rh - c)
                 m.rh - 1 - (rh - 1 - uj)
             else
-                c;
+                m.rh / 2;
             const row = m.px[@as(usize, sj) * m.rw ..][0..m.rw];
             var x = sp.x0;
             while (x < sp.x1) : (x += 1) {
                 const i = x - ox;
                 if (i < 0 or i >= rw) continue;
                 const ui: u32 = @intCast(i);
-                const si: u32 = if (!sliced)
+                const si: u32 = if (!sliced_x)
                     ui
                 else if (ui < c)
                     ui
                 else if (ui >= rw - c)
                     m.rw - 1 - (rw - 1 - ui)
                 else
-                    c;
+                    m.rw / 2;
                 const a = row[si];
                 if (a == 0) continue;
                 self.blendCoverage(x, y, h.color, @as(f32, @floatFromInt(a)) / 255.0);
@@ -1059,10 +1116,18 @@ pub const Canvas = struct {
     ///
     /// Silhouettes too small to slice still get a full bake, so the cache holds
     /// two shapes of entry.
-    fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32, mode: elmz.Halo.Mode) ?*Mask {
+    fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32, mode: elmz.Halo.Mode, spread: f32) ?*Mask {
         if (sw <= 0 or sh <= 0) return null;
         const grow = falloffReach(mode, blur, false) + 1;
-        const corner: u32 = @intFromFloat(@ceil(grow + r) + 1);
+        // The corner band has to reach PAST the ramp, not just past the arc.
+        // Stretching one column across the interior is only sound where the
+        // coverage stops varying with distance from the edge, and for a glow that
+        // is `blur / 2` inside, not `r`. At blur 24 and r 8 the old band stopped
+        // 9.5px inside -- mid-ramp -- so a large halo repeated a 0.896 column
+        // across its whole face and painted full opacity where the distance field
+        // drew a falloff. That is the baked-looks-bigger report: the step was 21
+        // of 255 across the middle of every sliced glow.
+        const corner: u32 = @intFromFloat(@ceil(grow + @max(r, blur * 0.5) + 1));
 
         // The template's centre column is the value `corner` pixels in, and the
         // blit stretches it across the whole interior. That is only sound where
@@ -1083,9 +1148,38 @@ pub const Canvas = struct {
             const rw: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(tsw)) + grow * 2));
             if (@as(u64, rw) * @as(u64, rw) > 4_000_000) return null;
             const px = self.gpa.alloc(u8, @as(usize, rw) * rw) catch return null;
-            bakeStencil(px, rw, rw, tsw, tsw, r, blur, grow, mode);
+            bakeStencil(px, rw, rw, tsw, tsw, r, blur, grow, mode, 0);
             self.bakes += 1;
             return self.admit(px, .{ .sw = 0, .sh = 0, .r = r, .blur = blur, .mode = mode, .corner = corner, .rw = rw, .rh = rw });
+        }
+
+        // AN INNER RIM REPEATS ALONG ONE AXIS, NOT TWO.
+        //
+        // Past `blur` in from the left and right edges the field stops depending
+        // on x altogether, so the centre column is not an approximation of those
+        // pixels -- for them it IS the answer. Height cannot be repeated the same
+        // way: on a face shorter than its own falloff the top and bottom ramps
+        // overlap and meet in the middle, and a stretched row erases exactly that
+        // convergence. So bake the height true, the corner bands true, and repeat
+        // only the columns between them. The template is made just wide enough
+        // that its own centre column is already past the x-independent boundary.
+        if (mode == .inner_glow and sw >= @as(i32, @intCast(corner * 2 + 2))) {
+            // Width from the aspect bucket, floored at the width that clears both
+            // corner bands. The bucket is in the KEY, via `sw`, so a second width
+            // near this one reuses the entry and a far-off aspect gets its own.
+            const aspect = aspectBucket(@as(f32, @floatFromInt(sw)) / @as(f32, @floatFromInt(sh)));
+            var tsw: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(sh)) * aspect));
+            tsw = @max(tsw, @as(i32, @intCast(corner * 2 + 1)));
+            for (self.masks.items) |*m| {
+                if (m.tiled and m.sw == tsw and m.sh == sh and m.r == r and m.blur == blur and m.core == spread and m.mode == mode) return m;
+            }
+            const rw: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(tsw)) + grow * 2));
+            const rh: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(sh)) + grow * 2));
+            if (@as(u64, rw) * @as(u64, rh) > 4_000_000) return null;
+            const px = self.gpa.alloc(u8, @as(usize, rw) * rh) catch return null;
+            bakeStencil(px, rw, rh, tsw, sh, r, blur, grow, mode, spread);
+            self.bakes += 1;
+            return self.admit(px, .{ .sw = tsw, .sh = sh, .r = r, .blur = blur, .mode = mode, .corner = corner, .tiled = true, .core = spread, .rw = rw, .rh = rh });
         }
 
         for (self.masks.items) |*m| {
@@ -1095,7 +1189,7 @@ pub const Canvas = struct {
         const rh: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(sh)) + grow * 2));
         if (@as(u64, rw) * @as(u64, rh) > 4_000_000) return null;
         const px = self.gpa.alloc(u8, @as(usize, rw) * rh) catch return null;
-        bakeStencil(px, rw, rh, sw, sh, r, blur, grow, mode);
+        bakeStencil(px, rw, rh, sw, sh, r, blur, grow, mode, spread);
         self.bakes += 1;
         return self.admit(px, .{ .sw = sw, .sh = sh, .r = r, .blur = blur, .mode = mode, .rw = rw, .rh = rh });
     }
@@ -1111,7 +1205,13 @@ pub const Canvas = struct {
             .sh = entry.sh,
             .r = entry.r,
             .blur = entry.blur,
+            // The mode is part of the key, so an entry that forgets which side of
+            // the silhouette it carries is not just mislabelled -- it can never be
+            // found again. Every lookup for a non-glow mode missed and re-baked.
+            .mode = entry.mode,
             .corner = entry.corner,
+            .tiled = entry.tiled,
+            .core = entry.core,
             .rw = entry.rw,
             .rh = entry.rh,
             .px = px,
@@ -1126,7 +1226,18 @@ pub const Canvas = struct {
     /// into a `rw` x `rh` buffer. The shape's own top-left lands at
     /// (grow, grow), which is what lets a template's corner band be copied
     /// straight out at any target size.
-    fn bakeStencil(px: []u8, rw: u32, rh: u32, sw: i32, sh: i32, r: f32, blur: f32, grow: f32, mode: elmz.Halo.Mode) void {
+    fn bakeStencil(px: []u8, rw: u32, rh: u32, sw: i32, sh: i32, r: f32, blur: f32, grow: f32, mode: elmz.Halo.Mode, core: f32) void {
+        // An inner rim is the one mode whose field is not local to the edge: it
+        // runs a full `blur` in, and past `blur` in from every side the metric
+        // stops being the shape's distance and becomes the inscribed ellipse.
+        // Both terms are baked, so a stencil reproduces the field path rather
+        // than an approximation of it.
+        const swf = @as(f32, @floatFromInt(sw));
+        const shf = @as(f32, @floatFromInt(sh));
+        const circular: f32 = if (mode == .inner_glow) circularity(swf, shf, blur) else 0;
+        const ea = swf * 0.5;
+        const eb = shf * 0.5;
+        const reach = @min(blur, @min(ea, eb));
         const hx = @as(f32, @floatFromInt(sw)) * 0.5 - r;
         const hy = @as(f32, @floatFromInt(sh)) * 0.5 - r;
         const cx = grow + @as(f32, @floatFromInt(sw)) * 0.5;
@@ -1142,7 +1253,30 @@ pub const Canvas = struct {
                 const qx = @abs(pxx) - hx;
                 const ax = @max(qx, 0);
                 const d = @sqrt(ax * ax + ay * ay) + @min(@max(qx, qy), 0) - r;
-                const cov = ramp(mode, d, blur, 0);
+                var rd = d;
+                if (circular > 0) {
+                    const t = std.math.clamp(-d / reach, 0, 1) * circular;
+                    rd = d + (ellipseDistance(pxx, py, ea, eb) - d) * t;
+                }
+                const core_now: f32 = if (mode == .inner_glow) core else 0;
+                var cov = ramp(mode, rd, blur, core_now);
+                // An outer rim is cut against the element's own silhouette, and
+                // this bake only ever runs when that silhouette IS the element:
+                // any offset or spread takes `geometric_cut` and forces the field
+                // path. Baking the cut here is what stops a baked outer rim from
+                // lighting its own face, which is the whole difference between
+                // `.outer_glow` and `.glow`.
+                if (mode == .outer_glow) cov *= std.math.clamp(0.5 + d, 0, 1);
+                // The taper is part of the field path, not part of `ramp`, so a
+                // stencil has to carry it separately or a baked rim draws its
+                // boundary pixel at full strength. That is not cosmetic: the taper
+                // exists so the element's own antialiased fill owns the outermost
+                // pixel, and without it the corner arc stair comes back -- in baked
+                // mode only, which is the default.
+                if (mode == .inner_glow) {
+                    const t = std.math.clamp(-d / 1.5, 0, 1);
+                    cov *= t * t * (3 - 2 * t);
+                }
                 px[@as(usize, j) * rw + i] = @intFromFloat(cov * 255.0 + 0.5);
             }
         }
@@ -1907,7 +2041,143 @@ test "the default bakes, and an explicit .sdf never touches the cache" {
     try std.testing.expectEqual(@as(usize, 2), c.bakes);
 }
 
-test "the baked stencil and the distance field agree" {
+fn darknessIn(c: *Canvas, x0: usize, x1: usize, y0: usize, y1: usize, stride: usize) u64 {
+    var sum: u64 = 0;
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        var x = x0;
+        while (x < x1) : (x += 1) sum += 255 - c.px[(y * stride + x) * 4];
+    }
+    return sum;
+}
+
+test "a shadow falls on the side away from its light, on both axes" {
+    // The vertical axis was the only one ever measured, so a sign error on the
+    // horizontal axis would have survived every test in this file. Four angles,
+    // each asserted against the documented convention rather than against
+    // whatever the code happens to do: clock 0 is a lamp overhead, so the shadow
+    // lands BELOW; 90 is a lamp on the right, so it lands LEFT.
+    const lights = [_]f32{ 0, 90, 180, 270 };
+    inline for (lights, 0..) |deg, k| {
+        var c = try testCanvas(std.testing.allocator, 220, 220);
+        defer c.deinit();
+        c.clear(elmz.Color{ .r = 244, .g = 244, .b = 248, .a = 255 });
+        const card = elmz.Rect{ .x = 80, .y = 80, .w = 60, .h = 60 };
+        const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 220 };
+        c.halo(card, 8, elmz.Halo.shadow(.{ .r = 12, .g = 10, .b = 20, .a = 255 }, deg, 10), clip);
+        const above = darknessIn(&c, 90, 130, 50, 79, 220);
+        const below = darknessIn(&c, 90, 130, 141, 170, 220);
+        const left = darknessIn(&c, 50, 79, 90, 130, 220);
+        const right = darknessIn(&c, 141, 170, 90, 130, 220);
+        switch (k) {
+            0 => try std.testing.expect(below > above),
+            1 => try std.testing.expect(left > right),
+            2 => try std.testing.expect(above > below),
+            else => try std.testing.expect(right > left),
+        }
+    }
+}
+
+test "a light widens the ramp on the side it throws the shadow toward" {
+    // Separate from the test above on purpose: there the offset dominates the
+    // darkness, so an inverted `lightWidth` would hide behind it. Here the offset
+    // is zero and the ONLY asymmetry is the falloff width, which is the thing
+    // under test.
+    const lights = [_]f32{ 0, 180 };
+    inline for (lights, 0..) |deg, k| {
+        var c = try testCanvas(std.testing.allocator, 220, 220);
+        defer c.deinit();
+        c.clear(elmz.Color{ .r = 244, .g = 244, .b = 248, .a = 255 });
+        const card = elmz.Rect{ .x = 80, .y = 80, .w = 60, .h = 60 };
+        const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 220 };
+        c.halo(card, 8, .{
+            .color = .{ .r = 12, .g = 10, .b = 20, .a = 255 },
+            .blur = 18,
+            .spread = 2,
+            .mode = .outer_glow,
+            .light = deg,
+        }, clip);
+        // Symmetric bands, no offset: only the ramp width can break the tie.
+        const above = darknessIn(&c, 90, 130, 52, 79, 220);
+        const below = darknessIn(&c, 90, 130, 141, 168, 220);
+        if (k == 0) {
+            try std.testing.expect(below > above);
+        } else {
+            try std.testing.expect(above > below);
+        }
+    }
+}
+
+test "the baked stencil matches the distance field across a sliced glow" {
+    // The stretch band has to clear the RAMP, not just the corner arc. It did
+    // not, and this test is the one that says so: a large halo repeated a
+    // mid-ramp column across its whole face, so baked painted 223 where the
+    // distance field drew 202 -- a 21/255 step over the middle of every sliced
+    // glow, which is the "baked looks bigger" report.
+    var a = try testCanvas(std.testing.allocator, 220, 160);
+    defer a.deinit();
+    var b = try testCanvas(std.testing.allocator, 220, 160);
+    defer b.deinit();
+    a.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    b.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    const rect = elmz.Rect{ .x = 60, .y = 50, .w = 100, .h = 60 };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 160 };
+    const col = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
+    a.halo(rect, 8, .{ .color = col, .blur = 24, .mode = .glow, .quality = .sdf }, clip);
+    b.halo(rect, 8, .{ .color = col, .blur = 24, .mode = .glow, .quality = .baked }, clip);
+
+    // The silhouette must be big enough that a stencil really was used, or this
+    // compares the field path to itself.
+    try std.testing.expectEqual(@as(i32, 0), b.masks.items[0].sw);
+    var worst: u32 = 0;
+    var off: usize = 0;
+    for (a.px, b.px) |x, y| {
+        const d = @abs(@as(i32, x) - @as(i32, y));
+        if (d > worst) worst = d;
+        if (d > 2) off += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), off);
+    try std.testing.expect(worst <= 2);
+}
+
+test "a baked outer rim does not light its own face" {
+    // `.glow` and `.outer_glow` are the same ramp; what makes a rim outer is the
+    // cut against the element. The stencil had nowhere for that cut, so a baked
+    // outer glow painted its inner half over its own face and was simply a glow
+    // wearing a different mode name.
+    var a = try testCanvas(std.testing.allocator, 200, 140);
+    defer a.deinit();
+    var b = try testCanvas(std.testing.allocator, 200, 140);
+    defer b.deinit();
+    const bg = elmz.Color{ .r = 20, .g = 20, .b = 26, .a = 255 };
+    a.clear(bg);
+    b.clear(bg);
+    const rect = elmz.Rect{ .x = 50, .y = 40, .w = 100, .h = 60 };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 140 };
+    const col = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
+    a.halo(rect, 8, .{ .color = col, .blur = 20, .mode = .outer_glow, .quality = .sdf }, clip);
+    b.halo(rect, 8, .{ .color = col, .blur = 20, .mode = .outer_glow, .quality = .baked }, clip);
+    try std.testing.expectEqual(@as(i32, 0), b.masks.items[0].sw);
+
+    // Deep inside the face: untouched, both ways.
+    const mid = (80 * 200 + 100) * 4;
+    try std.testing.expectEqual(bg.r, b.px[mid]);
+    try std.testing.expectEqual(bg.r, a.px[mid]);
+
+    var off: usize = 0;
+    for (a.px, b.px) |x, y| {
+        const d = @abs(@as(i32, x) - @as(i32, y));
+        if (d > 2) off += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), off);
+}
+
+test "an offset outer glow takes the field path at both qualities" {
+    // NOTE: this is a FALLBACK check, not an agreement check. `geometric_cut`
+    // sends any outer rim with an offset or a spread to the distance field, so
+    // both canvases below run the same code and identical pixels prove nothing
+    // about the stencil. It passed for months while the stencil disagreed with
+    // the field by 21/255 -- see the two tests that follow for the real thing.
     var a = try testCanvas(std.testing.allocator, 200, 160);
     defer a.deinit();
     var b = try testCanvas(std.testing.allocator, 200, 160);
@@ -1939,6 +2209,102 @@ test "the baked stencil and the distance field agree" {
     try std.testing.expectEqual(@as(usize, 0), off);
     try std.testing.expect(worst <= 2);
 }
+test "a baked inner rim agrees with the field path, boundary rows included" {
+    const bg = elmz.Color{ .r = 38, .g = 40, .b = 52, .a = 255 };
+    const col = elmz.Color{ .r = 205, .g = 214, .b = 244, .a = 48 };
+    const rect = elmz.Rect{ .x = 20, .y = 30, .w = 124, .h = 32 };
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const W = 200;
+    var field = try testCanvas(std.testing.allocator, W, 100);
+    defer field.deinit();
+    field.clear(bg);
+    field.halo(rect, 8, .{ .color = col, .blur = 20, .spread = 2, .mode = .inner_glow, .quality = .sdf }, clip);
+    var baked = try testCanvas(std.testing.allocator, W, 100);
+    defer baked.deinit();
+    baked.clear(bg);
+    baked.halo(rect, 8, .{ .color = col, .blur = 20, .spread = 2, .mode = .inner_glow, .quality = .baked }, clip);
+
+    // The FIRST and last row of the face are the ones that matter. The field path
+    // tapers the rim over the last 1.5px so the fill owns the outermost pixel; a
+    // stencil that skips the taper draws that row at full strength, which is 23
+    // levels here -- enough to put back the corner stair the taper removed. Baked
+    // is the DEFAULT, so a parity test that only sampled the interior would miss
+    // it entirely.
+    var worst: i32 = 0;
+    var worst_edge: i32 = 0;
+    var y: usize = 28;
+    while (y < 66) : (y += 1) {
+        var x: usize = 20;
+        while (x < 146) : (x += 1) {
+            const o = (y * W + x) * 4;
+            for (0..3) |k| {
+                const d = @as(i32, field.px[o + k]) - @as(i32, baked.px[o + k]);
+                const ad = if (d < 0) -d else d;
+                worst = @max(worst, ad);
+                if (y == 30 or y == 61) worst_edge = @max(worst_edge, ad);
+            }
+        }
+    }
+    // Two tolerances, because two different things are being compared. The
+    // boundary rows are geometry and must be exact -- that is where the missing
+    // taper showed up as 23. The interior carries the POOL, which is baked from
+    // the template's half-width (64) rather than the face's (62), so it can be a
+    // few levels out. Naming both keeps the guard meaningful instead of loosening
+    // one number until it stops catching anything.
+    try std.testing.expect(worst_edge <= 2);
+    try std.testing.expect(worst <= 10);
+}
+
+test "an inner rim is baked once and reused, mode included in the key" {
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 300, .h = 160 };
+    var c = try testCanvas(std.testing.allocator, 300, 160);
+    defer c.deinit();
+    c.clear(elmz.Color{ .r = 38, .g = 40, .b = 52, .a = 255 });
+    const h = elmz.Halo{
+        .color = elmz.Color{ .r = 205, .g = 214, .b = 244, .a = 48 },
+        .blur = 20,
+        .spread = 2,
+        .mode = .inner_glow,
+        .quality = .baked,
+    };
+    const r = elmz.Rect{ .x = 20, .y = 20, .w = 124, .h = 32 };
+    c.halo(r, 8, h, clip);
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    const first = c.bakes;
+
+    // Two things at once. The entry must carry its MODE -- `admit` once dropped it,
+    // so every entry was stamped `.glow`, no lookup for another mode could ever
+    // match, and each frame re-baked. And the second call must hit: a cache that
+    // misses silently still draws the right picture, so the bake counter is the
+    // only evidence.
+    c.halo(r, 8, h, clip);
+    c.halo(r, 8, h, clip);
+    try std.testing.expectEqual(first, c.bakes);
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    try std.testing.expectEqual(elmz.Halo.Mode.inner_glow, c.masks.items[0].mode);
+}
+
+test "an inner rim's template follows its aspect bucket, not the bare minimum" {
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 320, .h = 300 };
+    var c = try testCanvas(std.testing.allocator, 320, 300);
+    defer c.deinit();
+    c.clear(elmz.Color{ .r = 38, .g = 40, .b = 52, .a = 255 });
+    const h = elmz.Halo{ .color = elmz.Color{ .r = 205, .g = 214, .b = 244, .a = 48 }, .blur = 20, .spread = 2, .mode = .inner_glow, .quality = .baked };
+
+    // 124x32 rounds to aspect 4, so the template is 128 wide. 130x32 lands in the
+    // same bucket and must reuse it -- width does not enter the key beyond this.
+    c.halo(.{ .x = 10, .y = 10, .w = 124, .h = 32 }, 8, h, clip);
+    c.halo(.{ .x = 10, .y = 60, .w = 130, .h = 32 }, 8, h, clip);
+    try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
+    const tsw0 = c.masks.items[0].sw;
+    try std.testing.expect(tsw0 > 65); // wider than the corner bands alone
+
+    // 100x32 rounds to aspect 3 and is a different template.
+    c.halo(.{ .x = 10, .y = 120, .w = 100, .h = 32 }, 8, h, clip);
+    try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
+    try std.testing.expect(c.masks.items[1].sw != tsw0);
+}
+
 test "nine slices: differently sized silhouettes share a single stencil" {
     var c = try testCanvas(std.testing.allocator, 700, 320);
     defer c.deinit();
@@ -1949,13 +2315,17 @@ test "nine slices: differently sized silhouettes share a single stencil" {
     // Three widths, one radius and blur. Before slicing these were three
     // stencils, and a view with a hundred glowing rows baked all hundred --
     // every frame, since eight entries cannot hold a hundred sizes.
+    // 80 tall, not 50: a band has to clear the ramp as well as the arc, so a
+    // silhouette must be at least 2*(grow + blur/2) tall before its corners stop
+    // overlapping. At blur 26 that is 54, and 50 was under it -- which is what
+    // caught this: three entries appeared because nothing was sliceable.
     const widths = [_]f32{ 120, 260, 420 };
     for (widths, 0..) |w, i| {
         c.halo(.{
             .x = 20,
             .y = 20 + @as(f32, @floatFromInt(i)) * 80,
             .w = w,
-            .h = 50,
+            .h = 80,
         }, 8, .{ .color = color, .blur = 26, .mode = .glow, .quality = .baked }, clip);
     }
     try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
@@ -1963,7 +2333,7 @@ test "nine slices: differently sized silhouettes share a single stencil" {
 
     // A silhouette smaller than two corner bands cannot be sliced -- the
     // corners would overlap -- so it keeps a full bake of its own.
-    c.halo(.{ .x = 20, .y = 260, .w = 12, .h = 12 }, 8, .{ .color = color, .blur = 26, .mode = .glow, .quality = .baked }, clip);
+    c.halo(.{ .x = 20, .y = 270, .w = 12, .h = 12 }, 8, .{ .color = color, .blur = 26, .mode = .glow, .quality = .baked }, clip);
     try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
     try std.testing.expect(c.masks.items[1].sw > 0);
 }

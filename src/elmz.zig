@@ -751,6 +751,11 @@ pub fn Hit(comptime M: type) type {
         /// Corner radius, so a rounded control is only claimed where it is
         /// actually painted -- its bounding box is not its shape.
         radius: f32 = 0,
+        /// Whether Tab may land here. Recorded because only the frame knows
+        /// document order -- an app that had to rebuild it would be
+        /// reimplementing layout. A `key` is required too: focus is named, so
+        /// an unkeyed element has nothing for it to hold on to.
+        focusable: bool = false,
     };
 }
 
@@ -767,6 +772,7 @@ fn hitAppend(
     key: ?u64,
     active: bool,
     radius: f32,
+    focusable: bool,
 ) Allocator.Error!void {
     if (rect.intersect(clip).isEmpty()) return;
     // A disabled element DOES enter the list, inert (`active = false`). Dropping
@@ -775,7 +781,7 @@ fn hitAppend(
     // `Frame.hit` therefore stays a plain contains loop, and the topmost
     // containing region decides -- returning null when that region is inert
     // rather than continuing down the stack.
-    try hits.append(gpa, .{ .rect = rect, .clip = clip, .msg = msg, .key = key, .active = active, .radius = radius });
+    try hits.append(gpa, .{ .rect = rect, .clip = clip, .msg = msg, .key = key, .active = active, .radius = radius, .focusable = focusable });
 }
 
 /// Appearance for one element, as a single value.
@@ -1198,7 +1204,7 @@ pub fn Element(comptime M: type) type {
             // half and `.inner_glow` cuts the outer one, so the same order is
             // correct for all three and no mode needs a rule of its own.
             if (halo_now) |h| r.halo(rect, self.radius, h, clip);
-            if (self.on_press) |m| try hitAppend(M, hits, gpa, rect, clip, m, self.key, !self.disabled, self.radius);
+            if (self.on_press) |m| try hitAppend(M, hits, gpa, rect, clip, m, self.key, !self.disabled, self.radius, self.focusable and self.key != null);
 
             switch (self.kind) {
                 .text => |t| {
@@ -1671,6 +1677,48 @@ pub fn Frame(comptime M: type) type {
         /// Topmost interactive region under a point, with the geometry that
         /// claimed it. Same precedence as `hitTest`; capture needs the region,
         /// not just the message it would produce.
+        /// Next focusable element in DOCUMENT order, for Tab traversal.
+        ///
+        /// The hit list is appended while the tree is walked, so ascending
+        /// index IS document order. `hit()` walks it backwards because the
+        /// topmost region has to win -- traversal must not reuse that order,
+        /// or Tab would start at the last thing painted and run backwards.
+        ///
+        /// Candidates are focusable, active and keyed. Disabled elements are
+        /// SKIPPED rather than focused-and-inert: landing Tab on a dead button
+        /// is a dead end, and every desktop toolkit skips.
+        ///
+        /// A `from` that is no longer in the list -- the normal consequence of
+        /// a rebuild changing what exists -- starts at the first (forward) or
+        /// last (backward) candidate instead of dead-ending. Wrapping is
+        /// deliberate, and a single candidate returns itself so the caller can
+        /// compare and skip the repaint.
+        pub fn focusStep(self: *const Self, from: ?u64, forward: bool) ?u64 {
+            var n: usize = 0;
+            var at: ?usize = null;
+            for (self.hits) |h| {
+                if (!h.focusable or !h.active) continue;
+                const k = h.key orelse continue;
+                if (from) |f| {
+                    if (f == k and at == null) at = n;
+                }
+                n += 1;
+            }
+            if (n == 0) return null;
+            const want: usize = if (at) |i|
+                (if (forward) (i + 1) % n else (i + n - 1) % n)
+            else if (forward) 0 else n - 1;
+
+            var i: usize = 0;
+            for (self.hits) |h| {
+                if (!h.focusable or !h.active) continue;
+                const k = h.key orelse continue;
+                if (i == want) return k;
+                i += 1;
+            }
+            return null;
+        }
+
         pub fn hit(self: *const Self, p: [2]f32) ?Hit(M) {
             var i = self.hits.len;
             while (i > 0) {
@@ -3562,4 +3610,80 @@ test "a font failure names the path in the band" {
         else => {},
     };
     try std.testing.expectEqual(@as(usize, 1), band);
+}
+
+const TabMsg = enum { a, b, c };
+const TabState = struct { disable_mid: bool = false, no_focus: bool = false };
+
+fn tabUpdate(m: *TabState, msg: TabMsg) Action(TabMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+/// Document order 1, 2, 3, with 2 optionally disabled, bracketed by one
+/// focusable element that has no key and one that is not focusable at all.
+fn tabView(s: *TabState, ui: *Ui(TabMsg)) *Element(TabMsg) {
+    if (s.no_focus) {
+        const plain = ui.button(.{ .label = "plain", .msg = .a, .key = 9 });
+        return ui.column(.{ .children = &.{plain} });
+    }
+    const a = ui.button(.{ .label = "a", .msg = .a, .key = 1 });
+    const b = ui.button(.{ .label = "b", .msg = .b, .key = 2, .disabled = s.disable_mid });
+    const unkeyed = ui.button(.{ .label = "x", .msg = .c });
+    const not_focusable = ui.button(.{ .label = "y", .msg = .c, .key = 4 });
+    const c = ui.button(.{ .label = "c", .msg = .c, .key = 3 });
+    a.focusable = true;
+    b.focusable = true;
+    unkeyed.focusable = true; // focusable but unnamed, so it cannot be landed on
+    c.focusable = true;
+    return ui.column(.{ .children = &.{ a, b, unkeyed, not_focusable, c } });
+}
+
+test "tab walks document order, skips a disabled control, and wraps" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(TabState, TabMsg).init(gpa, .{}, tabUpdate, tabView);
+    defer rt.deinit();
+
+    rt.state.disable_mid = true;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+
+        // Ascending index is document order, not the reverse order hit() uses.
+        try std.testing.expectEqual(@as(?u64, 1), f.focusStep(null, true));
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(1, true));
+        try std.testing.expectEqual(@as(?u64, 1), f.focusStep(3, true));
+
+        // Backwards from nowhere starts at the last candidate.
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(null, false));
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(1, false));
+
+        // A key that no longer exists is a rebuild, not a dead end.
+        try std.testing.expectEqual(@as(?u64, 1), f.focusStep(99, true));
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(99, false));
+
+        // 2 is disabled and 4 was never focusable: neither is a candidate.
+        try std.testing.expectEqual(@as(?u64, 1), f.focusStep(2, true));
+        try std.testing.expectEqual(@as(?u64, 1), f.focusStep(4, true));
+    }
+
+    // Enabled again, the middle control joins the cycle.
+    rt.state.disable_mid = false;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?u64, 2), f.focusStep(1, true));
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(2, true));
+        try std.testing.expectEqual(@as(?u64, 2), f.focusStep(3, false));
+    }
+
+    // Nothing focusable at all: Tab is not ours, so the caller gets null and
+    // can hand the key to the app.
+    rt.state.no_focus = true;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?u64, null), f.focusStep(null, true));
+    }
 }

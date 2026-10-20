@@ -673,12 +673,29 @@ pub fn run(
                 dirty = true;
             },
 
-            // A keystroke belongs to whatever the APP says it belongs to; there
-            // is no focus ring in the runtime to consult. An app with no
-            // `on_key` gets nothing, and a hook that returns null is "not mine":
-            // no message, no repaint. Marking dirty unconditionally here would
-            // bill a full frame to every keypress nobody handled.
-            .key => |k| if (rt.on_key) |hook| {
+            // Tab belongs to the RUNTIME, every other key to the app. Only the
+            // frame knows the document order of the elements that can take
+            // focus, so an app asked to traverse would be reimplementing layout
+            // -- and it would get it wrong the moment anything wrapped.
+            //
+            // Everything else stays the app's call: a hook that returns null is
+            // "not mine", and marking dirty unconditionally would bill a full
+            // frame to every keypress nobody handled.
+            .key => |k| tab: {
+                if (k.named == .tab) {
+                    if (frame) |*f| {
+                        if (f.focusStep(rt.focus, !k.mods.shift)) |next| {
+                            // The same key back means there was exactly one
+                            // candidate. Handled, but nothing to repaint.
+                            if (next != rt.focus) {
+                                rt.focus = next;
+                                dirty = true;
+                            }
+                            break :tab;
+                        }
+                    }
+                }
+                const hook = rt.on_key orelse break :tab;
                 if (hook(&rt.state, k, .down)) |msg| {
                     const action = rt.dispatch(msg);
                     stats.messages += 1;
@@ -2140,4 +2157,100 @@ test "an app that declares no font path stays silent" {
     var frame = try paintInto(TState, TMsg, &rt, &canvas);
     defer frame.deinit();
     try std.testing.expect(rt.ui.failed == false);
+}
+
+test "tab moves focus in document order and never reaches the app hook" {
+    const gpa = std.testing.allocator;
+    const TabM = enum { a, b };
+    const TabS = struct { hook_calls: u32 = 0 };
+
+    const Hooks = struct {
+        fn update(s: *TabS, m: TabM) elmz.Action(TabM) {
+            _ = m;
+            s.hook_calls += 100;
+            return .{};
+        }
+        fn view(s: *TabS, ui: *elmz.Ui(TabM)) *elmz.Element(TabM) {
+            _ = s;
+            const a = ui.button(.{ .label = "a", .msg = .a, .key = 1 });
+            const b = ui.button(.{ .label = "b", .msg = .b, .key = 2 });
+            a.focusable = true;
+            b.focusable = true;
+            return ui.column(.{ .children = &.{ a, b } });
+        }
+        /// Claims nothing, but counts: if Tab reached here the count would move,
+        /// so the count is the proof the runtime swallowed the key instead.
+        fn onKey(s: *TabS, k: elmz.Key, p: elmz.Phase) ?TabM {
+            _ = k;
+            _ = p;
+            s.hook_calls += 1;
+            return null;
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 200, 160);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(TabS, TabM).init(gpa, .{}, Hooks.update, Hooks.view);
+    defer rt.deinit();
+    rt.on_key = Hooks.onKey;
+
+    var fake = Fake{
+        .events = &.{
+            .{ .key = .{ .named = .tab } }, // nothing focused -> first
+            .{ .key = .{ .named = .tab } }, // -> second
+            .{ .key = .{ .named = .tab, .mods = .{ .shift = true } } }, // back to first
+            .quit,
+        },
+        .idle = 2,
+    };
+    const stats = try run(struct {}, TabS, TabM, &rt, &canvas, fake.window(), .{});
+
+    try std.testing.expectEqual(@as(?u64, 1), rt.focus);
+    try std.testing.expectEqual(@as(u32, 0), stats.messages); // traversal is not a message
+    try std.testing.expectEqual(@as(u32, 0), rt.state.hook_calls); // and not the app's key
+}
+
+test "tab falls through to the app when nothing can take focus" {
+    const gpa = std.testing.allocator;
+    const PlainM = enum { typed_tab };
+    const PlainS = struct { claimed: u32 = 0 };
+
+    const Hooks = struct {
+        fn update(s: *PlainS, m: PlainM) elmz.Action(PlainM) {
+            _ = m;
+            s.claimed += 1;
+            return .{};
+        }
+        fn view(s: *PlainS, ui: *elmz.Ui(PlainM)) *elmz.Element(PlainM) {
+            _ = s;
+            return ui.text(.{ .label = "no controls here", .size = 14 });
+        }
+        fn onKey(s: *PlainS, k: elmz.Key, p: elmz.Phase) ?PlainM {
+            _ = s;
+            if (p == .up or k.named != .tab) return null;
+            return .typed_tab;
+        }
+    };
+
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+    var rt = elmz.Runtime(PlainS, PlainM).init(gpa, .{}, Hooks.update, Hooks.view);
+    defer rt.deinit();
+    rt.on_key = Hooks.onKey;
+
+    var fake = Fake{
+        .events = &.{
+            .{ .key = .{ .named = .tab } },
+            .{ .key_up = .{ .named = .tab } },
+            .quit,
+        },
+        .idle = 2,
+    };
+    const stats = try run(struct {}, PlainS, PlainM, &rt, &canvas, fake.window(), .{});
+
+    // With no focusable candidate, Tab is genuinely not the runtime's: it
+    // reaches the hook and the message counts exactly once.
+    try std.testing.expectEqual(@as(?u64, null), rt.focus);
+    try std.testing.expectEqual(@as(u32, 1), rt.state.claimed);
+    try std.testing.expectEqual(@as(u32, 1), stats.messages);
 }

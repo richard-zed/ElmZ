@@ -151,6 +151,13 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const renderer_row = ui.row(.{ .children = &.{ sdf_button, baked_button }, .gap = 24 });
 
     // -- three cuts of one ramp ---------------------------------------------
+    // An inner rim is not an outward glow seen backwards: it sits ON the face, so
+    // a saturated accent at the outward alpha reads as a hard ring painted on the
+    // button rather than light landing on it. The outward cuts keep the accent;
+    // the inner one gets a light tint at low alpha and a wider, slower falloff, so
+    // it reads as a sheen. This breaks the row's "only `mode` differs" invariant on
+    // purpose -- compare the CUT here, judge the colour on this one button.
+    const inner_color = elmz.Color{ .r = th.text.r, .g = th.text.g, .b = th.text.b, .a = 48 };
     const modes = [_]elmz.Halo.Mode{ .glow, .outer_glow, .inner_glow };
     const mode_names = [_][]const u8{ "glow", "outer_glow", "inner_glow" };
     var mode_buttons: [modes.len]*elmz.Element(Msg) = undefined;
@@ -166,9 +173,15 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
                 .radius = 10,
                 // Identical in every field except `mode`, so a difference on
                 // screen is the cut and nothing else.
-                .halo = .{ .color = glow_color, .blur = 16, .spread = 3, .mode = mode },
+                .halo = if (mode == .inner_glow)
+                    .{ .color = inner_color, .blur = 20, .spread = 2, .mode = mode }
+                else
+                    .{ .color = glow_color, .blur = 16, .spread = 3, .mode = mode },
             },
-            .hover_halo = .{ .color = glow_color, .blur = 24, .spread = 5, .mode = mode },
+            .hover_halo = if (mode == .inner_glow)
+                .{ .color = elmz.Color{ .r = th.text.r, .g = th.text.g, .b = th.text.b, .a = 78 }, .blur = 26, .spread = 3, .mode = mode }
+            else
+                .{ .color = glow_color, .blur = 24, .spread = 5, .mode = mode },
         });
     }
     const mode_row = ui.row(.{ .children = &mode_buttons, .gap = 20 });
