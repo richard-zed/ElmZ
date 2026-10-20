@@ -507,6 +507,48 @@ fn hitAppend(
     try hits.append(gpa, .{ .rect = rect, .clip = clip, .msg = msg, .key = key, .active = active });
 }
 
+/// Appearance for one element, as a single value.
+///
+/// The three hot slots carry a `?Color` plus a `?Fill` gradient override rather
+/// than one optional, because a bare `Color` does not coerce into the tagged
+/// union and `.bg = .{ .solid = c }` at every call site was worse than the pair.
+/// `bgFill`/`fgFill`/`borderFill` resolve that pair, and they are the only place
+/// the precedence lives.
+///
+/// A `Style` is a VALUE: it can be returned from a function, named once and
+/// reused, and asserted in a test without rendering anything. That is the whole
+/// point of it existing as a type rather than eight assignments to an element.
+pub const Style = struct {
+    bg: ?Color = null,
+    /// gradient override for `bg`
+    bg_grad: ?Fill = null,
+    fg: ?Color = null,
+    fg_grad: ?Fill = null,
+    border: ?Color = null,
+    border_grad: ?Fill = null,
+    radius: f32 = 0,
+    pad: f32 = 0,
+
+    pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
+        return resolveFill(self.bg, self.bg_grad, fallback);
+    }
+    pub fn fgFill(self: Style, fallback: ?Fill) ?Fill {
+        return resolveFill(self.fg, self.fg_grad, fallback);
+    }
+    pub fn borderFill(self: Style, fallback: ?Fill) ?Fill {
+        return resolveFill(self.border, self.border_grad, fallback);
+    }
+};
+
+/// The one rule for a slot: the gradient wins over the flat colour, because a
+/// caller who set a gradient meant it. `fallback` is what the kind or the theme
+/// defaults to when the caller set neither.
+fn resolveFill(solid: ?Color, grad: ?Fill, fallback: ?Fill) ?Fill {
+    if (grad) |g| return g;
+    if (solid) |c| return .{ .solid = c };
+    return fallback;
+}
+
 pub fn Element(comptime M: type) type {
     return struct {
         const Self = @This();
@@ -587,13 +629,38 @@ pub fn Element(comptime M: type) type {
         /// computed yet. It is the same number paint lays the element out
         /// with, which is what keeps measure and paint breaking lines in the
         /// same place.
-        /// The appearance actually painted for a slot. The gradient override
-        /// wins over the flat colour, because a caller who set a gradient
-        /// meant it; `fallback` is what the kind or theme defaults to.
-        fn pick(solid: ?Color, grad: ?Fill, fallback: ?Fill) ?Fill {
-            if (grad) |g| return g;
-            if (solid) |c| return .{ .solid = c };
-            return fallback;
+        /// This element's appearance, read out as one value.
+        pub fn style(self: *const Self) Style {
+            return .{
+                .bg = self.bg,
+                .bg_grad = self.bg_grad,
+                .fg = self.fg,
+                .fg_grad = self.fg_grad,
+                .border = self.border,
+                .border_grad = self.border_grad,
+                .radius = self.radius,
+                .pad = self.pad,
+            };
+        }
+
+        /// The ONLY intended writer of the appearance fields, and the reason
+        /// they are grouped: one call replaces eight assignments, so the reader
+        /// sees the whole look at the point the element is made instead of
+        /// tracking statements that may follow later.
+        ///
+        /// This SETS, it does not merge -- a caller passing `.{}` gets the
+        /// defaults back, `radius` and `pad` included. Call it once, at
+        /// construction. Zig has no field privacy, so post-hoc assignment still
+        /// compiles; this is the short path, not an enforced boundary.
+        pub fn applyStyle(self: *Self, s: Style) void {
+            self.bg = s.bg;
+            self.bg_grad = s.bg_grad;
+            self.fg = s.fg;
+            self.fg_grad = s.fg_grad;
+            self.border = s.border;
+            self.border_grad = s.border_grad;
+            self.radius = s.radius;
+            self.pad = s.pad;
         }
 
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Size {
@@ -679,7 +746,7 @@ pub fn Element(comptime M: type) type {
             // Both tests are identity, not overlap. An ancestor overlaps the
             // child it contains, so an overlap test would light up every
             // container with a pressable child in it.
-            var bg_now: ?Fill = pick(self.bg, self.bg_grad, null);
+            var bg_now: ?Fill = self.style().bgFill(null);
             if (!self.disabled) {
                 if (ptr.held) |held| {
                     if (self.press_bg) |pc| {
@@ -712,8 +779,8 @@ pub fn Element(comptime M: type) type {
             // its geometry and drops to the muted role, which is the only
             // signal it gets, since the theme has no disabled colour and
             // cannot get one without duplicating a Mocha step.
-            const fg_now: Fill = if (self.disabled) .{ .solid = th.text_muted } else pick(self.fg, self.fg_grad, .{ .solid = th.text }).?;
-            const border_now: ?Fill = pick(self.border, self.border_grad, null);
+            const fg_now: Fill = if (self.disabled) .{ .solid = th.text_muted } else self.style().fgFill(.{ .solid = th.text }).?;
+            const border_now: ?Fill = self.style().borderFill(null);
             const fill_now: ?Fill = bg_now orelse switch (self.kind) {
                 .button, .bar => .{ .solid = th.control },
                 else => null,
@@ -777,7 +844,7 @@ pub fn Element(comptime M: type) type {
                     // Track came from `fill_now`; only the value overlay here.
                     var fill = rect;
                     fill.w = rect.w * std.math.clamp(b.value, 0, 1);
-                    r.quad(fill, pick(self.fg, self.fg_grad, .{ .solid = th.accent }).?, clip);
+                    r.quad(fill, self.style().fgFill(.{ .solid = th.accent }).?, clip);
                 },
 
                 .rect => {},
