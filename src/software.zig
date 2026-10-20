@@ -60,6 +60,41 @@ fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32) f32 {
     };
 }
 
+/// How much a rim light should stop tracing the outline and hug the inscribed
+/// ellipse instead.
+///
+/// Zero for a narrow rim: it is tracing the shape, and the corners are part of
+/// what you see. A distance field inverts that as it widens -- inward offsets
+/// SHRINK the corner radius (`r - t`), so a glow at half the short side has
+/// driven the corners to zero and what it draws is a rectangle of sharp
+/// corners, not a softened button. Past that point the outline is not
+/// legible anyway: the band from each edge has met in the middle, and the only
+/// remaining question is whether the light looks like the shape or like a pool
+/// of it. This says "like a pool", from half the short side upward.
+fn circularity(w: f32, h: f32, blur: f32) f32 {
+    const short = @min(w, h);
+    if (short <= 0 or blur <= 0) return 0;
+    return std.math.clamp(blur / (short * 0.5) - 0.5, 0, 1);
+}
+
+/// Distance to an ellipse, to first order.
+///
+/// The normalised radius says how far out you are and its gradient says how
+/// fast that changes, so dividing one by the other converts to pixels. Exact on
+/// both axes, and within a pixel of the true distance at the 45 degree corner
+/// (14.1 vs ~12.6 on an 80x60 box) -- which is ample for a soft ramp.
+fn ellipseDistance(px: f32, py: f32, a: f32, b: f32) f32 {
+    const ia = if (a > 0) 1.0 / a else 0;
+    const ib = if (b > 0) 1.0 / b else 0;
+    const gx = px * ia;
+    const gy = py * ib;
+    const g = @sqrt(gx * gx + gy * gy);
+    if (g <= 0) return -@min(a, b);
+    const grad = @sqrt(gx * gx * ia * ia + gy * gy * ib * ib) / g;
+    if (grad <= 0) return -@min(a, b);
+    return (g - 1) / grad;
+}
+
 /// How far a ramp reaches from the silhouette, in pixels, WITHOUT the extra
 /// pixel that covers the antialiased edge.
 ///
@@ -580,6 +615,17 @@ pub const Canvas = struct {
             .sdf => true,
             .baked => false,
         };
+        // The blended metric depends on the shape's own aspect, and a stencil is
+        // keyed on (radius, blur, corner) with no width or height in the key: a
+        // template baked from one silhouette and stretched across another would
+        // carry the wrong ellipse. Cheap to give up -- this is the mode that is
+        // already the widest band, and a wide band is where a bake saved least.
+        if (h.mode == .inner_glow) {
+            const sp2: f32 = -h.spread;
+            const bl = @max(h.blur, 0);
+            if (circularity(rect.w + sp2 * 2, rect.h + sp2 * 2, bl) > 0)
+                return self.haloSdf(rect, corner, h, clip);
+        }
         if (use_sdf) return self.haloSdf(rect, corner, h, clip);
         self.haloBaked(rect, corner, h, clip);
     }
@@ -632,6 +678,14 @@ pub const Canvas = struct {
             .w = shape.w + grow * 2,
             .h = shape.h + grow * 2,
         };
+        // A wide rim light is the one case where the metric matters: see
+        // `circularity`. Only inner glows blend -- an outward ramp already rounds
+        // itself off naturally, growing `blur/2` on every side takes an 80x60 box
+        // from 1.27 aspect to 1.14 and the radius grows with it.
+        const circular: f32 = if (h.mode == .inner_glow) circularity(shape.w, shape.h, blur) else 0;
+        const ea = shape.w * 0.5;
+        const eb = shape.h * 0.5;
+
         const sp = self.clipSpan(ring, clip) orelse return;
 
         var y = sp.y0;
@@ -653,8 +707,12 @@ pub const Canvas = struct {
                     const de = @sqrt(@max(ex, 0) * @max(ex, 0) + @max(ey, 0) * @max(ey, 0)) + @min(@max(ex, ey), 0) - er;
                     if (de < 0) continue;
                 }
+                const rd = if (circular > 0)
+                    d + (ellipseDistance(px, py, ea, eb) - d) * circular
+                else
+                    d;
                 const w = if (h.light != null) lightWidth(blur, px, py, hx, hy, cast) else blur;
-                const cov = ramp(h.mode, d, w);
+                const cov = ramp(h.mode, rd, w);
                 if (cov > 0) self.blendCoverage(x, y, h.color, cov);
             }
         }
@@ -1915,6 +1973,44 @@ test "the stencil and the distance field put the ramp in the same place" {
             }
         }
     }
+}
+
+test "a wide inner glow stops tracing the corners and pools in the middle" {
+    const gpa = std.testing.allocator;
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
+
+    // (42,70) is a pixel inside the left edge at mid-height; (44,44) is 4px in
+    // from the top-left corner along the diagonal. The inscribed ellipse touches
+    // the first and runs well clear of the second, so these two readings
+    // separate "tracing the outline" from "pooling toward the middle".
+    var mid: [2]f32 = undefined;
+    var corner: [2]f32 = undefined;
+    inline for (.{ 40, 14 }, 0..) |blur, i| {
+        var c = try Canvas.init(gpa, 200, 160);
+        defer c.deinit();
+        const r = c.renderer();
+        r.quad(clip, .{ .solid = .{ .r = 0, .g = 0, .b = 0, .a = 255 } }, clip);
+        r.halo(rect, 8, .{
+            .color = .{ .r = 255, .g = 255, .b = 255, .a = 255 },
+            .blur = blur,
+            .mode = .inner_glow,
+            .quality = .sdf,
+        }, clip);
+        mid[i] = @floatFromInt(testRgb(&c, 42, 70)[0]);
+        corner[i] = @floatFromInt(testRgb(&c, 44, 44)[0]);
+    }
+
+    // A narrow rim still follows the shape: the corner is lit, because at
+    // blur 14 the corner radius is still 1px positive and the band is thin.
+    try std.testing.expect(corner[1] > 150);
+    // A wide one does not. At blur 40 the inward offset has driven the corner
+    // radius to zero -- a distance field can only draw sharper corners -- so the
+    // metric blends to the inscribed ellipse and the corner falls away instead.
+    try std.testing.expect(mid[0] > 200);
+    try std.testing.expect(corner[0] < 50);
+    // The edge itself stays lit either way: this is a rim, not a vignette.
+    try std.testing.expect(mid[0] > corner[0] + 150);
 }
 
 test "an inner glow starts at full strength and reaches a whole blur inward" {
