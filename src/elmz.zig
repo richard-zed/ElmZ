@@ -40,35 +40,57 @@ pub const Size = struct { w: f32 = 0, h: f32 = 0 };
 // paint: a solid colour is one case of a fill, not the whole type
 // ---------------------------------------------------------------------------
 
-/// One colour of a gradient, at position `at` in 0..1 along the axis.
-pub const Stop = struct {
-    at: f32 = 0,
-    color: Color = .{ .r = 0, .g = 0, .b = 0 },
-};
-
-/// Gradient stops, stored inline, four at most. A slice would be smaller on
-/// the wire and is the obvious shape -- but a gradient is built inside `view`
-/// and rasterised *after* `view` returns, so a slice would point at a dead
-/// stack frame. Value semantics cost 36 bytes and delete the whole question.
+/// Gradient stops: up to four colours held as VALUES, with each stop's position
+/// implied by how many there are.
+///
+/// The positions used to be stored per stop, which cost 8 bytes each and made
+/// `Stops` 36 bytes. A `Fill` carries one, and an `Element` carries five
+/// optional `Fill`s -- so that little array of floats was most of the reason an
+/// element was half a kilobyte. Nothing ever set a position outside the ladders
+/// below, so the positions are a function of the count now.
+///
+/// A slice would be smaller still and is the obvious shape -- but a gradient is
+/// built inside `view` and rasterised *after* `view` returns, so a slice would
+/// point at a dead stack frame. Value semantics delete the whole question.
 pub const Stops = struct {
+    colors: [4]Color = @splat(none),
     n: u8 = 0,
-    items: [4]Stop = @splat(.{}),
+
+    /// The colour of an unused slot. Named rather than written inline because
+    /// `Color` has no field defaults, so `.{}` will not do.
+    const none: Color = .{ .r = 0, .g = 0, .b = 0 };
 
     pub fn two(a: Color, b: Color) Stops {
-        return .{ .n = 2, .items = .{ .{ .at = 0, .color = a }, .{ .at = 1, .color = b }, .{}, .{} } };
+        return .{ .n = 2, .colors = .{ a, b, none, none } };
     }
 
     pub fn three(a: Color, b: Color, c: Color) Stops {
-        return .{ .n = 3, .items = .{
-            .{ .at = 0, .color = a }, .{ .at = 0.5, .color = b }, .{ .at = 1, .color = c }, .{},
-        } };
+        return .{ .n = 3, .colors = .{ a, b, c, none } };
     }
 
     pub fn four(a: Color, b: Color, c: Color, d: Color) Stops {
-        return .{ .n = 4, .items = .{
-            .{ .at = 0, .color = a },     .{ .at = 0.333, .color = b },
-            .{ .at = 0.667, .color = c }, .{ .at = 1, .color = d },
-        } };
+        return .{ .n = 4, .colors = .{ a, b, c, d } };
+    }
+
+    /// Where stop `i` sits along the axis, for a ramp of this many stops. The
+    /// middle positions are the constants the old constructors stored, to the
+    /// digit, so every existing ramp shades identically.
+    fn pos(self: Stops, i: usize) f32 {
+        return switch (self.n) {
+            2 => if (i == 0) 0 else 1,
+            3 => switch (i) {
+                0 => 0,
+                1 => 0.5,
+                else => 1,
+            },
+            4 => switch (i) {
+                0 => 0,
+                1 => 0.333,
+                2 => 0.667,
+                else => 1,
+            },
+            else => 0,
+        };
     }
 
     /// Sample at `t`. Flat outside the end stops (every toolkit does this), so
@@ -77,29 +99,27 @@ pub const Stops = struct {
     /// needs to stay general. Almost every gradient in a UI is exactly two
     /// stops at 0 and 1, and this is called once per PIXEL, so the general
     /// lookup's `while` and its divide are not affordable there.
-    ///
-    /// Identical output to `at` for that shape: `at` computes
-    /// `(t - 0) / 1` for a two-stop ramp, which is `t`.
     pub fn atFast(self: Stops, t: f32) Color {
-        if (self.n == 2 and self.items[0].at <= 0 and self.items[1].at >= 1) {
-            return mix(self.items[0].color, self.items[1].color, std.math.clamp(t, 0, 1));
+        if (self.n == 2) {
+            return mix(self.colors[0], self.colors[1], std.math.clamp(t, 0, 1));
         }
         return self.at(std.math.clamp(t, 0, 1));
     }
 
     pub fn at(self: Stops, t: f32) Color {
-        if (self.n == 0) return .{ .r = 0, .g = 0, .b = 0 };
-        if (t <= self.items[0].at) return self.items[0].color;
+        const n: usize = self.n;
+        if (n == 0) return .{ .r = 0, .g = 0, .b = 0 };
+        if (t <= self.pos(0)) return self.colors[0];
         var i: usize = 1;
-        while (i < self.n) : (i += 1) {
-            const b = self.items[i];
-            if (t <= b.at) {
-                const a = self.items[i - 1];
-                const span = b.at - a.at;
-                return mix(a.color, b.color, if (span <= 0) 1 else (t - a.at) / span);
+        while (i < n) : (i += 1) {
+            const b_at = self.pos(i);
+            if (t <= b_at) {
+                const a_at = self.pos(i - 1);
+                const span = b_at - a_at;
+                return mix(self.colors[i - 1], self.colors[i], if (span <= 0) 1 else (t - a_at) / span);
             }
         }
-        return self.items[self.n - 1].color;
+        return self.colors[n - 1];
     }
 
     /// Interpolate in PREMULTIPLIED space. A straight rgb lerp toward a

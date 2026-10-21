@@ -545,6 +545,16 @@ pub const Canvas = struct {
                     }
                     return;
                 }
+                if (twoOpaque(g.stops)) {
+                    const ca = g.stops.colors[0];
+                    const cb = g.stops.colors[1];
+                    while (y < sp.y1) : (y += 1) {
+                        const ym = @as(f32, @floatFromInt(y)) + 0.5;
+                        const t0 = ((xm - ax) * dx + (ym - ay) * dy) * inv;
+                        self.rampRow(sp, y, t0, step, ca, cb);
+                    }
+                    return;
+                }
                 while (y < sp.y1) : (y += 1) {
                     const ym = @as(f32, @floatFromInt(y)) + 0.5;
                     // No multiply and no divide inside the row: `t` advances
@@ -582,6 +592,63 @@ pub const Canvas = struct {
                 // Still a square root per pixel -- that is what a radial ramp
                 // is -- but the centre and the reciprocal of the radius are
                 // fixed, so only the distance changes.
+                // The row split only pays when part of the box lies OUTSIDE
+                // the circle. When the circle covers the whole box there is
+                // nothing to peel off, and the per-row square root plus the
+                // two fillRow calls cost more than the plain loop they
+                // replaced -- measured 19.8 -> 24.3 ns/px on a full-page
+                // radial, which is a regression, not a fast path.
+                const fx0: f32 = @floatFromInt(sp.x0);
+                const fx1: f32 = @floatFromInt(sp.x1 - 1);
+                const fy0: f32 = @floatFromInt(sp.y0);
+                const fy1: f32 = @floatFromInt(sp.y1 - 1);
+                const dxm = @max(@abs(fx0 + 0.5 - cx), @abs(fx1 + 0.5 - cx));
+                const dym = @max(@abs(fy0 + 0.5 - cy), @abs(fy1 + 0.5 - cy));
+                const covered = dxm * dxm + dym * dym <= r * r;
+                if (twoOpaque(g.stops) and !covered) {
+                    // Outside the radius the colour is flat, so a scanline is
+                    // split into constant runs and only the span that actually
+                    // crosses the circle pays a square root.
+                    const edge = g.stops.colors[1];
+                    const r2 = r * r;
+                    const invr = 1.0 / r;
+                    while (y < sp.y1) : (y += 1) {
+                        const dyv = (@as(f32, @floatFromInt(y)) + 0.5) - cy;
+                        const rem = r2 - dyv * dyv;
+                        if (!(rem > 0)) {
+                            self.fillRow(sp.x0, sp.x1, @intCast(y), edge);
+                            continue;
+                        }
+                        const half = @sqrt(rem);
+                        const xlo_f = cx - half - 0.5;
+                        const xhi_f = cx + half - 0.5;
+                        var lo: i64 = sp.x0;
+                        if (xlo_f > @as(f32, @floatFromInt(sp.x0))) {
+                            const fi = @ceil(xlo_f);
+                            lo = if (fi >= @as(f32, @floatFromInt(sp.x1))) sp.x1 else @intFromFloat(fi);
+                        }
+                        var hi: i64 = sp.x1;
+                        if (xhi_f < @as(f32, @floatFromInt(sp.x1 - 1))) {
+                            const fi = @floor(xhi_f) + 1;
+                            hi = if (fi <= @as(f32, @floatFromInt(sp.x0))) sp.x0 else @intFromFloat(fi);
+                        }
+                        if (hi < lo) hi = lo;
+                        self.fillRow(sp.x0, lo, @intCast(y), edge);
+                        self.fillRow(hi, sp.x1, @intCast(y), edge);
+                        const rw = @as(usize, @intCast(y)) * self.w;
+                        var x = lo;
+                        var off = (rw + @as(usize, @intCast(lo))) * 4;
+                        while (x < hi) : (x += 1) {
+                            const dxv = (@as(f32, @floatFromInt(x)) + 0.5) - cx;
+                            const c = g.stops.atFast(@sqrt(dxv * dxv + dyv * dyv) * invr);
+                            self.px[off + 0] = c.r;
+                            self.px[off + 1] = c.g;
+                            self.px[off + 2] = c.b;
+                            off += 4;
+                        }
+                    }
+                    return;
+                }
                 const inv = 1.0 / r;
                 while (y < sp.y1) : (y += 1) {
                     const dyv = (@as(f32, @floatFromInt(y)) + 0.5) - cy;
@@ -602,6 +669,83 @@ pub const Canvas = struct {
                     }
                 }
             },
+        }
+    }
+
+    /// True when a gradient is the shape almost every UI gradient is: exactly
+    /// two stops, pinned at the two ends, both fully opaque. Only then is the
+    /// colour a plain affine lerp with no premultiply and no stop search.
+    fn twoOpaque(s: elmz.Stops) bool {
+        return s.n == 2 and s.colors[0].a == 255 and s.colors[1].a == 255;
+    }
+
+    /// One scanline of a two-opaque-stop ramp starting at `t0` and advancing by
+    /// `step` per pixel.
+    ///
+    /// Split into three runs. Below the first stop the colour is flat, above
+    /// the second it is flat, and only the middle span carries a gradient -- so
+    /// a diagonal fill no longer lerps every pixel of the box, and the flat
+    /// runs reuse the solid row writer. In the middle the three channels
+    /// advance by addition instead of being re-lerped from `t` per pixel.
+    fn rampRow(self: *Self, sp: Span, y: i64, t0: f32, step: f32, a: elmz.Color, b: elmz.Color) void {
+        const n: i64 = sp.x1 - sp.x0;
+        if (n <= 0) return;
+        if (!(step > 0 or step < 0)) {
+            self.fillRow(sp.x0, sp.x1, @intCast(y), elmz.Stops.two(a, b).atFast(t0));
+            return;
+        }
+        const nf: f32 = @floatFromInt(n);
+        var lead: i64 = 0;
+        var ramp_end: i64 = n;
+        const lead_color = if (step > 0) a else b;
+        const trail_color = if (step > 0) b else a;
+        if (step > 0) {
+            if (t0 < 0) {
+                const fi = @ceil(-t0 / step);
+                lead = if (fi >= nf) n else @intFromFloat(fi);
+            }
+            if (t0 > 1) {
+                ramp_end = 0;
+            } else {
+                const fi = @floor((1.0 - t0) / step) + 1;
+                ramp_end = if (fi >= nf) n else @intFromFloat(fi);
+            }
+        } else {
+            if (t0 > 1) {
+                const fi = @ceil((t0 - 1.0) / -step);
+                lead = if (fi >= nf) n else @intFromFloat(fi);
+            }
+            if (t0 < 0) {
+                ramp_end = 0;
+            } else {
+                const fi = @floor(t0 / -step) + 1;
+                ramp_end = if (fi >= nf) n else @intFromFloat(fi);
+            }
+        }
+        if (ramp_end < lead) ramp_end = lead;
+        self.fillRow(sp.x0, sp.x0 + lead, @intCast(y), lead_color);
+        self.fillRow(sp.x0 + ramp_end, sp.x1, @intCast(y), trail_color);
+        if (ramp_end <= lead) return;
+        const t_s = t0 + @as(f32, @floatFromInt(lead)) * step;
+        const af: [3]f32 = .{ @floatFromInt(a.r), @floatFromInt(a.g), @floatFromInt(a.b) };
+        const bf: [3]f32 = .{ @floatFromInt(b.r), @floatFromInt(b.g), @floatFromInt(b.b) };
+        const dv: [3]f32 = .{ (bf[0] - af[0]) * step, (bf[1] - af[1]) * step, (bf[2] - af[2]) * step };
+        var cv: [3]f32 = .{
+            af[0] + (bf[0] - af[0]) * t_s,
+            af[1] + (bf[1] - af[1]) * t_s,
+            af[2] + (bf[2] - af[2]) * t_s,
+        };
+        const row = @as(usize, @intCast(y)) * self.w;
+        var x: i64 = lead;
+        var off = (row + @as(usize, @intCast(sp.x0 + lead))) * 4;
+        while (x < ramp_end) : (x += 1) {
+            self.px[off + 0] = @intFromFloat(@round(std.math.clamp(cv[0], 0.0, 255.0)));
+            self.px[off + 1] = @intFromFloat(@round(std.math.clamp(cv[1], 0.0, 255.0)));
+            self.px[off + 2] = @intFromFloat(@round(std.math.clamp(cv[2], 0.0, 255.0)));
+            cv[0] += dv[0];
+            cv[1] += dv[1];
+            cv[2] += dv[2];
+            off += 4;
         }
     }
 
