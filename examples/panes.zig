@@ -264,7 +264,12 @@ pub fn main(init: std.process.Init) !void {
     const out = &w.interface;
 
     var canvas = try software.Canvas.init(gpa, W, H);
-    canvas.setFont(try software.loadFont(gpa, io, "src/font.ttf"));
+    // Owned by us: loadFont hands back the file bytes and nothing else frees
+    // them. The defer order matters -- the canvas is torn down first, since it
+    // holds a slice into these bytes.
+    const font_bytes = try software.loadFont(gpa, io, "src/font.ttf");
+    defer gpa.free(font_bytes);
+    canvas.setFont(font_bytes);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
