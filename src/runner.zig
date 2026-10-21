@@ -468,6 +468,7 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     if (@hasField(@TypeOf(app), "on_key")) rt.on_key = app.on_key;
     if (@hasField(@TypeOf(app), "on_text")) rt.on_text = app.on_text;
     if (@hasField(@TypeOf(app), "on_wheel")) rt.on_wheel = app.on_wheel;
+    if (@hasField(@TypeOf(app), "on_outside")) rt.on_outside = app.on_outside;
     if (@hasField(@TypeOf(app), "on_tick")) rt.on_tick = app.on_tick;
 
     // Same optional-field trick as `state`: an app that wants a theme file
@@ -746,6 +747,21 @@ pub fn run(
                             .from_y = p[1],
                             .from_off = rt.scrollOffset(d.key),
                         };
+                    }
+                    // Nothing under the pointer. Every claiming element is
+                    // told about its own press through `Press`, so a press
+                    // that claimed nothing is the one event no element can
+                    // ever see -- and the one a popup needs in order to
+                    // dismiss itself. Reported on the DOWN, not the release:
+                    // dismissal that waits for the button to come up feels
+                    // like the click was ignored.
+                    else if (rt.on_outside) |hook| {
+                        if (hook(&rt.state, p)) |msg| {
+                            const action = rt.dispatch(msg);
+                            stats.messages += 1;
+                            if (action.quit) running = false;
+                            dirty = dirty or action.repaint;
+                        }
                     }
                 } else rt.press.cancel();
                 dirty = true;
@@ -2970,4 +2986,66 @@ test "a drag clamps at both ends of the content" {
         _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
         try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(7));
     }
+}
+
+const OutState = struct { outside: u32 = 0, clicks: u32 = 0, at: [2]f32 = .{ -1, -1 } };
+const OutMsg = enum { clicked, missed };
+
+fn outUpdate(s: *OutState, m: OutMsg) elmz.Action(OutMsg) {
+    switch (m) {
+        .clicked => s.clicks += 1,
+        .missed => s.outside += 1,
+    }
+    return .{ .repaint = true };
+}
+
+fn outView(_: *OutState, ui: *elmz.Ui(OutMsg)) *elmz.Element(OutMsg) {
+    const b = ui.button(.{ .label = "go", .msg = .clicked });
+    b.key = 1;
+    return ui.column(.{ .children = &.{b}, .width = 200, .height = 200 });
+}
+
+const OutHooks = struct {
+    fn onOutside(s: *OutState, p: [2]f32) ?OutMsg {
+        s.at = p;
+        return .missed;
+    }
+};
+
+test "a press that lands on nothing reaches the app, so a popup can dismiss itself" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 200);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(OutState, OutMsg).init(gpa, .{}, outUpdate, outView);
+    defer rt.deinit();
+    rt.on_outside = OutHooks.onOutside;
+
+    var probe = try rt.frame(.{ .w = 200, .h = 200 }, canvas.renderer());
+    defer probe.deinit();
+    try std.testing.expectEqual(@as(usize, 1), probe.hits.len);
+    const b = probe.hits[0].rect;
+
+    // Bottom-right corner: the column is full-size but claims nothing, so this
+    // press lands on empty canvas.
+    const empty: [2]f32 = .{ 195, 195 };
+    try std.testing.expect(probe.hit(empty) == null);
+
+    const ev = [_]elmz.Event{ .{ .pointer_down = empty }, .{ .pointer_up = empty } };
+    var fake: Fake = .{ .events = &ev, .w = 200, .h = 200 };
+    _ = try run(struct {}, OutState, OutMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+
+    try std.testing.expectEqual(@as(u32, 1), rt.state.outside);
+    try std.testing.expectEqual(empty[0], rt.state.at[0]);
+    try std.testing.expectEqual(@as(u32, 0), rt.state.clicks);
+
+    // A press that DOES land must not be reported as outside: the hook is for
+    // the presses nothing claimed, not for every press.
+    const on_btn: [2]f32 = .{ b.x + b.w / 2, b.y + b.h / 2 };
+    const ev2 = [_]elmz.Event{ .{ .pointer_down = on_btn }, .{ .pointer_up = on_btn } };
+    var fake2: Fake = .{ .events = &ev2, .w = 200, .h = 200 };
+    _ = try run(struct {}, OutState, OutMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
+
+    try std.testing.expectEqual(@as(u32, 1), rt.state.clicks);
+    try std.testing.expectEqual(@as(u32, 1), rt.state.outside);
 }

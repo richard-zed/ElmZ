@@ -1501,15 +1501,46 @@ pub fn Element(comptime M: type) type {
                     const ix = rect.x + self.pad;
                     const iy = rect.y + self.pad;
                     const iw = rect.w - 2 * self.pad;
+                    const ih = rect.h - 2 * self.pad;
+                    // Text is contained by its OWN box, not merely by the clip
+                    // it inherited. A label wider than its element used to paint
+                    // straight over its own background and its neighbour, which
+                    // was tolerable while every label was placed by hand and is
+                    // not tolerable once a widget can be given a width.
+                    // A hair of slack. A glyph's ink can overhang its advance
+                    // width by a fraction of a pixel, so a box exact to the
+                    // measurement shaves the last column of coverage off a label
+                    // that does fit -- and at a fractional density the boundary
+                    // lands mid-pixel and takes whole columns with it. The box is
+                    // for containment, not for enforcing the advance sum.
+                    // Scaled with the type, because ink overhang does: a
+                    // 34px heading can hang two or three pixels outside its
+                    // advance box, and a fixed pixel of slack would shave it.
+                    const slack = @max(1.0, t.size * 0.1);
+                    const tclip = clip.intersect(.{
+                        .x = ix - slack,
+                        .y = iy - slack,
+                        .w = iw + 2 * slack,
+                        .h = ih + 2 * slack,
+                    });
+                    if (tclip.isEmpty()) return;
                     if (!self.wrap or iw <= 0) {
-                        r.text(ix, iy, t.size, fg_now, t.bytes, clip);
+                        // Elided rather than left to spill: a glyph cut in half
+                        // by a clip reads as a rendering fault, and the width a
+                        // widget hands its label is not the app's to predict.
+                        // Elide against the same box the clip uses, not the raw
+                        // width: a row that squeezes a label by a pixel must not
+                        // lose two characters and gain an ellipsis for it.
+                        const fit = fitText(r, t.bytes, t.size, iw + 2 * slack);
+                        r.text(ix, iy, t.size, fg_now, fit.bytes, tclip);
+                        if (fit.ellipsis) r.text(ix + fit.width, iy, t.size, fg_now, ellipsis, tclip);
                     } else {
                         var buf: [max_lines][]const u8 = undefined;
                         const n = r.wrapText(t.bytes, t.size, iw, &buf);
                         const ts = r.measureText(t.bytes, t.size);
                         for (buf[0..n], 0..) |line, i| {
                             if (line.len == 0) continue;
-                            r.text(ix, iy + @as(f32, @floatFromInt(i)) * ts.line_height, t.size, fg_now, line, clip);
+                            r.text(ix, iy + @as(f32, @floatFromInt(i)) * ts.line_height, t.size, fg_now, line, tclip);
                         }
                     }
                 },
@@ -2430,6 +2461,46 @@ pub fn Collector(comptime M: type) type {
     };
 }
 
+/// What a trimmed label ends with. Written as bytes rather than a literal so
+/// the source needs no particular encoding, and because a byte count is what
+/// the trimmer reasons about anyway. U+2026 HORIZONTAL ELLIPSIS.
+const ellipsis: []const u8 = "\xe2\x80\xa6";
+
+const Fitted = struct {
+    bytes: []const u8,
+    width: f32,
+    ellipsis: bool,
+};
+
+/// The longest whole-codepoint prefix of `bytes` that fits `max_w`, keeping room
+/// for the ellipsis whenever anything has to be dropped. Trimming walks back one
+/// codepoint at a time so a multi-byte sequence is never cut in half -- a broken
+/// UTF-8 tail paints a replacement glyph exactly where the ellipsis belongs.
+/// Trailing spaces go first: "word ..." reads as a mistake.
+fn fitText(r: Renderer, bytes: []const u8, size: f32, max_w: f32) Fitted {
+    const full = r.measureText(bytes, size);
+    if (full.width <= max_w) return .{ .bytes = bytes, .width = full.width, .ellipsis = false };
+    const ell_w = r.measureText(ellipsis, size).width;
+    if (ell_w > max_w) return .{ .bytes = bytes[0..0], .width = 0, .ellipsis = false };
+    var end = bytes.len;
+    while (end > 0) {
+        end = prevCodepointStart(bytes, end);
+        while (end > 0 and bytes[end - 1] == ' ') end -= 1;
+        const w = r.measureText(bytes[0..end], size).width;
+        if (w + ell_w <= max_w) return .{ .bytes = bytes[0..end], .width = w, .ellipsis = true };
+    }
+    return .{ .bytes = bytes[0..0], .width = 0, .ellipsis = true };
+}
+
+/// Start of the codepoint ending at `end`. Continuation bytes are 0b10xxxxxx,
+/// so walking back over them lands on a lead byte.
+fn prevCodepointStart(bytes: []const u8, end: usize) usize {
+    if (end == 0) return 0;
+    var i = end - 1;
+    while (i > 0 and (bytes[i] & 0xC0) == 0x80) i -= 1;
+    return i;
+}
+
 /// Rough metrics for tools and tests: 0.58em per glyph, no glyph data needed.
 /// Never mix these with a frame that a real backend will draw — that is the
 /// measure/paint divergence this module now makes impossible.
@@ -2883,6 +2954,16 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// read it to clip and translate, and the runtime cannot hold state
         /// `view` needs privately the way it does with hover.
         on_wheel: ?*const fn (*S, Wheel) ?M = null,
+        /// A press that landed on NO region at all: no control, no thumb, no
+        /// viewport. It is the one press nothing can claim, so without this a
+        /// popup has no way to hear the click that should dismiss it. The
+        /// position is handed over because it is already in hand.
+        ///
+        /// It is deliberately NOT "the user clicked outside my panel": a click
+        /// on another control claims that control and never reaches here. For
+        /// that case an overlay with a full-size child is the mechanism -- it
+        /// claims everything, and its children paint (and hit) above it.
+        on_outside: ?*const fn (*S, [2]f32) ?M = null,
         /// Frame clock: seconds since the previous tick, called at the top of
         /// every loop iteration while the app is animating. Clamped by the
         /// runner so a window that sat idle for a minute does not arrive as
@@ -4780,4 +4861,55 @@ test "a primitive that cannot be recorded is reported, not silently dropped" {
     );
     try std.testing.expect(!ok.failed);
     try std.testing.expectEqual(@as(usize, 1), ok.prims.items.len);
+}
+
+test "a label wider than its element is elided and stays inside it" {
+    const EM = enum { nop };
+    const ES = struct { wide: bool = false };
+    const EH = struct {
+        fn upd(_: *ES, _: EM) Action(EM) {
+            return .{};
+        }
+        fn view(s: *ES, ui: *Ui(EM)) *Element(EM) {
+            const t = ui.text(.{ .label = "a fairly long label", .size = 10 });
+            t.width = if (s.wide) 200 else 40;
+            return ui.column(.{ .children = &.{t} });
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    var rt = Runtime(ES, EM).init(gpa, .{}, EH.upd, EH.view);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+    defer f.deinit();
+    var prims: usize = 0;
+    var last: ?[]const u8 = null;
+    var box: ?Rect = null;
+    for (f.prims) |p| switch (p) {
+        .text => |t| {
+            prims += 1;
+            last = t.bytes;
+            // Contained: every glyph is clipped by the element's own box, and
+            // two call sites that disagreed about that box would show up here.
+            if (box) |b| {
+                try std.testing.expectEqual(b.x, t.clip.x);
+                try std.testing.expectEqual(b.w, t.clip.w);
+            } else box = t.clip;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), prims);
+    try std.testing.expectEqualStrings(ellipsis, last.?);
+
+    // Wide enough, so nothing is dropped and nothing is appended.
+    rt.state.wide = true;
+    var f2 = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+    defer f2.deinit();
+    var wide_prims: usize = 0;
+    for (f2.prims) |p| switch (p) {
+        .text => wide_prims += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), wide_prims);
 }
