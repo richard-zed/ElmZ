@@ -386,6 +386,16 @@ fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool) 
 
 /// Monotonic nanoseconds: the injected source when there is one, else the io
 /// clock, else zero (no io, no clock, no dt -- and no animation without io).
+/// A logical size as a pixel count. Ceiling rather than truncation, because a
+/// fractional box that rounds DOWN loses its last partial pixel column, and the
+/// backend rounds the same value for its texture -- if the two disagree by one
+/// the frame is resampled by a hair, which is exactly the kind of softness that
+/// gets blamed on HiDPI.
+fn pixelDim(v: f32) u32 {
+    if (!(v >= 1)) return 0;
+    return @intFromFloat(@ceil(v));
+}
+
 fn clockNs(opts: Options, io: ?std.Io) u64 {
     if (opts.now_ns) |f| return f();
     if (io) |i| {
@@ -627,6 +637,27 @@ pub fn run(
         if (dirty) {
             if (frame) |*f| f.deinit();
             const size = window.size();
+
+            // Density is applied HERE and nowhere else above the renderer. Every
+            // number the tree produced is logical -- layout, hit rects, the
+            // pointer -- so the canvas is the one thing that has to be told how
+            // many device pixels a logical unit is worth. A backend that answers
+            // 0 (or garbage) falls back to 1 rather than blanking the canvas.
+            const reported = window.density();
+            const density: f32 = if (reported > 0) reported else 1;
+            canvas.scale = density;
+
+            // The frame is built for `size` and painted into this canvas, so the
+            // two must be the same box. They were not: the canvas was allocated
+            // once at startup, so after a resize the tree laid out at the new
+            // size painted into the old buffer -- hit rects then disagreed with
+            // the pixels under the cursor, which reads as "clicks land in the
+            // wrong place" rather than as a resizing bug.
+            try canvas.resize(
+                pixelDim(size.w * density),
+                pixelDim(size.h * density),
+            );
+
             const clock = opts.io;
             const t0 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
             frame = try rt.frame(size, canvas.renderer());
@@ -651,7 +682,10 @@ pub fn run(
                     .hits = frame.?.hits.len,
                 });
             }
-            window.present(canvas.px, size);
+            window.present(canvas.px, .{
+                .w = @floatFromInt(canvas.w),
+                .h = @floatFromInt(canvas.h),
+            });
 
             stats.frames += 1;
             dirty = false;
@@ -687,6 +721,11 @@ pub fn run(
                 rt.press.cancel();
                 running = false;
             },
+
+            // The backend has already adopted the new size, so this only has to
+            // ask for a frame; the dirty block reads the size back and resizes
+            // the canvas before painting.
+            .resize => dirty = true,
 
             // The press claims a region; the release only counts if it comes
             // back inside that same region. Hit-testing the release point
@@ -918,6 +957,20 @@ const Fake = struct {
     last_hash: u64 = 0,
     w: f32 = 200,
     h: f32 = 120,
+    /// The size the next `.resize` event adopts. A real backend has already
+    /// resized by the time it reports the event -- that is what makes the event
+    /// payload-free -- so the fake has to adopt it on the way out too, or it
+    /// would report a resize and keep answering the old size.
+    pending: elmz.Size = .{ .w = 200, .h = 120 },
+    /// What the last present actually handed over. The bug this guards is a
+    /// size mismatch between the canvas and the window, which nothing else in
+    /// the harness can see: a hash of the pixels says the frame was painted,
+    /// not that it was the right SIZE.
+    presented_len: usize = 0,
+    presented_size: elmz.Size = .{ .w = 0, .h = 0 },
+    /// Device pixels per logical unit, as the platform would report it. Default
+    /// 1x: a test that says nothing about density is testing the unscaled path.
+    density: f32 = 1.0,
     /// how many empty polls to answer before quitting, once the script runs out
     idle: usize = 0,
     spun: usize = 0,
@@ -930,6 +983,7 @@ const Fake = struct {
         .poll = poll,
         .present = present,
         .size = size,
+        .density = getDensity,
         .deinit = noop,
     };
 
@@ -937,7 +991,15 @@ const Fake = struct {
         const self: *Fake = @ptrCast(@alignCast(ptr));
         if (self.i < self.events.len) {
             defer self.i += 1;
-            return self.events[self.i];
+            const ev = self.events[self.i];
+            switch (ev) {
+                .resize => {
+                    self.w = self.pending.w;
+                    self.h = self.pending.h;
+                },
+                else => {},
+            }
+            return ev;
         }
         // A timeout (null) keeps the loop going, which is exactly how a
         // worker's result gets drained. Then quit, so tests terminate.
@@ -958,14 +1020,20 @@ const Fake = struct {
 
     fn present(ptr: *anyopaque, px: []const u8, s: elmz.Size) void {
         const self: *Fake = @ptrCast(@alignCast(ptr));
-        _ = s;
         self.frames += 1;
+        self.presented_len = px.len;
+        self.presented_size = s;
         self.last_hash = std.hash.Wyhash.hash(0, px);
     }
 
     fn size(ptr: *anyopaque) elmz.Size {
         const self: *Fake = @ptrCast(@alignCast(ptr));
         return .{ .w = self.w, .h = self.h };
+    }
+
+    fn getDensity(ptr: *anyopaque) f32 {
+        const self: *Fake = @ptrCast(@alignCast(ptr));
+        return self.density;
     }
 
     fn noop(_: *anyopaque) void {}
@@ -994,6 +1062,99 @@ test "runner paints once, then stops when the window says quit" {
     try std.testing.expectEqual(@as(u32, 1), stats.events);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
     try std.testing.expect(fake.last_hash != 0);
+}
+
+// The canvas was allocated once, outside the loop, while the frame was built
+// from `window.size()` read live. After a resize the tree laid out for the NEW
+// box painted into the OLD buffer: the pixels were a cropped corner of the
+// layout, and the hit rects -- built at the new size -- pointed at places the
+// picture did not show. That is why this asserts the presented SLICE LENGTH and
+// not just that a frame happened.
+test "a resize rebuilds the canvas at the size the window reports" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
+    defer rt.deinit();
+
+    const events = [_]elmz.Event{ .resize, .quit };
+    var fake: Fake = .{ .events = &events, .pending = .{ .w = 400, .h = 300 } };
+
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+
+    try std.testing.expectEqual(@as(u32, 400), canvas.w);
+    try std.testing.expectEqual(@as(u32, 300), canvas.h);
+    // The whole point: what reached the backend is a buffer of the new size.
+    try std.testing.expectEqual(@as(usize, 400 * 300 * 4), fake.presented_len);
+    try std.testing.expectEqual(@as(f32, 400), fake.presented_size.w);
+    try std.testing.expectEqual(@as(f32, 300), fake.presented_size.h);
+}
+
+// Density is the one number above the renderer that is not logical. It is worth
+// pinning down in both directions: the canvas must be allocated in DEVICE pixels
+// (or a 2x display shows a quarter of the screen), and layout must stay in
+// LOGICAL units (or every rect in an app is written twice).
+test "density sizes the canvas in device pixels while layout stays logical" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
+    defer rt.deinit();
+
+    // What the same text measures at 1x, through the same entry point.
+    const at_1x = canvas.renderer().measureText("inc", 16).width;
+
+    const events = [_]elmz.Event{.quit};
+    var fake: Fake = .{ .events = &events, .density = 2.0 };
+
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+
+    // Device pixels: a 200x120 logical window on a 2x display owns 400x240.
+    try std.testing.expectEqual(@as(f32, 2), canvas.scale);
+    try std.testing.expectEqual(@as(u32, 400), canvas.w);
+    try std.testing.expectEqual(@as(u32, 240), canvas.h);
+    try std.testing.expectEqual(@as(usize, 400 * 240 * 4), fake.presented_len);
+
+    // ...and the measurement is divided back, so a logical layout is unmoved by
+    // the density it was measured at. Measured at 2x, NOT scaled from 1x: the
+    // glyphs are grid-fitted at the size they will actually be rasterised at,
+    // so the two agree to within a pixel rather than exactly.
+    const at_2x = canvas.renderer().measureText("inc", 16).width;
+    try std.testing.expectApproxEqAbs(at_1x, at_2x, 1.0);
+
+    // A layout built at 2x still measures a button as label + 24, in logical
+    // units -- the 48 would be device pixels leaking upward.
+    var f = try rt.frame(.{ .w = 200, .h = 120 }, canvas.renderer());
+    defer f.deinit();
+    try std.testing.expectEqual(@as(usize, 1), f.hits.len);
+    const rect = f.hits[0].rect;
+    try std.testing.expectApproxEqAbs(at_2x + 24, rect.w, 0.01);
+}
+
+// A minimised window reports 0x0. Honouring that would free the pixel buffer
+// and hand the backend an empty slice the moment the compositor asks for a
+// frame, so the last one is kept instead.
+test "a minimised window keeps the frame it already had" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 120);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
+    defer rt.deinit();
+
+    const events = [_]elmz.Event{ .resize, .quit };
+    var fake: Fake = .{ .events = &events, .pending = .{ .w = 0, .h = 0 } };
+
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+
+    try std.testing.expectEqual(@as(u32, 200), canvas.w);
+    try std.testing.expectEqual(@as(u32, 120), canvas.h);
+    try std.testing.expectEqual(@as(usize, 200 * 120 * 4), fake.presented_len);
+
+    // Density must not resurrect the zero: 0 * anything is still no canvas.
+    try std.testing.expectEqual(@as(f32, 1), canvas.scale);
 }
 
 test "layout measures with the glyph metrics of the drawing backend" {

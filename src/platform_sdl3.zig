@@ -78,6 +78,10 @@ pub const Windows = struct {
     w: u32,
     h: u32,
     quit: bool = false,
+    /// Only this backend toggles fullscreen, so it owns the flag. Querying
+    /// SDL for it instead would mean comparing against a window-flags bit,
+    /// and that constant has no compile check in a sandbox without headers.
+    fullscreen: bool = false,
 
     /// `title` must be null-terminated.
     pub fn init(title: [:0]const u8, w: u32, h: u32) !Self {
@@ -87,8 +91,16 @@ pub const Windows = struct {
         }
         errdefer c.SDL_Quit();
 
-        // SDL3: visible by default — no SDL_WINDOW_SHOWN, no x/y.
-        const win = c.SDL_CreateWindow(title.ptr, @intCast(w), @intCast(h), 0) orelse {
+        // SDL3: visible by default — no SDL_WINDOW_SHOWN, no x/y. Resizable,
+        // because a window that cannot be resized is not the same thing as one
+        // that resizes correctly -- tiling window managers resize regardless,
+        // and the code has to cope either way.
+        const win = c.SDL_CreateWindow(
+            title.ptr,
+            @intCast(w),
+            @intCast(h),
+            c.SDL_WINDOW_RESIZABLE,
+        ) orelse {
             std.log.err("SDL_CreateWindow: {s}", .{c.SDL_GetError()});
             return error.SdlWindow;
         };
@@ -143,6 +155,7 @@ pub const Windows = struct {
         .poll = vtPoll,
         .present = vtPresent,
         .size = vtSize,
+        .density = vtDensity,
         .deinit = vtDeinit,
     };
 
@@ -204,6 +217,14 @@ pub const Windows = struct {
                     self.quit = true;
                     return .quit;
                 }
+                // Fullscreen is window policy like Escape-quits, not an app
+                // concern. The repaint comes from the resize event SDL sends
+                // after this, not from here.
+                if (ev.key.key == c.SDLK_F11 or ev.key.scancode == c.SDL_SCANCODE_F11) {
+                    self.fullscreen = !self.fullscreen;
+                    _ = c.SDL_SetWindowFullscreen(self.window, self.fullscreen);
+                    return null;
+                }
                 return .{ .key = keyEvent(ev.key) };
             },
             c.SDL_EVENT_KEY_UP => return .{ .key_up = keyEvent(ev.key) },
@@ -222,23 +243,65 @@ pub const Windows = struct {
                 .x = ev.wheel.mouse_x,
                 .y = ev.wheel.mouse_y,
             } },
+            // The window adopted the new size before this arrives, so the
+            // runner is free to read it back rather than trust a payload.
+            c.SDL_EVENT_WINDOW_RESIZED => return .resize,
             c.SDL_EVENT_TEXT_INPUT => return .{ .text = std.mem.span(ev.text.text) },
             else => return null,
         }
     }
 
-    fn vtPresent(ptr: *anyopaque, pixels: []const u8, size: elmz.Size) void {
+    /// Device pixels per logical unit. SDL reports this as the window's pixel
+    /// density, which is what a scaled Wayland output or a Windows display
+    /// scale reports -- 1.0 on an unscaled display, so the unscaled path costs
+    /// one call and changes nothing.
+    fn vtDensity(ptr: *anyopaque) f32 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const needed = @as(usize, self.w) * self.h * 4;
+        const d = c.SDL_GetWindowPixelDensity(self.window);
+        return if (d > 0) d else 1.0;
+    }
+
+    fn vtPresent(ptr: *anyopaque, pixels: []const u8, pixel_size: elmz.Size) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        // The same rounding the runner uses to size the canvas. These two have
+        // to agree to the pixel: the buffer handed in IS the canvas, and this
+        // number sizes the texture. Disagree by one and every frame is resampled
+        // by a hair -- the sort of softness that gets blamed on HiDPI.
+        const tw: u32 = if (pixel_size.w >= 1) @intFromFloat(@ceil(pixel_size.w)) else 1;
+        const th: u32 = if (pixel_size.h >= 1) @intFromFloat(@ceil(pixel_size.h)) else 1;
+        const needed = @as(usize, tw) * th * 4;
         if (pixels.len < needed) return;
+
+        // A streaming texture is a fixed size, so a resized window needs a new
+        // one. Without this the OLD texture is stretched onto the new output,
+        // which is why a resized window used to look magnified rather than
+        // merely bigger.
+        if (tw != self.w or th != self.h) {
+            const tex = c.SDL_CreateTexture(
+                self.renderer,
+                c.SDL_PIXELFORMAT_RGBA32,
+                c.SDL_TEXTUREACCESS_STREAMING,
+                @intCast(tw),
+                @intCast(th),
+            ) orelse {
+                std.log.err("SDL_CreateTexture (resize): {s}", .{c.SDL_GetError()});
+                return;
+            };
+            c.SDL_DestroyTexture(self.texture);
+            self.texture = tex;
+            self.w = tw;
+            self.h = th;
+        }
 
         _ = c.SDL_UpdateTexture(self.texture, null, pixels.ptr, @intCast(self.w * 4));
         _ = c.SDL_RenderClear(self.renderer);
         // null dstrect = scale to the whole output, which is also what keeps
-        // HiDPI from letterboxing.
+        // HiDPI from letterboxing. At density 1 that is exact; on a scaled
+        // display this upsampled a logical-size buffer, which is the HiDPI
+        // step and not this one.
         _ = c.SDL_RenderTexture(self.renderer, self.texture, null, null);
         _ = c.SDL_RenderPresent(self.renderer);
-        _ = size;
     }
 
     fn vtSize(ptr: *anyopaque) elmz.Size {

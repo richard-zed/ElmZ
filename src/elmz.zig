@@ -2472,6 +2472,13 @@ pub const Wheel = struct {
 pub const Event = union(enum) {
     /// window wants to close; the runner stops.
     quit,
+    /// The window's size changed, so the next frame must be built for a
+    /// different box. Deliberately carries NO payload: the backend has already
+    /// adopted the new size, so `Window.size()` is the answer and a number
+    /// carried here could only be a stale copy of it -- two sizes that disagree
+    /// is exactly the bug that made resizing draw one layout while the pointer
+    /// was tested against another.
+    resize,
     pointer_down: [2]f32,
     pointer_up: [2]f32,
     pointer_move: [2]f32,
@@ -2545,10 +2552,18 @@ pub const Window = struct {
     pub const VTable = struct {
         /// Next event, blocking up to `timeout_ms` (-1 = forever). null = timeout.
         poll: *const fn (ptr: *anyopaque, timeout_ms: i32) ?Event,
-        /// Hand a finished RGBA frame to the screen.
-        present: *const fn (ptr: *anyopaque, pixels: []const u8, logical: Size) void,
+        /// Hand a finished RGBA frame to the screen. `pixel_size` is the size of
+        /// that buffer in DEVICE pixels -- not the logical window size, which is
+        /// what a texture allocated at logical size would be the wrong size for.
+        present: *const fn (ptr: *anyopaque, pixels: []const u8, pixel_size: Size) void,
         /// Logical window size, in the same units events are reported in.
         size: *const fn (ptr: *anyopaque) Size,
+        /// Device pixels per logical unit; 1.0 is unscaled.
+        ///
+        /// This is the only quantity above the renderer that is not logical, and
+        /// it exists for exactly one reason: the canvas has to be allocated in
+        /// device pixels. Nothing else above the renderer should read it.
+        density: *const fn (ptr: *anyopaque) f32,
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
@@ -2556,12 +2571,16 @@ pub const Window = struct {
         return self.vtable.poll(self.ptr, timeout_ms);
     }
 
-    pub fn present(self: Window, pixels: []const u8, logical: Size) void {
-        self.vtable.present(self.ptr, pixels, logical);
+    pub fn present(self: Window, pixels: []const u8, pixel_size: Size) void {
+        self.vtable.present(self.ptr, pixels, pixel_size);
     }
 
     pub fn size(self: Window) Size {
         return self.vtable.size(self.ptr);
+    }
+
+    pub fn density(self: Window) f32 {
+        return self.vtable.density(self.ptr);
     }
 
     pub fn deinit(self: Window) void {

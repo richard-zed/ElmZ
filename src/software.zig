@@ -272,6 +272,21 @@ pub const Canvas = struct {
     /// the bytes -- the library ships no typeface.
     font: ttf.Font = .none,
 
+    /// Device pixels per logical unit -- the HiDPI density.
+    ///
+    /// Everything above the renderer works in LOGICAL units: layout, hit rects,
+    /// the pointer, every number an app writes. This is the SINGLE place that
+    /// converts any of it to pixels. At 1.0 every multiply is exact and the
+    /// output is bit-identical to what it was before the field existed, which
+    /// is what makes the pins the proof that density changed nothing at 1x.
+    ///
+    /// Applying it here rather than in layout is deliberate: SDL reports pointer
+    /// coordinates in logical units, so conversion at the edge would mean
+    /// converting them back, and a density change while a press is in flight
+    /// (dragging a window between monitors) would otherwise move the rects out
+    /// from under the claim.
+    scale: f32 = 1.0,
+
     const Mask = struct {
         /// Shape size this stencil was baked at. `sw == 0` marks a SLICE
         /// TEMPLATE, which stands in for every size at its radius and blur.
@@ -308,6 +323,25 @@ pub const Canvas = struct {
         return .{ .gpa = gpa, .w = w, .h = h, .px = px };
     }
 
+    /// Re-point the pixel buffer at `w` x `h`. The masks and the font survive:
+    /// a stencil is keyed on the SHAPE it covers, not on the canvas it lands in,
+    /// so a window resize invalidates none of them.
+    ///
+    /// A zero dimension is IGNORED rather than honoured. A minimised window
+    /// reports 0x0, and allocating nothing there would mean the next present
+    /// hands the backend an empty slice -- the window keeps its last frame
+    /// instead, which is what the compositor is already showing.
+    pub fn resize(self: *Self, w: u32, h: u32) !void {
+        if (w == 0 or h == 0) return;
+        if (w == self.w and h == self.h) return;
+        const px = try self.gpa.alloc(u8, @as(usize, w) * h * 4);
+        @memset(px, 0);
+        self.gpa.free(self.px);
+        self.px = px;
+        self.w = w;
+        self.h = h;
+    }
+
     pub fn deinit(self: *Self) void {
         for (self.masks.items) |m| self.gpa.free(m.px);
         self.masks.deinit(self.gpa);
@@ -322,6 +356,19 @@ pub const Canvas = struct {
             self.px[i + 2] = color.b;
             self.px[i + 3] = 255;
         }
+    }
+
+    /// Logical rect -> device rect. Returns the input unchanged at 1.0 rather
+    /// than multiplying by one, so the common case cannot accumulate so much as
+    /// an extra rounding step.
+    fn scaledRect(self: *const Self, r: elmz.Rect) elmz.Rect {
+        if (self.scale == 1.0) return r;
+        return .{
+            .x = r.x * self.scale,
+            .y = r.y * self.scale,
+            .w = r.w * self.scale,
+            .h = r.h * self.scale,
+        };
     }
 
     fn blendPixel(self: *Self, x: i64, y: i64, color: elmz.Color) void {
@@ -1364,34 +1411,75 @@ pub const Canvas = struct {
 
     fn vtFrost(ptr: *anyopaque, rect: elmz.Rect, radius: f32, blur: f32, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.frost(rect, radius, blur, clip);
+        self.frost(
+            self.scaledRect(rect),
+            radius * self.scale,
+            blur * self.scale,
+            self.scaledRect(clip),
+        );
     }
 
     fn vtHalo(ptr: *anyopaque, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.halo(rect, corner, h, clip);
+        var d = h;
+        if (self.scale != 1.0) {
+            d.blur = h.blur * self.scale;
+            d.spread = h.spread * self.scale;
+            d.offset = .{ h.offset[0] * self.scale, h.offset[1] * self.scale };
+        }
+        self.halo(self.scaledRect(rect), corner * self.scale, d, self.scaledRect(clip));
     }
 
     fn vtQuad(ptr: *anyopaque, rect: elmz.Rect, fill: elmz.Fill, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.fillRectClip(rect, fill, clip);
+        self.fillRectClip(self.scaledRect(rect), fill, self.scaledRect(clip));
     }
 
     fn vtRrect(ptr: *anyopaque, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.roundRectClip(rect, radius, fill, stroke, clip);
+        self.roundRectClip(
+            self.scaledRect(rect),
+            radius * self.scale,
+            fill,
+            stroke,
+            self.scaledRect(clip),
+        );
     }
 
     fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.drawTextClip(x, y, size, fill, bytes, clip);
+        self.drawTextClip(
+            x * self.scale,
+            y * self.scale,
+            size * self.scale,
+            fill,
+            bytes,
+            self.scaledRect(clip),
+        );
     }
 
+    /// Measured at the DEVICE size and divided back, never "measure logical and
+    /// hope". Advances are not exactly linear in point size -- hinting and
+    /// grid-fitting move stems by whole pixels -- so at 1.25x the width of a
+    /// string is not 1.25x the width measured at 1x, and a layout built on the
+    /// scaled-down number would disagree with the glyphs actually drawn.
     fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.font.measure(bytes, size);
+        if (self.scale == 1.0) return self.font.measure(bytes, size);
+        const m = self.font.measure(bytes, size * self.scale);
+        const inv = 1.0 / self.scale;
+        return .{
+            .width = m.width * inv,
+            .height = m.height * inv,
+            .ascent = m.ascent * inv,
+            .descent = m.descent * inv,
+            .line_height = m.line_height * inv,
+        };
     }
 
+    /// Wrapping is decided in DEVICE space for the same reason measurement is:
+    /// a line that fits at 1x can overflow at 1.5x, and the decision has to be
+    /// made against the glyphs that will actually be rasterised.
     fn vtWrap(
         ptr: *anyopaque,
         bytes: []const u8,
@@ -1400,7 +1488,8 @@ pub const Canvas = struct {
         out: [][]const u8,
     ) usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.font.wrapLines(bytes, size, max_width, out);
+        if (self.scale == 1.0) return self.font.wrapLines(bytes, size, max_width, out);
+        return self.font.wrapLines(bytes, size * self.scale, max_width * self.scale, out);
     }
 
     // -- PNG ----------------------------------------------------------------
