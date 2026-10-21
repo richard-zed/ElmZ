@@ -3099,6 +3099,11 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 .column => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
                 .row => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
                 .scroll => |c| self.injectScrollOffsets(c.child),
+                // A stack is a container like any other: without this arm the
+                // else-branch drops the whole subtree, and a viewport nested in
+                // an overlay never receives its offset -- it renders as if it
+                // could not scroll, with a thumb that is there and inert.
+                .stack => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
                 else => {},
             }
         }
@@ -4395,6 +4400,41 @@ test "a viewport records its content height and translates its content" {
         defer f.deinit();
         try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 105).?.rect.y);
         try std.testing.expectEqual(@as(?Hit(VPMsg), null), vpRegion(f.hits, 104));
+    }
+}
+
+/// The same viewport, nested inside a stack.
+///
+/// A container kind added after the scroll work has to be walked by
+/// `injectScrollOffsets` too. The switch ends in an else-branch, so a kind
+/// nobody listed is not an error -- it is a subtree that silently never
+/// receives its offset, and a viewport that renders with a thumb that is
+/// there, correctly sized, and inert.
+fn vpStackView(s: *VPState, ui: *Ui(VPMsg)) *Element(VPMsg) {
+    const page = vpView(s, ui);
+    return ui.stack(.{ .children = &.{page} });
+}
+
+test "a viewport inside a stack still receives its offset" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(VPState, VPMsg).init(gpa, .{}, vpUpdate, vpStackView);
+    defer rt.deinit();
+
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 100).?.rect.y);
+        try std.testing.expectEqual(@as(f32, 200), vpRegion(f.hits, 7).?.scroll.?.content_h);
+    }
+
+    // Row 0 scrolled out, row 2 took its place. Without the stack arm both
+    // assertions read as an unscrolled frame.
+    rt.scrollTo(7, 40);
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?Hit(VPMsg), null), vpRegion(f.hits, 100));
+        try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 102).?.rect.y);
     }
 }
 
