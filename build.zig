@@ -566,6 +566,48 @@ pub fn build(b: *std.Build) void {
     // set is what `zig build` installs, so a machine without SDL3 still has a
     // working default build; this step is the deliberate, explicit ask.
     // ---------------------------------------------------------------------
+    // The pre-widgets screen: a viewport with its automatic thumb, tabs, and a
+    // popup dismissed by a press that claimed nothing. Built by `zig build` (so
+    // it cannot rot unused) and by `zig build examples` with its window.
+    const panes = b.addExecutable(.{
+        .name = "panes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/panes.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+            },
+        }),
+    });
+    const panes_install = b.addInstallArtifact(panes, .{});
+    b.getInstallStep().dependOn(&panes_install.step);
+    b.step("panes", "build the headless panes example").dependOn(&panes_install.step);
+    b.step("run-panes", "run the headless panes example").dependOn(&runExample(b, panes).step);
+
+    const panes_win = b.addExecutable(.{
+        .name = "panes-sdl3",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/panes_window.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+                .{ .name = "platform_sdl3", .module = sdl_mod },
+            },
+        }),
+    });
+    b.step("panes-sdl3", "build panes in an SDL3 window (needs libsdl3-dev)").dependOn(
+        &b.addInstallArtifact(panes_win, .{}).step,
+    );
+    b.step("run-panes-sdl3", "run panes in an SDL3 window").dependOn(
+        &runExample(b, panes_win).step,
+    );
+
     const examples_step = b.step("examples", "build every example: headless + all SDL3 windows (windows need libsdl3-dev)");
 
     // headless
@@ -580,6 +622,7 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&showcase_exe_install.step);
     examples_step.dependOn(&glow_exe_install.step);
     examples_step.dependOn(&clicks_install.step);
+    examples_step.dependOn(&panes_install.step);
 
     // sdl3 windows
     examples_step.dependOn(&b.addInstallArtifact(win_exe, .{}).step);
@@ -590,4 +633,5 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&b.addInstallArtifact(paint_win, .{}).step);
     examples_step.dependOn(&b.addInstallArtifact(show_win, .{}).step);
     examples_step.dependOn(&radius_win_install.step);
+    examples_step.dependOn(&b.addInstallArtifact(panes_win, .{}).step);
 }
