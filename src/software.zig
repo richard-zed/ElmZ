@@ -272,6 +272,20 @@ pub const Canvas = struct {
     /// the bytes -- the library ships no typeface.
     font: ttf.Font = .none,
 
+    /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
+    /// A 64-bit collision would hand back the width of a different string, and
+    /// a wrong width is a layout bug that presents as a rendering bug. The
+    /// price is one copy per distinct string, bounded by `measure_cap`.
+    ///
+    /// Keyed on the DEVICE size, so a density change is a MISS rather than a
+    /// stale answer -- the same reasoning as the halo stencil's key.
+    measure_cache: std.HashMapUnmanaged(MeasureKey, elmz.TextMetrics, MeasureCtx, 80) = .empty,
+    /// Hit and miss counts. Nothing in the renderer reads them: they exist so a
+    /// benchmark and a test can tell a cached answer from a computed one.
+    measure_hits: usize = 0,
+    measure_misses: usize = 0,
+    font_loaded: bool = false,
+
     /// Device pixels per logical unit -- the HiDPI density.
     ///
     /// Everything above the renderer works in LOGICAL units: layout, hit rects,
@@ -313,8 +327,32 @@ pub const Canvas = struct {
     };
 
     /// Point the canvas at a face. `bytes` must outlive the canvas.
+    /// Distinct strings held before the cache empties itself. A screen holds a
+    /// few hundred labels; a counter that formats a fresh string every frame
+    /// would otherwise grow it without bound. The cap is a hard reset rather
+    /// than an LRU: resetting is cheap, correct, and needs no clock.
+    const measure_cap = 8192;
+
+    const MeasureKey = struct { text: []const u8, dev: f32 };
+    const MeasureCtx = struct {
+        pub fn hash(_: MeasureCtx, k: MeasureKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&k.dev));
+            h.update(k.text);
+            return h.final();
+        }
+        pub fn eql(_: MeasureCtx, a: MeasureKey, b: MeasureKey) bool {
+            return a.dev == b.dev and std.mem.eql(u8, a.text, b.text);
+        }
+    };
+
+    /// A different face answers every measurement differently, so the cache
+    /// goes with it. Not doing this would leave a canvas measuring new glyphs
+    /// with the old face's widths -- invisible until the layout drifts.
     pub fn setFont(self: *Self, bytes: []const u8) void {
+        if (self.font_loaded) self.clearMeasureCache();
         self.font = ttf.Font.init(bytes);
+        self.font_loaded = true;
     }
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
@@ -345,6 +383,8 @@ pub const Canvas = struct {
     pub fn deinit(self: *Self) void {
         for (self.masks.items) |m| self.gpa.free(m.px);
         self.masks.deinit(self.gpa);
+        self.clearMeasureCache();
+        self.measure_cache.deinit(self.gpa);
         self.gpa.free(self.px);
     }
 
@@ -1607,10 +1647,40 @@ pub const Canvas = struct {
     /// grid-fitting move stems by whole pixels -- so at 1.25x the width of a
     /// string is not 1.25x the width measured at 1x, and a layout built on the
     /// scaled-down number would disagree with the glyphs actually drawn.
+    /// Font metrics for one string, cached. `dev` is the DEVICE size; the
+    /// divide-back for HiDPI happens at the call site, so what is stored is the
+    /// number the glyphs were actually fitted at.
+    ///
+    /// The cache OWNS its key bytes. Pointing into the frame arena would dangle
+    /// at the next frame's reset, which is the trap that makes a naive version
+    /// corrupt rather than slow.
+    fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
+        const probe: MeasureKey = .{ .text = bytes, .dev = dev };
+        if (self.measure_cache.get(probe)) |m| {
+            self.measure_hits += 1;
+            return m;
+        }
+        self.measure_misses += 1;
+        const m = self.font.measure(bytes, dev);
+        if (self.measure_cache.count() >= measure_cap) self.clearMeasureCache();
+        const owned = self.gpa.dupe(u8, bytes) catch return m;
+        self.measure_cache.put(self.gpa, .{ .text = owned, .dev = dev }, m) catch {
+            self.gpa.free(owned);
+            return m;
+        };
+        return m;
+    }
+
+    fn clearMeasureCache(self: *Self) void {
+        var it = self.measure_cache.keyIterator();
+        while (it.next()) |k| self.gpa.free(k.text);
+        self.measure_cache.clearRetainingCapacity();
+    }
+
     fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        if (self.scale == 1.0) return self.font.measure(bytes, size);
-        const m = self.font.measure(bytes, size * self.scale);
+        const m = self.cachedMeasure(bytes, size * self.scale);
+        if (self.scale == 1.0) return m;
         const inv = 1.0 / self.scale;
         return .{
             .width = m.width * inv,
@@ -2983,4 +3053,32 @@ test "a painted frame exports opaque pixels through the PNG encoder" {
     };
     try testing.expectEqual([4]u8{ 200, 120, 60, 255 }, at.at(px, 5, 3));
     try testing.expectEqual([4]u8{ 30, 40, 50, 255 }, at.at(px, 0, 0));
+}
+
+test "a string is measured once, then answered from the cache" {
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 64, 32);
+    defer c.deinit();
+
+    const a = Canvas.vtMeasure(&c, "Hamburgefonstiv", 20);
+    const b = Canvas.vtMeasure(&c, "Hamburgefonstiv", 20);
+    try std.testing.expectEqual(a.width, b.width);
+    try std.testing.expectEqual(a.ascent, b.ascent);
+    try std.testing.expectEqual(a.line_height, b.line_height);
+    try std.testing.expectEqual(@as(usize, 1), c.measure_misses);
+    try std.testing.expectEqual(@as(usize, 1), c.measure_hits);
+
+    // A different size is a different question about the same bytes, not a hit.
+    const d = Canvas.vtMeasure(&c, "Hamburgefonstiv", 24);
+    try std.testing.expectEqual(@as(usize, 2), c.measure_misses);
+    try std.testing.expect(d.width > a.width);
+
+    // A different string is a different question at the same size.
+    _ = Canvas.vtMeasure(&c, "Ham", 20);
+    try std.testing.expectEqual(@as(usize, 3), c.measure_misses);
+
+    // Changing the face must not answer from the old face's widths.
+    c.setFont(@embedFile("font.ttf"));
+    _ = Canvas.vtMeasure(&c, "Hamburgefonstiv", 20);
+    try std.testing.expectEqual(@as(usize, 4), c.measure_misses);
 }
