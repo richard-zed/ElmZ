@@ -538,7 +538,13 @@ fn rowChildWidth(c: Extent, total_w: f32, total_min: f32, inner: f32) f32 {
 /// `start` and `center` exist for LABELS, which have no box of their own and
 /// otherwise sit on the top edge of a taller neighbour -- a caption beside a
 /// button is the case that makes the default look broken.
-pub const RowAlign = enum { stretch, start, center };
+///
+/// `baseline` is the one of the four that is about TYPE rather than boxes: the
+/// children keep their own heights and are moved so their first lines of text
+/// sit on a common baseline. It is what a checkbox beside its label needs, and
+/// what `center` only approximates -- centring lines up box middles, so a
+/// caption between a 16px control and a 24px heading lands slightly off both.
+pub const RowAlign = enum { stretch, start, center, baseline };
 
 pub const TextMetrics = struct {
     width: f32,
@@ -1118,6 +1124,50 @@ pub fn Element(comptime M: type) type {
             return rowChildWidth(cs, fit.total_w, fit.total_min, fit.inner);
         }
 
+        /// Distance from this element's TOP edge down to the baseline of the
+        /// first line of text it will draw, or null when it draws none.
+        ///
+        /// `w` and `h` are the box it will ACTUALLY paint in, not what it asked
+        /// for. A button centres its label in whatever height it is handed, so
+        /// its baseline moves when a row stretches it and cannot be answered
+        /// from the kind alone.
+        ///
+        /// A container borrows the first baseline it contains -- its first line
+        /// box, the same rule CSS uses. A nested row would strictly want the
+        /// deepest child, but a label column and a stacked label+detail are the
+        /// cases that actually occur, and both are answered by the first.
+        fn textBaseline(self: *const Self, r: Renderer, w: f32, h: f32) ?f32 {
+            switch (self.kind) {
+                .text => |t| return self.pad + r.measureText(t.bytes, t.size).ascent,
+                .button => |b| {
+                    const ts = r.measureText(b.label, b.size);
+                    return (h - ts.height) * 0.5 + ts.ascent;
+                },
+                .column => |c| {
+                    const inner_w = w - 2 * self.pad;
+                    var y = self.pad;
+                    for (c.children, 0..) |ch, i| {
+                        if (i > 0) y += self.gap;
+                        y += ch.space_before;
+                        const cs = ch.measure(r, inner_w);
+                        if (ch.textBaseline(r, ch.width orelse inner_w, cs.h)) |b| return y + b;
+                        y += cs.h;
+                        y += ch.space_after;
+                    }
+                    return null;
+                },
+                .row => |c| {
+                    const inner_w = w - 2 * self.pad;
+                    for (c.children) |ch| {
+                        const cs = ch.measure(r, inner_w);
+                        if (ch.textBaseline(r, ch.width orelse inner_w, cs.h)) |b| return self.pad + b;
+                    }
+                    return null;
+                },
+                else => return null,
+            }
+        }
+
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
             var s: Extent = switch (self.kind) {
                 .text => |t| blk: {
@@ -1179,6 +1229,27 @@ pub fn Element(comptime M: type) type {
                         if (self.disabled) ch.disabled = true;
                     }
                     const fit = rowFit(r, c.children, self.gap, inner);
+                    // A baseline row cannot be measured one child at a time:
+                    // the common baseline is the DEEPEST one, so every height
+                    // has to be known before any of them is placed. That is one
+                    // extra pass over the children, paid only by rows that ask
+                    // for it -- which is why this is not folded into the loop
+                    // below.
+                    var max_base: f32 = 0;
+                    if (self.row_align == .baseline) {
+                        for (c.children) |ch| {
+                            const cs = ch.measure(r, inner);
+                            const cw = rowWidth(cs, ch, fit);
+                            const at = if (cw < cs.w) ch.measure(r, cw) else cs;
+                            // An element with no text aligns its BOTTOM edge.
+                            // That is what a baseline-less box does in CSS, and
+                            // it is the answer that keeps a colour swatch or a
+                            // divider level with the label beside it instead of
+                            // floating at the top.
+                            const b = ch.textBaseline(r, cw, at.h) orelse at.h;
+                            max_base = @max(max_base, b);
+                        }
+                    }
                     var h: f32 = 0;
                     for (c.children) |ch| {
                         const cs = ch.measure(r, inner);
@@ -1187,7 +1258,16 @@ pub fn Element(comptime M: type) type {
                         // re-measured at the width it actually got, or the row
                         // reserves a height no child ever paints at.
                         const at = if (cw < cs.w) ch.measure(r, cw) else cs;
-                        h = @max(h, at.h);
+                        if (self.row_align == .baseline) {
+                            // The row is as tall as the deepest baseline plus
+                            // the tallest descent below it, NOT the tallest
+                            // child: dropping a short child moves it down, and
+                            // its bottom edge can end up below its neighbour's.
+                            const b = ch.textBaseline(r, cw, at.h) orelse at.h;
+                            h = @max(h, (max_base - b) + at.h);
+                        } else {
+                            h = @max(h, at.h);
+                        }
                     }
                     // A grow child eats the leftover, so the row claims the
                     // width it was offered rather than the sum of the parts.
@@ -1411,6 +1491,22 @@ pub fn Element(comptime M: type) type {
                     // taking no allocator: per-child extents cannot be held
                     // anywhere between here and there.
                     const fit = rowFit(r, c.children, self.gap, avail_w);
+                    // Same pre-pass `measure` runs, for the same reason: the
+                    // common baseline is the deepest child's, so placement
+                    // cannot begin until every child's has been found. Both
+                    // arms call `textBaseline` with the height each child will
+                    // PAINT at, which is what keeps a stretched button's label
+                    // and a loose caption on one line.
+                    var max_base: f32 = 0;
+                    if (self.row_align == .baseline) {
+                        for (c.children) |ch| {
+                            const cs = ch.measure(r, avail_w);
+                            const w0 = rowWidth(cs, ch, fit);
+                            const at = if (w0 < cs.w) ch.measure(r, w0) else cs;
+                            const b = ch.textBaseline(r, w0, at.h) orelse at.h;
+                            max_base = @max(max_base, b);
+                        }
+                    }
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) x += self.gap;
                         x += ch.space_before;
@@ -1426,6 +1522,10 @@ pub fn Element(comptime M: type) type {
                         };
                         const y = switch (self.row_align) {
                             .center => rect.y + self.pad + @max(0, (inner_h - ch_h) * 0.5),
+                            .baseline => blk_b: {
+                                const b = ch.textBaseline(r, w, ch_h) orelse ch_h;
+                                break :blk_b rect.y + self.pad + (max_base - b);
+                            },
                             .stretch, .start => rect.y + self.pad,
                         };
                         try ch.paint(r, .{ .x = x, .y = y, .w = w, .h = ch_h }, child_clip, ptr, hits, gpa, hov, th);
@@ -4191,6 +4291,64 @@ fn rectOfKey(f: anytype, k: u64) Rect {
         }
     }
     return .{ .x = -1, .y = -1, .w = -1, .h = -1 };
+}
+
+/// The y of the first text prim carrying exactly `bytes`. Text has no rect of
+/// its own, so a baseline test has to read the glyph origin itself.
+fn textYOf(f: anytype, bytes: []const u8) f32 {
+    for (f.prims) |p| switch (p) {
+        .text => |t| if (std.mem.eql(u8, t.bytes, bytes)) return t.y,
+        else => {},
+    };
+    return -999;
+}
+
+const BaseMsg = enum { noop };
+const BaseState = struct { mode: RowAlign = .baseline };
+
+fn baseUpdate(m: *BaseState, msg: BaseMsg) Action(BaseMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+fn baseView(s: *BaseState, ui: *Ui(BaseMsg)) *Element(BaseMsg) {
+    // A tall button and a loose caption: the button keeps its 60px box, the
+    // caption is only as tall as its glyphs. Centring would put the caption's
+    // MIDDLE on the button's middle; a baseline row puts the two lines of type
+    // on one line, which is the thing a reader actually sees.
+    const tall = ui.button(.{ .label = "tall", .msg = .noop, .key = 1, .height = 60 });
+    const caption = ui.text(.{ .label = "caption", .size = 16 });
+    const row = ui.row(.{ .children = &.{ tall, caption } });
+    row.row_align = s.mode;
+    return row;
+}
+
+test "a baseline row lines up the type, not the boxes" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(BaseState, BaseMsg).init(gpa, .{}, baseUpdate, baseView);
+    defer rt.deinit();
+
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 80 }, nominalRenderer());
+        defer f.deinit();
+        // Both are 16px type, so equal baselines mean equal glyph origins.
+        try std.testing.expectApproxEqAbs(textYOf(f, "tall"), textYOf(f, "caption"), 0.5);
+        // And the caption is NOT stretched to the button's box: its own height
+        // is what it was measured at, which is the difference from `stretch`.
+        const cap = rectOfKey(f, 1);
+        try std.testing.expectApproxEqAbs(@as(f32, 60), cap.h, 0.5);
+    }
+
+    // The same frame under `start` does not line the type up, which is what
+    // makes the assertion above worth having: it is comparing two things that
+    // can disagree.
+    rt.state.mode = .start;
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 80 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expect(@abs(textYOf(f, "tall") - textYOf(f, "caption")) > 0.5);
+    }
 }
 
 test "a grow child takes the leftover width and the others keep theirs" {
