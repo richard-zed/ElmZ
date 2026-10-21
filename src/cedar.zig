@@ -182,11 +182,11 @@ pub const Font = struct {
         }
     }
 
-    /// Draw a UTF-8 run. Placement, kerning and the advance rule match the stb
-    /// path line for line, INCLUDING its choice to apply a pair's kern twice
-    /// per gap -- once to place the glyph and once in the advance to the next.
-    /// Applying it once looks tidier and is wrong: the run drifts steadily
-    /// wider, which reads as individual letters landing a pixel late.
+    /// Draw a UTF-8 run. A kern pair is applied exactly once per gap, to place
+    /// the glyph, which is what `advanceOf` does -- so a drawn run is as wide
+    /// as its measure. The stb path this replaced applied the pair twice, once
+    /// here and again in the advance to the next glyph; that drifted steadily
+    /// wider and read as individual letters landing a pixel late.
     pub fn drawText(
         self: *const Font,
         px: []u8,
@@ -249,7 +249,6 @@ pub const Font = struct {
             }
 
             const hm = self.face.hMetrics(gid) catch cedar.HMetrics{ .advance = 0, .lsb = 0 };
-            if (prev != 0) pen += @as(f32, @floatFromInt(self.face.kern(prev, gid))) * s;
             pen += @as(f32, @floatFromInt(hm.advance)) * s;
             prev = gid;
         }
