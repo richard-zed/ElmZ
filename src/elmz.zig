@@ -995,6 +995,11 @@ pub fn Element(comptime M: type) type {
         /// rather than to a rectangle, so it survives reordering. Unique among
         /// siblings; unset means the old rect-based behaviour.
         key: ?u64 = null,
+        /// Displacement from a stack's content origin, in logical units.
+        /// IGNORED by every other kind: flow containers decide where children
+        /// go, a stack asks each child where it wants to be. Negative values
+        /// are legal and are how a tooltip sits above its anchor.
+        offset: [2]f32 = .{ 0, 0 },
 
         pub const Kind = union(enum) {
             column: struct { children: []const *Self },
@@ -1007,6 +1012,15 @@ pub fn Element(comptime M: type) type {
             text: struct { bytes: []const u8, size: f32 },
             button: struct { label: []const u8, size: f32 },
             bar: struct { value: f32 },
+            /// Children share ONE origin, each displaced by its own `offset`.
+            /// The only container where siblings may overlap, and the only way
+            /// an element paints outside the box flow gave it -- which is what
+            /// a dropdown, a tooltip and a modal all are.
+            ///
+            /// Later children paint later, so they sit on top AND appear later
+            /// in the hit list, where `hit` walks from the end. Overlap and
+            /// z-order therefore agree without either one being declared.
+            stack: struct { children: []const *Self },
             /// a plain sized box; the only kind with no intrinsic size
             rect: void,
         };
@@ -1278,6 +1292,30 @@ pub fn Element(comptime M: type) type {
                         .min_w = fit.total_min + 2 * self.pad,
                     };
                 },
+                .stack => |c| blk: {
+                    const inner_avail = (self.width orelse avail_w) - 2 * self.pad;
+                    var w: f32 = 0;
+                    var min_w: f32 = 0;
+                    var h: f32 = 0;
+                    for (c.children) |ch| {
+                        if (self.disabled) ch.disabled = true;
+                        // Every child is measured at the FULL inner width: they
+                        // are not side by side, so nothing is being shared out
+                        // and there is no reason to squeeze anyone.
+                        const cs = ch.measure(r, inner_avail);
+                        w = @max(w, ch.offset[0] + cs.w);
+                        min_w = @max(min_w, ch.offset[0] + cs.min_w);
+                        h = @max(h, ch.offset[1] + cs.h);
+                    }
+                    // A child hanging off the top or left does not make the box
+                    // smaller: the content box starts at zero whatever is
+                    // outside it, and a negative extent is not a size.
+                    break :blk .{
+                        .w = @max(0, w) + 2 * self.pad,
+                        .h = @max(0, h) + 2 * self.pad,
+                        .min_w = @max(0, min_w) + 2 * self.pad,
+                    };
+                },
                 .scroll => |c| blk: {
                     // A viewport takes its child's width and its own height.
                     // The child is measured at full height and clipped, which
@@ -1531,6 +1569,41 @@ pub fn Element(comptime M: type) type {
                         try ch.paint(r, .{ .x = x, .y = y, .w = w, .h = ch_h }, child_clip, ptr, hits, gpa, hov, th);
                         x += w;
                         x += ch.space_after;
+                    }
+                },
+
+                .stack => |c| {
+                    if (child_clip.isEmpty()) return;
+                    const avail_w = (self.width orelse rect.w) - 2 * self.pad;
+                    // Children are NOT clipped to the stack's own box unless it
+                    // sets `clips`. That is the point: a dropdown has to be able
+                    // to paint past the row that triggered it. They are still
+                    // confined to the inherited clip, so nothing escapes the
+                    // window or an ancestor that clips.
+                    //
+                    // A zero-height stack is the overlay idiom: it takes no
+                    // space in the flow around it, and its children still paint
+                    // and still claim the pointer, because a child's height
+                    // comes from its own measure and never from the stack.
+                    for (c.children) |ch| {
+                        if (self.disabled) ch.disabled = true;
+                        const cs = ch.measure(r, avail_w);
+                        const w = ch.width orelse cs.w;
+                        try ch.paint(
+                            r,
+                            .{
+                                .x = rect.x + self.pad + ch.offset[0],
+                                .y = rect.y + self.pad + ch.offset[1],
+                                .w = w,
+                                .h = cs.h,
+                            },
+                            child_clip,
+                            ptr,
+                            hits,
+                            gpa,
+                            hov,
+                            th,
+                        );
                     }
                 },
 
@@ -1899,6 +1972,19 @@ pub fn Ui(comptime M: type) type {
         pub fn row(self: *Self, o: RowOpts) *Elem {
             const e = self.mk(.{ .row = .{ .children = self.dupeKids(o.children) } });
             e.gap = o.gap;
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
+            return self.finish(e, o);
+        }
+
+        /// Same options as a column; `gap` is meaningless and ignored, because
+        /// no two stack children are adjacent. One declaration keeps a new
+        /// option landing in every container at once.
+        pub const StackOpts = ColumnOpts;
+
+        /// Children share an origin and may overlap. See `Kind.stack`.
+        pub fn stack(self: *Self, o: StackOpts) *Elem {
+            const e = self.mk(.{ .stack = .{ .children = self.dupeKids(o.children) } });
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
             return self.finish(e, o);
@@ -4291,6 +4377,72 @@ fn rectOfKey(f: anytype, k: u64) Rect {
         }
     }
     return .{ .x = -1, .y = -1, .w = -1, .h = -1 };
+}
+
+const StackMsg = enum { under, over };
+const StackState = struct {};
+
+fn stackUpdate(m: *StackState, msg: StackMsg) Action(StackMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+fn stackView(_: *StackState, ui: *Ui(StackMsg)) *Element(StackMsg) {
+    // A 100x40 control with a 60x20 one landed on its top-left corner: the
+    // arrangement a dropdown over a trigger makes.
+    const under = ui.button(.{ .label = "under", .msg = .under, .key = 1, .width = 100, .height = 40 });
+    const over = ui.button(.{ .label = "over", .msg = .over, .key = 2, .width = 60, .height = 20 });
+    return ui.stack(.{ .children = &.{ under, over } });
+}
+
+test "overlapping children: the later one takes the pointer and the one under it does not" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(StackState, StackMsg).init(gpa, .{}, stackUpdate, stackView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+
+    // The two boxes genuinely overlap -- the origin is shared, not stacked.
+    const a = rectOfKey(f, 1);
+    const b = rectOfKey(f, 2);
+    try std.testing.expectApproxEqAbs(a.x, b.x, 0.01);
+    try std.testing.expectApproxEqAbs(a.y, b.y, 0.01);
+
+    // Where they overlap the TOP one answers, and it is the later child.
+    try std.testing.expectEqual(StackMsg.over, f.hitTest(.{ 10, 10 }).?);
+    // Past its edge the one underneath still answers: overlap must not make
+    // the lower child unreachable everywhere, only where it is covered.
+    try std.testing.expectEqual(StackMsg.under, f.hitTest(.{ 80, 30 }).?);
+}
+
+test "a stack costs no flow space, so a popup can hang outside its trigger" {
+    const gpa = std.testing.allocator;
+    var ui = Ui(StackMsg).init(gpa);
+    defer ui.deinit();
+
+    const popup = ui.button(.{ .label = "menu", .msg = .over, .key = 2, .width = 60, .height = 20 });
+    const layer = ui.stack(.{ .children = &.{popup}, .height = 0 });
+    const r = nominalRenderer();
+
+    // Zero height means the column around it does not reserve room, which is
+    // what lets the child paint over the content below instead of pushing it.
+    try std.testing.expectApproxEqAbs(@as(f32, 0), layer.measure(r, 300).h, 0.01);
+    // ...while the child itself is still 20 tall and still measurable.
+    try std.testing.expectApproxEqAbs(@as(f32, 20), popup.measure(r, 300).h, 0.01);
+
+    // A displacement keeps the child inside the stack's box...
+    popup.offset = .{ 70, 40 };
+    try std.testing.expectApproxEqAbs(@as(f32, 130), layer.measure(r, 300).w, 0.01);
+    // Vertically the explicit 0 WINS over the child, and that override is the
+    // overlay idiom rather than an accident: a stack that grew back to its
+    // child's height would reserve the room it exists to avoid.
+    try std.testing.expectApproxEqAbs(@as(f32, 0), layer.measure(r, 300).h, 0.01);
+    // ...and a negative one does not shrink the box below zero.
+    popup.offset = .{ -200, -200 };
+    const neg = layer.measure(r, 300);
+    try std.testing.expect(neg.w >= 0 and neg.h >= 0);
 }
 
 /// The y of the first text prim carrying exactly `bytes`. Text has no rect of
