@@ -284,7 +284,16 @@ pub const Canvas = struct {
     /// benchmark and a test can tell a cached answer from a computed one.
     measure_hits: usize = 0,
     measure_misses: usize = 0,
-    font_loaded: bool = false,
+
+    /// Line breaks for one (string, size, width), keyed and owned exactly like
+    /// `measure_cache`. What a wrap produces is a set of SLICES into the
+    /// caller's bytes, plus a pointer into the caller's `out` array, so nothing
+    /// it returns can be stored: the entry keeps break OFFSETS and rebuilds the
+    /// slices on a hit. Caching the slices would mean holding a pointer into a
+    /// frame that has since been reset.
+    wrap_cache: std.HashMapUnmanaged(WrapKey, WrapEntry, WrapCtx, 80) = .empty,
+    wrap_hits: usize = 0,
+    wrap_misses: usize = 0,
 
     /// Device pixels per logical unit -- the HiDPI density.
     ///
@@ -326,33 +335,61 @@ pub const Canvas = struct {
         px: []u8 = &.{}, // coverage, one byte per pixel; set by `admit`
     };
 
-    /// Point the canvas at a face. `bytes` must outlive the canvas.
     /// Distinct strings held before the cache empties itself. A screen holds a
     /// few hundred labels; a counter that formats a fresh string every frame
     /// would otherwise grow it without bound. The cap is a hard reset rather
     /// than an LRU: resetting is cheap, correct, and needs no clock.
     const measure_cap = 8192;
 
-    const MeasureKey = struct { text: []const u8, dev: f32 };
+    /// Distinct strings held before the wrap cache empties itself.
+    const wrap_cap = 2048;
+
+    /// `face` is the typeface's fingerprint, and it is in the key because
+    /// `font` is a PUBLIC field: `setFont` clears both caches, but nothing
+    /// stops a caller assigning a face directly, and without the fingerprint
+    /// the old face's widths would answer for the new glyphs -- a layout bug
+    /// that presents as a rendering bug, which is the worst kind to chase.
+    const MeasureKey = struct { text: []const u8, dev: f32, face: usize };
     const MeasureCtx = struct {
         pub fn hash(_: MeasureCtx, k: MeasureKey) u64 {
             var h = std.hash.Wyhash.init(0);
             h.update(std.mem.asBytes(&k.dev));
+            h.update(std.mem.asBytes(&k.face));
             h.update(k.text);
             return h.final();
         }
         pub fn eql(_: MeasureCtx, a: MeasureKey, b: MeasureKey) bool {
-            return a.dev == b.dev and std.mem.eql(u8, a.text, b.text);
+            return a.dev == b.dev and a.face == b.face and std.mem.eql(u8, a.text, b.text);
         }
     };
 
-    /// A different face answers every measurement differently, so the cache
-    /// goes with it. Not doing this would leave a canvas measuring new glyphs
-    /// with the old face's widths -- invisible until the layout drifts.
+    const WrapKey = struct { text: []const u8, dev: f32, max_w: f32, face: usize };
+    /// `offsets` holds start/end PAIRS, so its length is `2 * n`.
+    const WrapEntry = struct { offsets: []u32, n: usize };
+    const WrapCtx = struct {
+        pub fn hash(_: WrapCtx, k: WrapKey) u64 {
+            var h = std.hash.Wyhash.init(1);
+            h.update(std.mem.asBytes(&k.dev));
+            h.update(std.mem.asBytes(&k.max_w));
+            h.update(std.mem.asBytes(&k.face));
+            h.update(k.text);
+            return h.final();
+        }
+        pub fn eql(_: WrapCtx, a: WrapKey, b: WrapKey) bool {
+            return a.dev == b.dev and a.max_w == b.max_w and a.face == b.face and
+                std.mem.eql(u8, a.text, b.text);
+        }
+    };
+
+    /// Point the canvas at a face. `bytes` must outlive the canvas.
+    ///
+    /// A different face answers every measurement differently, so both caches
+    /// go with it. Cleared unconditionally: emptying an empty map is free, and
+    /// the flag that used to guard it was a field doing the same work.
     pub fn setFont(self: *Self, bytes: []const u8) void {
-        if (self.font_loaded) self.clearMeasureCache();
+        self.clearMeasureCache();
+        self.clearWrapCache();
         self.font = ttf.Font.init(bytes);
-        self.font_loaded = true;
     }
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
@@ -385,6 +422,8 @@ pub const Canvas = struct {
         self.masks.deinit(self.gpa);
         self.clearMeasureCache();
         self.measure_cache.deinit(self.gpa);
+        self.clearWrapCache();
+        self.wrap_cache.deinit(self.gpa);
         self.gpa.free(self.px);
     }
 
@@ -789,11 +828,6 @@ pub const Canvas = struct {
         }
     }
 
-    fn scaleFor(size: f32) i64 {
-        const s = @round(size / 7.0);
-        return if (s < 1) 1 else @intFromFloat(s);
-    }
-
     /// TrueType text, drawn by the same font that measured it.
     pub fn drawText(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8) void {
         self.drawTextClip(x, y, size, fill, bytes, elmz.Rect.unbounded);
@@ -801,45 +835,6 @@ pub const Canvas = struct {
 
     pub fn drawTextClip(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
         self.font.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
-    }
-
-    /// The original 5x7 bitmap renderer, kept for tests and as the "no font"
-    /// fallback path.
-    pub fn drawTextBitmap(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8) void {
-        const s = scaleFor(size);
-        const bm = measureTextBitmap(bytes, size);
-        const box: elmz.Rect = .{ .x = x, .y = y, .w = bm.width, .h = bm.height };
-        const solid_c: ?elmz.Color = switch (fill) {
-            .solid => |cc| cc,
-            else => null,
-        };
-        var cursor: i64 = @intFromFloat(@floor(x));
-        const top: i64 = @intFromFloat(@floor(y));
-        for (bytes) |ch| {
-            const rows = glyph(ch);
-            for (rows, 0..) |row, ry| {
-                const bits: u32 = row;
-                var col: u5 = 0;
-                while (col < 5) : (col += 1) {
-                    const shift: u5 = 4 - col;
-                    if ((bits >> shift) & 1 == 0) continue;
-                    var dy: i64 = 0;
-                    while (dy < s) : (dy += 1) {
-                        var dx: i64 = 0;
-                        while (dx < s) : (dx += 1) {
-                            const px_x = cursor + @as(i64, col) * s + dx;
-                            const px_y = top + @as(i64, @intCast(ry)) * s + dy;
-                            self.blendPixel(px_x, px_y, solid_c orelse fill.colorAt(
-                                box,
-                                @as(f32, @floatFromInt(px_x)) + 0.5,
-                                @as(f32, @floatFromInt(px_y)) + 0.5,
-                            ));
-                        }
-                    }
-                }
-            }
-            cursor += 6 * s;
-        }
     }
 
     fn blendCoverage(self: *Self, x: i64, y: i64, color: elmz.Color, cov: f32) void {
@@ -1563,20 +1558,6 @@ pub const Canvas = struct {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = name, .data = png });
     }
 
-    pub fn measureTextBitmap(bytes: []const u8, size: f32) elmz.TextMetrics {
-        const s = scaleFor(size);
-        const n: i64 = @intCast(bytes.len);
-        const h: f32 = @floatFromInt(7 * s);
-        if (n == 0) return .{ .width = 0, .height = h, .ascent = h, .descent = 0, .line_height = h };
-        return .{
-            .width = @floatFromInt(n * 6 * s - s),
-            .height = h,
-            .ascent = h,
-            .descent = 0,
-            .line_height = h,
-        };
-    }
-
     // -- the elmz.Renderer vtable -------------------------------------------
 
     pub fn renderer(self: *Self) elmz.Renderer {
@@ -1655,7 +1636,8 @@ pub const Canvas = struct {
     /// at the next frame's reset, which is the trap that makes a naive version
     /// corrupt rather than slow.
     fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
-        const probe: MeasureKey = .{ .text = bytes, .dev = dev };
+        const face = self.font.fingerprint();
+        const probe: MeasureKey = .{ .text = bytes, .dev = dev, .face = face };
         if (self.measure_cache.get(probe)) |m| {
             self.measure_hits += 1;
             return m;
@@ -1664,7 +1646,7 @@ pub const Canvas = struct {
         const m = self.font.measure(bytes, dev);
         if (self.measure_cache.count() >= measure_cap) self.clearMeasureCache();
         const owned = self.gpa.dupe(u8, bytes) catch return m;
-        self.measure_cache.put(self.gpa, .{ .text = owned, .dev = dev }, m) catch {
+        self.measure_cache.put(self.gpa, .{ .text = owned, .dev = dev, .face = face }, m) catch {
             self.gpa.free(owned);
             return m;
         };
@@ -1675,6 +1657,55 @@ pub const Canvas = struct {
         var it = self.measure_cache.keyIterator();
         while (it.next()) |k| self.gpa.free(k.text);
         self.measure_cache.clearRetainingCapacity();
+    }
+
+    fn clearWrapCache(self: *Self) void {
+        var it = self.wrap_cache.iterator();
+        while (it.next()) |e| {
+            self.gpa.free(e.key_ptr.text);
+            self.gpa.free(e.value_ptr.offsets);
+        }
+        self.wrap_cache.clearRetainingCapacity();
+    }
+
+    /// Where a paragraph breaks, cached like a measurement -- because wrapping
+    /// IS measuring: it walks every glyph to find where a line can end. A
+    /// wrapped label asks the same question more than once per frame (layout,
+    /// the row fit, then paint), so the second and third ask are now free.
+    fn cachedWrap(self: *Self, bytes: []const u8, dev: f32, max_w: f32, out: [][]const u8) usize {
+        if (out.len == 0) return 0;
+        const face = self.font.fingerprint();
+        if (self.wrap_cache.get(.{ .text = bytes, .dev = dev, .max_w = max_w, .face = face })) |e| {
+            self.wrap_hits += 1;
+            const n = @min(e.n, out.len);
+            for (0..n) |i| out[i] = bytes[e.offsets[2 * i]..e.offsets[2 * i + 1]];
+            return n;
+        }
+        self.wrap_misses += 1;
+        const n = self.font.wrapLines(bytes, dev, max_w, out);
+        if (self.wrap_cache.count() >= wrap_cap) self.clearWrapCache();
+        // `wrapLines` returns subslices of `bytes`, so a break is an offset
+        // into the text and never a pointer into anything borrowed.
+        const owned = self.gpa.dupe(u8, bytes) catch return n;
+        const offsets = self.gpa.alloc(u32, n * 2) catch {
+            self.gpa.free(owned);
+            return n;
+        };
+        for (out[0..n], 0..) |line, i| {
+            const off: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(bytes.ptr));
+            offsets[2 * i] = off;
+            offsets[2 * i + 1] = off + @as(u32, @intCast(line.len));
+        }
+        self.wrap_cache.put(
+            self.gpa,
+            .{ .text = owned, .dev = dev, .max_w = max_w, .face = face },
+            .{ .offsets = offsets, .n = n },
+        ) catch {
+            self.gpa.free(owned);
+            self.gpa.free(offsets);
+            return n;
+        };
+        return n;
     }
 
     fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
@@ -1702,8 +1733,8 @@ pub const Canvas = struct {
         out: [][]const u8,
     ) usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        if (self.scale == 1.0) return self.font.wrapLines(bytes, size, max_width, out);
-        return self.font.wrapLines(bytes, size * self.scale, max_width * self.scale, out);
+        if (self.scale == 1.0) return self.cachedWrap(bytes, size, max_width, out);
+        return self.cachedWrap(bytes, size * self.scale, max_width * self.scale, out);
     }
 
     // -- PNG ----------------------------------------------------------------
@@ -1792,67 +1823,6 @@ pub const Canvas = struct {
 // ---------------------------------------------------------------------------
 // 5x7 font. MSB is the leftmost pixel.
 // ---------------------------------------------------------------------------
-
-fn glyph(ch: u8) [7]u5 {
-    const c = std.ascii.toUpper(ch);
-    return switch (c) {
-        'A' => .{ 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 },
-        'B' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110 },
-        'C' => .{ 0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110 },
-        'D' => .{ 0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100 },
-        'E' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111 },
-        'F' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000 },
-        'G' => .{ 0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111 },
-        'H' => .{ 0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 },
-        'I' => .{ 0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110 },
-        'J' => .{ 0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100 },
-        'K' => .{ 0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001 },
-        'L' => .{ 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111 },
-        'M' => .{ 0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001 },
-        'N' => .{ 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001 },
-        'O' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
-        'P' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000 },
-        'Q' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101 },
-        'R' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001 },
-        'S' => .{ 0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110 },
-        'T' => .{ 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100 },
-        'U' => .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
-        'V' => .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100 },
-        'W' => .{ 0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001 },
-        'X' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001 },
-        'Y' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100 },
-        'Z' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111 },
-        '0' => .{ 0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110 },
-        '1' => .{ 0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110 },
-        '2' => .{ 0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111 },
-        '3' => .{ 0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110 },
-        '4' => .{ 0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010 },
-        '5' => .{ 0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110 },
-        '6' => .{ 0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110 },
-        '7' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000 },
-        '8' => .{ 0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110 },
-        '9' => .{ 0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100 },
-        '+' => .{ 0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000 },
-        '-' => .{ 0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000 },
-        '=' => .{ 0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000 },
-        '.' => .{ 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100 },
-        ':' => .{ 0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000 },
-        '/' => .{ 0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000 },
-        '!' => .{ 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100 },
-        '%' => .{ 0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011 },
-        '(' => .{ 0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010 },
-        ')' => .{ 0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000 },
-        '>' => .{ 0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000 },
-        '<' => .{ 0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010 },
-        ',' => .{ 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110, 0b00100 },
-        '\'' => .{ 0b00100, 0b00100, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000 },
-        '_' => .{ 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111 },
-        ';' => .{ 0b00000, 0b00110, 0b00110, 0b00000, 0b00110, 0b00110, 0b00100 },
-        '?' => .{ 0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100 },
-        '*' => .{ 0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000 },
-        else => .{ 0, 0, 0, 0, 0, 0, 0 },
-    };
-}
 
 // ---------------------------------------------------------------------------
 // the rasterizer, under test instead of under eyeball
@@ -3081,4 +3051,33 @@ test "a string is measured once, then answered from the cache" {
     c.setFont(@embedFile("font.ttf"));
     _ = Canvas.vtMeasure(&c, "Hamburgefonstiv", 20);
     try std.testing.expectEqual(@as(usize, 4), c.measure_misses);
+}
+
+test "a paragraph is wrapped once, then answered from the cache" {
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 64, 32);
+    defer c.deinit();
+    const r = c.renderer();
+    const text = "the quick brown fox jumps over the lazy dog";
+
+    var a: [8][]const u8 = undefined;
+    var b: [8][]const u8 = undefined;
+    const na = r.wrapText(text, 12, 60, &a);
+    try std.testing.expect(na > 1);
+    try std.testing.expectEqual(@as(usize, 1), c.wrap_misses);
+
+    const nb = r.wrapText(text, 12, 60, &b);
+    try std.testing.expectEqual(na, nb);
+    try std.testing.expectEqual(@as(usize, 1), c.wrap_hits);
+    // A hit rebuilds the slices, so they must land on the same text.
+    for (a[0..na], b[0..nb]) |x, y| try std.testing.expectEqualStrings(x, y);
+
+    // A different width is a different question about the same bytes.
+    _ = r.wrapText(text, 12, 200, &a);
+    try std.testing.expectEqual(@as(usize, 2), c.wrap_misses);
+
+    // And a new face invalidates it, like the measurement cache.
+    c.setFont(@embedFile("font.ttf"));
+    _ = r.wrapText(text, 12, 60, &b);
+    try std.testing.expectEqual(@as(usize, 3), c.wrap_misses);
 }

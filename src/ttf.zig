@@ -28,6 +28,13 @@ pub const Font = struct {
 
     pub const none: Font = .{};
 
+    /// Cheap identity for caches asking "which face is this". A face decodes to
+    /// a pointer into the bytes it borrows, so two live faces cannot share one
+    /// -- which is the only case a canvas can be in.
+    pub fn fingerprint(self: Font) usize {
+        return if (self.ok) @intFromPtr(self.info.data) else 0;
+    }
+
     /// Borrow `bytes`. They must outlive every use of the returned font.
     pub fn init(bytes: []const u8) Font {
         var f: Font = .{};

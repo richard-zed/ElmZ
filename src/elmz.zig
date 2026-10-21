@@ -417,7 +417,12 @@ pub const Halo = struct {
     /// There is deliberately no `auto`. One existed to hide a size threshold --
     /// small ramps went to the distance field on the argument that they left too
     /// little to cache -- and the benchmark inverted that at every blur measured:
-    /// baked wins cold as well as hot, and still wins when the cache thrashes.
+    /// baked wins cold as well as hot, by 2.5-2.7x per call at every blur
+    /// measured, and a bake amortises within a couple of frames. The stencil
+    /// cache also plateaus -- sixteen distinct silhouettes resolve to five
+    /// entries, because the aspect bucket shares them -- so the thrash case the
+    /// old wording hedged against takes sixteen shapes redrawn every frame to
+    /// appear at all.
     /// A value that always resolves to the default is a synonym, not a choice,
     /// so it was deleted rather than left to imply a distinction.
     ///
@@ -832,7 +837,9 @@ pub fn Hit(comptime M: type) type {
         /// Identity of the element that produced this region, if it declared
         /// one. A keyed press re-binds to the element carrying the same key
         /// instead of to a rectangle, so it survives the content reordering
-        /// around it. Sibling keys must be unique; nothing enforces that yet.
+        /// around it. Keys are unique within a frame: a second region carrying
+        /// the same key is reported through the error band rather than quietly
+        /// rebinding a press to whichever twin it met first.
         key: ?u64 = null,
         /// mirrors the element's `disabled`: recorded so a press can be
         /// cancelled when the element it claimed turns inert mid-gesture.
@@ -1477,7 +1484,14 @@ pub fn Element(comptime M: type) type {
             // not only for things that produce a message: a focusable control
             // with no message is exactly the case where Tab had nothing to
             // land on, because the only region recorded was a press.
-            if (self.on_press != null or (self.focusable and self.key != null)) {
+            // A keyed scroll viewport records its OWN region further down: that
+            // region has to carry the scroll extent, and it has to be laid down
+            // before the content so a control inside still wins the pointer.
+            // Emitting the generic region as well would put two hits under one
+            // key, and the frame-global duplicate-key guard would then report
+            // an app for using the feature as documented.
+            const viewport_claims_this = std.meta.activeTag(self.kind) == .scroll and self.key != null;
+            if (!viewport_claims_this and (self.on_press != null or (self.focusable and self.key != null))) {
                 try hitAppend(M, hits, gpa, rect, clip, self.on_press, self.key, !self.disabled, self.radius, self.focusable and self.key != null);
             }
 
@@ -1651,10 +1665,17 @@ pub fn Element(comptime M: type) type {
                     // in the content still wins the pointer. Recorded with no
                     // message: scrolling produces an offset, not a Msg.
                     if (self.key) |k| {
+                        // Everything the generic region would have carried
+                        // rides here instead, because this region IS the
+                        // element's identity now: its message, whether a press
+                        // still counts, and whether Tab may land on it.
                         try hits.append(gpa, .{
                             .rect = inner,
                             .clip = vp,
+                            .msg = self.on_press,
                             .key = k,
+                            .active = !self.disabled,
+                            .focusable = self.focusable,
                             .scroll = .{ .content_h = cs.h, .view_h = inner.h },
                         });
                     }
@@ -1752,6 +1773,10 @@ pub fn Ui(comptime M: type) type {
         dead: Elem,
 
         /// Current offset for a keyed viewport, or 0 if it has never moved.
+        ///
+        /// Read from `scrolls`, the slice this frame gave `view`, so it is the
+        /// answer to use INSIDE `view`. Outside a frame, `scrollOffset` reads
+        /// the runtime's own store instead.
         pub fn scrollAt(self: *const Self, key: ?u64) f32 {
             const k = key orelse return 0;
             for (self.scrolls) |s| {
@@ -2295,6 +2320,12 @@ pub fn Collector(comptime M: type) type {
         const Self = @This();
         gpa: Allocator,
         prims: std.ArrayList(Primitive) = .empty,
+        /// Set when a primitive could not be recorded because the list could
+        /// not grow. A dropped primitive is a hole in the frame -- the picture
+        /// stops matching the tree that asked for it -- so `frame` reports it
+        /// through the same band as a failed allocation, instead of drawing a
+        /// screen that is merely missing something with no complaint.
+        failed: bool = false,
         /// Where layout gets its glyph metrics. This is the renderer that will
         /// draw the frame: if it is anything else, text is measured at one
         /// width and painted at another.
@@ -2323,13 +2354,17 @@ pub fn Collector(comptime M: type) type {
                 .radius = radius,
                 .blur = blur,
                 .clip = clip,
-            } }) catch {};
+            } }) catch {
+                self.failed = true;
+            };
         }
 
         fn vtQuad(ptr: *anyopaque, rect: Rect, fill: Fill, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             if (rect.intersect(clip).isEmpty()) return;
-            self.prims.append(self.gpa, .{ .quad = .{ .rect = rect, .fill = fill, .clip = clip } }) catch {};
+            self.prims.append(self.gpa, .{ .quad = .{ .rect = rect, .fill = fill, .clip = clip } }) catch {
+                self.failed = true;
+            };
         }
 
         fn vtRrect(ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void {
@@ -2341,7 +2376,9 @@ pub fn Collector(comptime M: type) type {
                 .fill = fill,
                 .stroke = stroke,
                 .clip = clip,
-            } }) catch {};
+            } }) catch {
+                self.failed = true;
+            };
         }
 
         fn vtHalo(ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void {
@@ -2357,7 +2394,9 @@ pub fn Collector(comptime M: type) type {
                 .h = rect.h + grow * 2,
             };
             if (box.intersect(clip).isEmpty()) return;
-            self.prims.append(self.gpa, .{ .halo = .{ .rect = rect, .corner = corner, .halo = h, .clip = clip } }) catch {};
+            self.prims.append(self.gpa, .{ .halo = .{ .rect = rect, .corner = corner, .halo = h, .clip = clip } }) catch {
+                self.failed = true;
+            };
         }
         fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
@@ -2374,7 +2413,9 @@ pub fn Collector(comptime M: type) type {
                 .fill = fill,
                 .bytes = bytes,
                 .clip = clip,
-            } }) catch {};
+            } }) catch {
+                self.failed = true;
+            };
         }
 
         fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) TextMetrics {
@@ -2908,13 +2949,9 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
 
         /// view -> measure -> paint. Returns primitives plus hit regions.
         ///
-        /// `metrics` is the renderer that will draw this frame, normally
-        /// `canvas.renderer()`. It is not optional on purpose: layout and
-        /// rasterisation must agree on glyph widths, and the only way to
-        /// guarantee that is to measure with the thing that paints.
-        ///
-        /// The returned frame owns its data (including text bytes) and stays
-        /// valid until `deinit()`, even across later `frame()` calls.
+        /// Offset from the runtime's own store, which exists whether or not a
+        /// frame is being built. `scrollAt` answers the same question from the
+        /// copy the current frame handed to `view`.
         fn scrollAtKey(self: *const Self, key: ?u64) f32 {
             const k = key orelse return 0;
             for (self.scroll_slots[0..self.scroll_n]) |s| {
@@ -2985,6 +3022,13 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             }
         }
 
+        /// `metrics` is the renderer that will draw this frame, normally
+        /// `canvas.renderer()`. It is not optional on purpose: layout and
+        /// rasterisation must agree on glyph widths, and the only way to
+        /// guarantee that is to measure with the thing that paints.
+        ///
+        /// The returned frame owns its data (including text bytes) and stays
+        /// valid until `deinit()`, even across later `frame()` calls.
         pub fn frame(self: *Self, size: Size, metrics: Renderer) !FrameT {
             self.ui.reset();
             // `failed` describes THIS build, so it cannot outlive a reset: an
@@ -3071,6 +3115,12 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                     };
                 }
             }
+            // A primitive the Collector could not record is a hole in the
+            // frame, not a rendering choice, so it is raised the same way a
+            // failed allocation is -- and, like that one, above the band block,
+            // because a failure reported below the band never gets drawn.
+            if (collector.failed) self.ui.failWith(.layout_allocation);
+
             // A failed allocation leaves the tree structurally degraded so
             // that `view` can stay infallible. Painting that degraded tree
             // silently would hide the bug behind a screen that merely looks
@@ -4648,4 +4698,86 @@ test "a thumb exists only when there is overflow, and claims where it paints" {
             if (h.drag != null) return error.ThumbWithoutOverflow;
         }
     }
+}
+
+test "a keyed scroll viewport is one region, so it cannot collide with itself" {
+    const VM = enum { press };
+    const VS = struct {};
+    const VH = struct {
+        fn upd(_: *VS, _: VM) Action(VM) {
+            return .{};
+        }
+        fn view(_: *VS, ui: *Ui(VM)) *Element(VM) {
+            var kids: [12]*Element(VM) = undefined;
+            for (&kids, 0..) |*k, i| {
+                k.* = ui.rect(.{ .width = 80, .height = 20, .key = 200 + i });
+            }
+            const col = ui.column(.{ .children = &kids });
+            const vp = ui.scroll(.{ .key = 7, .height = 100, .child = col, .on_press = .press });
+            // Focusable is a plain field: it exists for the Tab order, which no
+            // builder needs to spell out.
+            vp.focusable = true;
+            return ui.column(.{ .children = &.{vp} });
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    var rt = Runtime(VS, VM).init(gpa, .{}, VH.upd, VH.view);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+    defer f.deinit();
+
+    // The old behaviour recorded the generic region AND the viewport region
+    // under one key, and the duplicate-key guard reported the app for using
+    // scrolling the way it is documented.
+    var seen: usize = 0;
+    var vp: ?Hit(VM) = null;
+    for (f.hits) |h| {
+        if (h.key == 7) {
+            seen += 1;
+            vp = h;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+    const v = vp orelse return error.NoViewportRegion;
+    // One region still has to do every job the two did between them.
+    try std.testing.expectEqual(@as(?VM, .press), v.msg);
+    try std.testing.expect(v.focusable);
+    try std.testing.expect(v.active);
+    try std.testing.expect(v.scroll != null);
+    try std.testing.expect(!rt.ui.failed);
+
+    // And the offset is readable from both sides of a frame.
+    try std.testing.expectEqual(@as(f32, 0), rt.ui.scrollAt(7));
+    rt.scrollBy(7, 15);
+    try std.testing.expectEqual(@as(f32, 15), rt.scrollOffset(7));
+    var f2 = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+    defer f2.deinit();
+    try std.testing.expectEqual(@as(f32, 15), rt.ui.scrollAt(7));
+}
+
+test "a primitive that cannot be recorded is reported, not silently dropped" {
+    const gpa = std.testing.allocator;
+    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    var col: Collector(u8) = .{ .gpa = fa.allocator(), .metrics = nominalRenderer() };
+    col.renderer().quad(
+        .{ .x = 0, .y = 0, .w = 10, .h = 10 },
+        .{ .solid = .{ .r = 1, .g = 2, .b = 3, .a = 255 } },
+        Rect.unbounded,
+    );
+    try std.testing.expect(col.failed);
+    try std.testing.expectEqual(@as(usize, 0), col.prims.items.len);
+
+    // The flag has to mean something: the same call with memory to spend
+    // records the primitive and reports nothing.
+    var ok: Collector(u8) = .{ .gpa = gpa, .metrics = nominalRenderer() };
+    defer ok.prims.deinit(gpa);
+    ok.renderer().quad(
+        .{ .x = 0, .y = 0, .w = 10, .h = 10 },
+        .{ .solid = .{ .r = 1, .g = 2, .b = 3, .a = 255 } },
+        Rect.unbounded,
+    );
+    try std.testing.expect(!ok.failed);
+    try std.testing.expectEqual(@as(usize, 1), ok.prims.items.len);
 }

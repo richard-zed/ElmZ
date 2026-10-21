@@ -78,7 +78,7 @@ pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
     const size: f32 = 10;
     const rows: usize = 4;
     const fg = elmz.Color{ .r = 0xcd, .g = 0xd6, .b = 0xf4, .a = 255 };
-    const dim = elmz.Color{ .r = 0xa6, .g = 0xad, .b = 0xc8, .a = 255 };
+    const edge = elmz.Color{ .r = 0xa6, .g = 0xad, .b = 0xc8, .a = 255 };
 
     var buf: [4][48]u8 = undefined;
     const lines = [rows][]const u8{
@@ -96,7 +96,7 @@ pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
 
     for (lines, 0..) |line, i| {
         const y = pad + line_h * @as(f32, @floatFromInt(i));
-        canvas.drawText(pad, y, size, .{ .solid = if (i == 0) fg else dim }, line);
+        canvas.drawText(pad, y, size, .{ .solid = if (i == 0) fg else edge }, line);
     }
 }
 
@@ -276,9 +276,6 @@ pub fn ChainOf(comptime App: type) type {
         }
     };
 }
-
-/// The chain for an app that declares no tokens of its own.
-pub const Chain = ChainOf(struct {});
 
 /// Read `path` as sentinel-terminated text. ZON parsing wants the sentinel; a
 /// file read does not hand one back.
