@@ -5,7 +5,11 @@
 
 const std = @import("std");
 const elmz = @import("elmz");
-const ttf = @import("ttf.zig");
+const cedar = @import("cedar.zig");
+
+/// Cedar is the font backend. One name, because a canvas built against a face
+/// the rest of the library does not know is not a configuration anyone wants.
+const Face = cedar.Font;
 /// A canvas with the test face already attached.
 fn testCanvas(gpa: Allocator, w: u32, h: u32) !Canvas {
     var cv = try Canvas.init(gpa, w, h);
@@ -33,9 +37,21 @@ pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
 }
 
 pub const testing_font = struct {
-    pub fn get() ttf.Font {
+    var mem: [Face.cache_bytes]u8 align(8) = undefined;
+    var face: Face = .none;
+    var ready = false;
+
+    /// One face for every test, so the glyph cache is shared the way a real
+    /// canvas shares it. Returned BY POINTER: the cache holds slices into
+    /// `mem`, so a value copy would hand back a face pointing at nothing.
+    pub fn get() *Face {
         if (!builtin.is_test) @compileError("testing_font exists only for tests");
-        return ttf.Font.init(@embedFile("font.ttf"));
+        if (!ready) {
+            face = Face.init(@embedFile("font.ttf"));
+            face.attachCache(&mem);
+            ready = true;
+        }
+        return &face;
     }
 };
 const Allocator = std.mem.Allocator;
@@ -247,6 +263,11 @@ fn boxBlur(buf: []u8, w: usize, h: usize, rad: usize, horizontal: bool, scratch:
     }
 }
 
+/// Glyph-cache storage. Owned by the CANVAS, not by the font: the cache keeps
+/// slices into these bytes, so a font that carried its own arena would be left
+/// pointing at a temporary the first time the value was returned or copied.
+const FontMem = struct { bytes: [Face.cache_bytes]u8 align(8) };
+
 pub const Canvas = struct {
     const Self = @This();
 
@@ -270,7 +291,10 @@ pub const Canvas = struct {
     /// The face this canvas measures and draws with. `Font.none` means no
     /// glyph data: text measures at zero and draws nothing. The caller supplies
     /// the bytes -- the library ships no typeface.
-    font: ttf.Font = .none,
+    font: Face = .none,
+
+    /// Scratch for the glyph cache, allocated once and reused across faces.
+    font_mem: ?*FontMem = null,
 
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
     /// A 64-bit collision would hand back the width of a different string, and
@@ -389,13 +413,15 @@ pub const Canvas = struct {
     pub fn setFont(self: *Self, bytes: []const u8) void {
         self.clearMeasureCache();
         self.clearWrapCache();
-        self.font = ttf.Font.init(bytes);
+        self.font = Face.init(bytes);
+        if (self.font_mem) |m| self.font.attachCache(&m.bytes);
     }
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
         @memset(px, 0);
-        return .{ .gpa = gpa, .w = w, .h = h, .px = px };
+        const mem = try gpa.create(FontMem);
+        return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem };
     }
 
     /// Re-point the pixel buffer at `w` x `h`. The masks and the font survive:
@@ -424,6 +450,7 @@ pub const Canvas = struct {
         self.measure_cache.deinit(self.gpa);
         self.clearWrapCache();
         self.wrap_cache.deinit(self.gpa);
+        if (self.font_mem) |m| self.gpa.destroy(m);
         self.gpa.free(self.px);
     }
 

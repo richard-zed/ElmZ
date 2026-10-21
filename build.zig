@@ -71,6 +71,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Cedar, the font backend, comes from its own package. Pinned by commit
+    // and hash in build.zig.zon, so a clone builds the same code this tree was
+    // verified against -- and no path on one machine is baked into the build.
+    const cedar_dep = b.dependency("glyfz", .{ .target = target, .optimize = optimize });
+    const cedar_mod = cedar_dep.module("glyfz");
+
     const software_mod = b.addModule("software", .{
         .root_source_file = b.path("src/software.zig"),
         .target = target,
@@ -78,11 +84,9 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "elmz", .module = elmz_mod }},
         .link_libc = true,
     });
-    // stb_truetype: the implementation must be a C translation unit (the
-    // STB_TRUETYPE_IMPLEMENTATION define can't live inside @cImport), so it is
-    // added here and included from src/ttf.zig.
-    software_mod.addCSourceFile(.{ .file = b.path("src/stb_impl.c"), .flags = &.{} });
-    software_mod.addIncludePath(b.path("src"));
+    // No C in the font path any more: Cedar is Zig, so nothing is compiled
+    // from a translation unit and nothing is included from src/.
+    software_mod.addImport("glyfz", cedar_mod);
 
     // the loop: needs elmz + software, knows no platform
     const runner_mod = b.addModule("runner", .{

@@ -11,7 +11,7 @@ text, and a platform turns those into pixels. Nothing survives the frame.
 |---|---|---|
 | `src/elmz.zig` | tree, layout, primitives, events, `Window` vtable | nothing |
 | `src/software.zig` | primitives -> RGBA8888, PNG encoder | `elmz` |
-| `src/ttf.zig` | TrueType metrics + rasterisation (stb_truetype) | `elmz` |
+| `src/cedar.zig` | TrueType metrics + rasterisation, backed by Cedar | `elmz`, `glyfz` |
 | `src/runner.zig` | loop: poll -> hit-test painted frame -> dispatch -> repaint -> present | `elmz`, `software` |
 | `src/platform_sdl3.zig` | SDL3 window / input / present; draws nothing | `elmz` |
 | `examples/tasks.zig` | a complete app: model, messages, update, view | `elmz`, `software` |
@@ -39,7 +39,11 @@ zig build run-gallery-sdl3
 
 If `pkg-config --modversion sdl3` fails, install it (`libsdl3-dev`,
 `SDL3-devel`, `sdl3`) or skip the window targets — everything else builds
-offline, including the font and stb_truetype, which are vendored.
+without SDL.
+
+Cedar, the font backend, is its own package (`glyfz`), pinned by commit and
+hash in `build.zig.zon`. The first build fetches it, so it needs network once;
+after that Zig's package cache serves it offline. Nothing is compiled from C.
 
 ## Writing an app
 
@@ -151,8 +155,9 @@ mid-save would flash the fallback colours at the worst possible moment.
   typechecks against real SDL3 3.5.0 headers, nothing more.
 - `src/font.ttf` is a full 744KB DejaVu. Subsetting works (`fontTools` is
   available; ASCII+Latin-1 comes out at 45KB) but the subsetter always drops
-  the legacy `kern` table and only rewrites GPOS, and stb_truetype reads only
-  `kern` — so a subset silently turns kerning off. Either generate a `kern`
+  the legacy `kern` table and only rewrites GPOS, and Cedar reads only
+  `kern` — so a subset silently turns kerning off. The switch to Cedar did not
+  change this: same table, same behaviour. Either generate a `kern`
   table for the subset or teach the shaper GPOS before taking the 700KB win.
 - No CJK coverage. UTF-8 decodes any codepoint, but the embedded font has no
   glyphs past Latin-1, so other scripts fall back to .notdef.

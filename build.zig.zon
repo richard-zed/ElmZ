@@ -1,0 +1,18 @@
+.{
+    .name = .elmz,
+    .version = "0.1.0",
+    .fingerprint = 0xcf267a1fad5393f,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .glyfz = .{
+            .url = "git+https://github.com/scribbles-code/glyfz#4002d03aba133581947d79cce015c548f0310e56",
+            .hash = "glyfz-0.1.0-NGxR_MLeAQCUAueLuvl8QHHOP8VGgZqx8ji9sjtkA3bD",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+    },
+}
