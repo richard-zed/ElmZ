@@ -3108,3 +3108,66 @@ test "a paragraph is wrapped once, then answered from the cache" {
     _ = r.wrapText(text, 12, 60, &b);
     try std.testing.expectEqual(@as(usize, 3), c.wrap_misses);
 }
+
+/// Ink in a buffer, for tests that care whether anything was painted. A draw
+/// that silently produces nothing is the failure mode this counts against.
+fn inkPixels(px: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + 3 < px.len) : (i += 4) {
+        if (px[i] != 0 or px[i + 1] != 0 or px[i + 2] != 0) n += 1;
+    }
+    return n;
+}
+
+test "the same text drawn twice comes out of the glyph cache" {
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 160, 40);
+    defer c.deinit();
+
+    const black: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    const fill: elmz.Fill = .{ .solid = white };
+    const msg = "Hamburgefonstiv"; // every glyph carries ink, so none is skipped
+
+    c.clear(black);
+    c.drawText(2, 4, 16, fill, msg);
+    try std.testing.expect(inkPixels(c.px) > 100); // the guard did not swallow it
+
+    const first = try gpa.dupe(u8, c.px);
+    defer gpa.free(first);
+    const before = c.font.cacheStats() orelse return error.NoCacheAttached;
+    try std.testing.expectEqual(msg.len, before.misses);
+
+    // Second pass over a cleared canvas, so the pixels have to come back.
+    c.clear(black);
+    c.drawText(2, 4, 16, fill, msg);
+    const after = c.font.cacheStats().?;
+
+    // No new rasterisation: every glyph in this string was already covered.
+    try std.testing.expectEqual(before.misses, after.misses);
+    // One hit per glyph asked for.
+    try std.testing.expectEqual(msg.len, after.hits - before.hits);
+    // And a hit produces the same pixels as the first pass did.
+    try std.testing.expectEqualSlices(u8, first, c.px);
+}
+
+test "a face with no cache storage measures but paints nothing" {
+    const gpa = std.testing.allocator;
+    var c = try Canvas.init(gpa, 80, 30);
+    defer c.deinit();
+
+    const black: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+
+    // Deliberately NOT attached to any storage -- the state a caller lands in
+    // if it builds a face and forgets. It measures, because metrics do not
+    // need the cache, and it paints nothing, because the glyph does.
+    var f = cedar.Font.init(@embedFile("font.ttf"));
+    try std.testing.expect(f.cacheStats() == null);
+    try std.testing.expect(f.measure("Wm", 16).width > 0);
+
+    c.clear(black);
+    f.drawText(c.px, c.w, c.h, 2, 2, 16, .{ .solid = white }, "Wm", .{ .x = 0, .y = 0, .w = 80, .h = 30 });
+    try std.testing.expectEqual(@as(usize, 0), inkPixels(c.px));
+}

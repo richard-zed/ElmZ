@@ -66,6 +66,17 @@ pub const Font = struct {
         self.cache_ok = true;
     }
 
+    /// Counters for the glyph cache, or null when no storage is attached.
+    ///
+    /// This exists so a test can tell a HIT from a re-rasterisation. A picture
+    /// that looks right says nothing about which path produced it -- both
+    /// paths draw the same glyph -- so the counters are the only evidence that
+    /// the cache is doing anything at all.
+    pub fn cacheStats(self: *const Font) ?cedar.Cache.Stats {
+        if (!self.cache_ok) return null;
+        return self.cache.stats;
+    }
+
     /// stb's ScaleForPixelHeight, reproduced from the same hhea numbers.
     fn scaleFor(self: *const Font, size: f32) f32 {
         const v = self.face.vMetrics();
