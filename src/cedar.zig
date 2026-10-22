@@ -29,6 +29,10 @@ const elmz = @import("elmz");
 const gamma = @import("gamma.zig");
 const cedar = @import("glyfz");
 
+/// The resolved `kern` lookup list, which `shape` can be handed instead of
+/// rebuilding it per call.
+pub const Kern = cedar.Kern;
+
 pub const V = struct { ascent: f32, descent: f32, line_gap: f32 };
 
 pub const Font = struct {
@@ -45,6 +49,10 @@ pub const Font = struct {
 
     cache: cedar.Cache = undefined,
     cache_ok: bool = false,
+    /// Resolved kern lookups, held BY POINTER: `Kern` carries a `Font`, and a
+    /// `Font` carrying a `Kern` by value is an infinite type. Null means every
+    /// shape call re-resolves -- correct, just repeated.
+    kern: ?*Kern = null,
 
     lookup: cedar.Lookup = undefined,
     lookup_ok: bool = false,
@@ -67,6 +75,20 @@ pub const Font = struct {
     /// Point the glyph cache at caller-owned storage. Must be called after the
     /// `Font` is in its final home, because the cache keeps slices into `mem`.
     /// A font with no cache still measures; it just paints nothing.
+    /// Storage for the kern cache, sized so callers need not import Cedar.
+    pub const kern_bytes = Kern.needed(.{});
+
+    /// Point this face at a resolved kern cache. `slot` is the caller's and
+    /// must outlive the face, the same rule as the mask cache: a value copy of
+    /// `Font` would otherwise point into a temporary.
+    pub fn attachKern(self: *Font, slot: *Kern, mem: []align(8) u8) void {
+        if (!self.ok) return;
+        slot.* = Kern.init(mem, self.face, .{});
+        // Refuse a cache for other bytes: its lookup indices address another
+        // face's tables.
+        if (slot.font.data.ptr == self.face.data.ptr) self.kern = slot;
+    }
+
     pub fn attachCache(self: *Font, mem: []align(8) u8) void {
         if (!self.ok) return;
         self.cache = cedar.Cache.init(mem, .{}) catch return;
@@ -173,6 +195,7 @@ pub const Font = struct {
         run.len = self.face.shape(cps[0..n], run.gids[0..n], null, .{
             .advances = run.advs[0..n],
             .substitute = true,
+            .kern_cache = self.kern,
         }) catch blk: {
             // A face Cedar will not lay out still draws: fall back to the
             // plain per-glyph answer rather than losing the run.

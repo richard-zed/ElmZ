@@ -41,6 +41,9 @@ pub const testing_font = struct {
     var mem: [Face.cache_bytes]u8 align(8) = undefined;
     var lmem: [Face.lookup_bytes]u8 align(8) = undefined;
     var face: Face = .none;
+    /// The kern cache's storage and slot, beside the other two.
+    var kmem: [Face.kern_bytes]u8 align(8) = undefined;
+    var kslot: cedar.Kern = undefined;
     var ready = false;
 
     /// One face for every test, so the glyph cache is shared the way a real
@@ -52,6 +55,7 @@ pub const testing_font = struct {
             face = Face.init(@embedFile("font.ttf"));
             face.attachCache(&mem);
             face.attachLookup(&lmem);
+            face.attachKern(&kslot, &kmem);
             ready = true;
         }
         return &face;
@@ -275,6 +279,10 @@ const FontMem = struct {
     /// the same reason: both must outlive the value copies a `Face` goes
     /// through, so neither can be a field of the face itself.
     lookup: [Face.lookup_bytes]u8 align(8),
+    /// The resolved kern lookups and the slot the face points at. Beside the
+    /// other two caches because it obeys the same lifetime rule.
+    kern: cedar.Kern = undefined,
+    kern_mem: [Face.kern_bytes]u8 align(8),
 };
 
 pub const Canvas = struct {
@@ -426,6 +434,7 @@ pub const Canvas = struct {
         if (self.font_mem) |m| {
             self.font.attachCache(&m.bytes);
             self.font.attachLookup(&m.lookup);
+            self.font.attachKern(&m.kern, &m.kern_mem);
         }
     }
 
@@ -3207,6 +3216,20 @@ fn inkPixels(px: []const u8) usize {
         if (px[i] != 0 or px[i + 1] != 0 or px[i + 2] != 0) n += 1;
     }
     return n;
+}
+
+test "a canvas face carries a resolved kern cache" {
+    // The kern cache is attached through the same dance as the mask cache, and
+    // a null there is not an error anywhere -- `shape` just re-resolves every
+    // call. So the wiring needs its own assertion, or a wiring bug costs
+    // nothing visible and everything in repeated work.
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 64, 32);
+    defer c.deinit();
+    try std.testing.expect(c.font.kern != null);
+
+    // And it must be for THIS face, not whatever was attached last.
+    try std.testing.expect(c.font.kern.?.font.data.ptr == c.font.face.data.ptr);
 }
 
 test "the same text drawn twice comes out of the glyph cache" {
