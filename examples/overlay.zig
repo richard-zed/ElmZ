@@ -14,7 +14,11 @@ const runner = @import("runner");
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var canvas = try software.Canvas.init(gpa, 460, 200);
-    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+    // Caller-owned bytes: the canvas holds a slice into them, so the
+    // free is registered first and therefore runs after the teardown.
+    const font_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+    defer gpa.free(font_bytes);
+    canvas.setFont(font_bytes);
     defer canvas.deinit();
 
     const theme: elmz.Theme = .{};

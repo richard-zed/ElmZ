@@ -169,7 +169,11 @@ pub fn main(init: std.process.Init) !void {
 
     var canvas = try software.Canvas.init(gpa, W, H);
 
-    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+    // Caller-owned bytes: the canvas holds a slice into them, so the
+    // free is registered first and therefore runs after the teardown.
+    const font_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+    defer gpa.free(font_bytes);
+    canvas.setFont(font_bytes);
     defer canvas.deinit();
 
     const shots = [_]Model{
@@ -181,7 +185,9 @@ pub fn main(init: std.process.Init) !void {
 
     const gap: u32 = 12;
     var sheet = try software.Canvas.init(gpa, (W + gap) * shots.len + gap, H + 2 * gap);
-    sheet.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+    const sheet_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+    defer gpa.free(sheet_bytes);
+    sheet.setFont(sheet_bytes);
     defer sheet.deinit();
     sheet.clear(elmz.Color.rgbHex(0x0b0d12));
 

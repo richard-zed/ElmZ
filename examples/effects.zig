@@ -20,7 +20,11 @@ pub fn main(init: std.process.Init) !void {
 
     var c = try software.Canvas.init(gpa, W, H);
 
-    c.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+    // Caller-owned bytes: the canvas holds a slice into them, so the
+    // free is registered first and therefore runs after the teardown.
+    const c_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+    defer gpa.free(c_bytes);
+    c.setFont(c_bytes);
     defer c.deinit();
     const r = c.renderer();
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = W, .h = H };

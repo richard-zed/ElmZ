@@ -195,7 +195,11 @@ pub fn main(init: std.process.Init) !void {
 
     var canvas = try software.Canvas.init(gpa, W, H);
 
-    canvas.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+    // Caller-owned bytes: the canvas holds a slice into them, so the
+    // free is registered first and therefore runs after the teardown.
+    const font_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+    defer gpa.free(font_bytes);
+    canvas.setFont(font_bytes);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
@@ -244,7 +248,9 @@ pub fn main(init: std.process.Init) !void {
     // area-bound, so this -- not the tall canvas -- is what a user actually
     // pays per repaint, and it prices an unearned `dirty` honestly.
     var win = try software.Canvas.init(gpa, 480, 400);
-    win.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+    const win_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+    defer gpa.free(win_bytes);
+    win.setFont(win_bytes);
     defer win.deinit();
     const wf = try measure(io, &rt, &win, 20, 50, null);
     try out.print("  window 480x400, {d} prims = {d:.3} ms ({d:.3} build + {d:.3} paint)\n", .{
@@ -265,7 +271,9 @@ pub fn main(init: std.process.Init) !void {
     // and pays per pixel.
     {
         var fc = try software.Canvas.init(gpa, 640, 480);
-        fc.setFont(try software.loadFont(gpa, init.io, "src/font.ttf"));
+        const fc_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
+        defer gpa.free(fc_bytes);
+        fc.setFont(fc_bytes);
         defer fc.deinit();
         const a = elmz.Color{ .r = 0x1e, .g = 0x1e, .b = 0x2e, .a = 255 };
         const b = elmz.Color{ .r = 0xf3, .g = 0xc0, .b = 0xe5, .a = 255 };
