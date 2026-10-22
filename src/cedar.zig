@@ -281,12 +281,22 @@ pub const Font = struct {
         clip: elmz.Rect,
     ) void {
         if (!self.ok or !self.cache_ok) return;
-        const tm = self.measure(bytes, size);
-        const box: elmz.Rect = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
         const solid_c: ?elmz.Color = switch (fill) {
             .solid => |cc| cc,
             else => null,
         };
+        // Measuring first costs a SECOND full layout of the same string, and a
+        // layout is no longer two table reads: it resolves the feature lists,
+        // positions every pair, applies substitution and produces advances.
+        // The box exists only to answer `colorAt` below, which `orelse` never
+        // reaches for a solid fill -- so nearly every label in a UI was paying
+        // twice to compute a width nobody read. Gradient text still measures,
+        // because there the colour of a glyph depends on where it sits.
+        var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
+        if (solid_c == null) {
+            const tm = self.measure(bytes, size);
+            box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
+        }
         const cx0: i64 = @intFromFloat(@floor(clip.x));
         const cy0: i64 = @intFromFloat(@floor(clip.y));
         const cx1: i64 = @intFromFloat(@ceil(clip.x + clip.w));
