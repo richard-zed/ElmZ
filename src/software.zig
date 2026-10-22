@@ -6,6 +6,7 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const cedar = @import("cedar.zig");
+const gamma = @import("gamma.zig");
 
 /// Cedar is the font backend. One name, because a canvas built against a face
 /// the rest of the library does not know is not a configuration anyone wants.
@@ -511,12 +512,9 @@ pub const Canvas = struct {
             return;
         }
         const a: f32 = @as(f32, @floatFromInt(color.a)) / 255.0;
-        const dst_r: f32 = @floatFromInt(self.px[i + 0]);
-        const dst_g: f32 = @floatFromInt(self.px[i + 1]);
-        const dst_b: f32 = @floatFromInt(self.px[i + 2]);
-        self.px[i + 0] = @intFromFloat(@as(f32, @floatFromInt(color.r)) * a + dst_r * (1 - a));
-        self.px[i + 1] = @intFromFloat(@as(f32, @floatFromInt(color.g)) * a + dst_g * (1 - a));
-        self.px[i + 2] = @intFromFloat(@as(f32, @floatFromInt(color.b)) * a + dst_b * (1 - a));
+        self.px[i + 0] = gamma.blend(self.px[i + 0], color.r, a);
+        self.px[i + 1] = gamma.blend(self.px[i + 1], color.g, a);
+        self.px[i + 2] = gamma.blend(self.px[i + 2], color.b, a);
     }
 
     /// One scanline in one colour. The blend coefficients are hoisted out of
@@ -879,10 +877,11 @@ pub const Canvas = struct {
         const a = cov * (@as(f32, @floatFromInt(color.a)) / 255.0);
         if (a <= 0) return;
         const i = (@as(usize, @intCast(y)) * self.w + @as(u32, @intCast(x))) * 4;
-        const inv = 1.0 - a;
-        self.px[i + 0] = @intFromFloat(@as(f32, @floatFromInt(color.r)) * a + @as(f32, @floatFromInt(self.px[i + 0])) * inv);
-        self.px[i + 1] = @intFromFloat(@as(f32, @floatFromInt(color.g)) * a + @as(f32, @floatFromInt(self.px[i + 1])) * inv);
-        self.px[i + 2] = @intFromFloat(@as(f32, @floatFromInt(color.b)) * a + @as(f32, @floatFromInt(self.px[i + 2])) * inv);
+        // In light, not in bytes. See gamma.zig -- at half coverage the two
+        // disagree by 61 code values, and a UI edge is half coverage.
+        self.px[i + 0] = gamma.blend(self.px[i + 0], color.r, a);
+        self.px[i + 1] = gamma.blend(self.px[i + 1], color.g, a);
+        self.px[i + 2] = gamma.blend(self.px[i + 2], color.b, a);
     }
 
     /// Rounded rect by signed distance: the coverage of a pixel is derived
@@ -1572,9 +1571,12 @@ pub const Canvas = struct {
         }
         const dst_w: f32 = da * (1 - sa);
         inline for (0..3) |ch| {
-            const s: f32 = @floatFromInt(src[ch]);
-            const d: f32 = @floatFromInt(dst[ch]);
-            dst[ch] = toByte((s * sa + d * dst_w) / out_a);
+            // In light, like every other composite. A blit and a painted quad
+            // of the same colour and alpha have to land on the same byte, and
+            // they only do if both are summed in the same space.
+            const s = gamma.to_linear[src[ch]];
+            const d = gamma.to_linear[dst[ch]];
+            dst[ch] = gamma.encode((s * sa + d * dst_w) / out_a);
         }
         dst[3] = toByte(out_a * 255.0);
     }
@@ -2214,11 +2216,11 @@ test "a blit composites by source alpha instead of stamping it" {
 
     dst.blitFrom(&src, .{ 0, 0 });
 
-    // 128/255 over white. Not 127: `blendPixel` truncates rather than rounds,
-    // so it lands on 126, and a blit that disagreed with the paint path by one
-    // byte would be a visible seam wherever an image abuts a quad. That
-    // equivalence is asserted directly below rather than trusted here.
-    try std.testing.expectEqual(@as(u8, 126), dst.px[0]);
+    // 128/255 of black over white, summed in light. Written as the value the
+    // transfer produces rather than a magic number, because what is being
+    // asserted is "the alpha was honoured", not "the byte is 126" -- 126 was
+    // the encoded-space answer and it is the wrong answer.
+    try std.testing.expectEqual(gamma.encode(1.0 - 128.0 / 255.0), dst.px[0]);
     try std.testing.expectEqual(@as(u8, 255), dst.px[3]);
     // invisible source pixels leave the destination pristine
     try std.testing.expectEqual(@as(u8, 255), dst.px[4]);
@@ -2549,7 +2551,13 @@ test "a baked inner rim agrees with the field path, boundary rows included" {
         while (x < 146) : (x += 1) {
             const o = (y * W + x) * 4;
             for (0..3) |k| {
-                const d = @as(i32, field.px[o + k]) - @as(i32, baked.px[o + k]);
+                // Coverage, not encoded bytes. Blending is in linear light now,
+                // so two paths a code value apart in coverage can sit several
+                // apart once re-encoded, and the encoded difference would grade
+                // the transfer curve instead of the agreement under test.
+                const df: i32 = @intFromFloat(@round(gamma.to_linear[field.px[o + k]] * 255.0));
+                const db: i32 = @intFromFloat(@round(gamma.to_linear[baked.px[o + k]] * 255.0));
+                const d = df - db;
                 const ad = if (d < 0) -d else d;
                 worst = @max(worst, ad);
                 if (y == 30 or y == 61) worst_edge = @max(worst_edge, ad);
@@ -2843,10 +2851,14 @@ test "an inner glow drops fast off the edge and then converges" {
         }, clip);
 
         const y: usize = 70; // mid-height, clear of the corners
-        const edge: f32 = @floatFromInt(testRgb(&c, 41, y)[0]);
-        const half: f32 = @floatFromInt(testRgb(&c, 47, y)[0]);
-        const deep: f32 = @floatFromInt(testRgb(&c, 53, y)[0]);
-        const gone: f32 = @floatFromInt(testRgb(&c, 55, y)[0]);
+        // Read coverage, not the byte: the byte is now the transfer curve
+        // applied to the coverage, and every number below is coverage on a
+        // 0..255 scale. Encoding 0.797 gives 231, which is exactly what the
+        // raw channel says -- the two views agree once one of them is decoded.
+        const edge: f32 = gamma.to_linear[testRgb(&c, 41, y)[0]] * 255.0;
+        const half: f32 = gamma.to_linear[testRgb(&c, 47, y)[0]] * 255.0;
+        const deep: f32 = gamma.to_linear[testRgb(&c, 53, y)[0]] * 255.0;
+        const gone: f32 = gamma.to_linear[testRgb(&c, 55, y)[0]] * 255.0;
 
         // Full at the silhouette: d = -1.5, u = 0.107, (1-u)^2 = 0.797.
         try std.testing.expectApproxEqAbs(@as(f32, 203), edge, 12);
@@ -3033,6 +3045,36 @@ test "a frame painted with opaque colours exports an opaque alpha channel" {
 // paths wrote r, g, b and skipped alpha. The rasteriser test above caught the
 // canvas half; this one catches the FILE half, which is where it was seen: a
 // rendered PNG that opened as a black rectangle.
+test "coverage blends in light, not in encoded bytes" {
+    // Half coverage of white over black. Interpolating the encoded channels
+    // gives 127; combining the light gives 188. The two differ by 61 code
+    // values at exactly the coverage an antialiased edge sits at, which is why
+    // this is an edge defect and not a general one.
+    var c = try testCanvas(std.testing.allocator, 4, 4);
+    defer c.deinit();
+    @memset(c.px, 0);
+    const white = elmz.Color{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    c.blendCoverage(1, 1, white, 0.5);
+    const i = (1 * 4 + 1) * 4;
+    try std.testing.expectApproxEqAbs(@as(f32, 188), @as(f32, @floatFromInt(c.px[i])), 2);
+
+    // Black over white is the same arithmetic by symmetry, and that is the
+    // check that this is a transfer fix rather than a brightness nudge.
+    @memset(c.px, 255);
+    const black = elmz.Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    c.blendCoverage(1, 1, black, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 188), @as(f32, @floatFromInt(c.px[i])), 2);
+
+    // Full coverage must still be an exact identity -- no colour drift on the
+    // interior of a glyph, where most of the pixels are.
+    @memset(c.px, 0);
+    const teal = elmz.Color{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 255 };
+    c.blendCoverage(1, 1, teal, 1.0);
+    try std.testing.expectEqual(@as(u8, 0x89), c.px[i]);
+    try std.testing.expectEqual(@as(u8, 0xb4), c.px[i + 1]);
+    try std.testing.expectEqual(@as(u8, 0xfa), c.px[i + 2]);
+}
+
 test "a painted frame exports opaque pixels through the PNG encoder" {
     var c = try testCanvas(testing.allocator, 12, 6);
     defer c.deinit();

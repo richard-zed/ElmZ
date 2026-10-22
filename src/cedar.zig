@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const elmz = @import("elmz");
+const gamma = @import("gamma.zig");
 const cedar = @import("glyfz");
 
 pub const V = struct { ascent: f32, descent: f32, line_gap: f32 };
@@ -379,8 +380,9 @@ fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8)
     if (ux >= cw or uy >= ch) return;
     const i = (@as(usize, uy) * cw + ux) * 4;
     const a = @as(f32, @floatFromInt(cov)) / 255.0 * (@as(f32, @floatFromInt(color.a)) / 255.0);
-    const inv = 1.0 - a;
-    px[i + 0] = @intFromFloat(@as(f32, @floatFromInt(color.r)) * a + @as(f32, @floatFromInt(px[i + 0])) * inv);
-    px[i + 1] = @intFromFloat(@as(f32, @floatFromInt(color.g)) * a + @as(f32, @floatFromInt(px[i + 1])) * inv);
-    px[i + 2] = @intFromFloat(@as(f32, @floatFromInt(color.b)) * a + @as(f32, @floatFromInt(px[i + 2])) * inv);
+    // In light, not in bytes: a glyph edge is exactly the fractional coverage
+    // where interpolating encoded channels loses the most.
+    px[i + 0] = gamma.blend(px[i + 0], color.r, a);
+    px[i + 1] = gamma.blend(px[i + 1], color.g, a);
+    px[i + 2] = gamma.blend(px[i + 2], color.b, a);
 }
