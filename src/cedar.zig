@@ -34,6 +34,9 @@ pub const Font = struct {
     /// Bytes of scratch a glyph cache needs at the default options. Published
     /// here so a caller can own the storage without importing Cedar.
     pub const cache_bytes = cedar.Cache.needed(.{});
+    /// Bytes of scratch the codepoint lookup needs, published for the same
+    /// reason: a caller sizes its storage without importing Cedar.
+    pub const lookup_bytes = cedar.Lookup.needed(.{});
     face: cedar.Font = undefined,
     ok: bool = false,
     /// Cheap identity for caches: which byte buffer this face borrows.
@@ -41,6 +44,9 @@ pub const Font = struct {
 
     cache: cedar.Cache = undefined,
     cache_ok: bool = false,
+
+    lookup: cedar.Lookup = undefined,
+    lookup_ok: bool = false,
 
     pub const none: Font = .{};
 
@@ -64,6 +70,40 @@ pub const Font = struct {
         if (!self.ok) return;
         self.cache = cedar.Cache.init(mem, .{}) catch return;
         self.cache_ok = true;
+    }
+
+    /// Point the codepoint lookup at caller-owned storage. Same contract as
+    /// `attachCache`, including the "attach after the Font is in its final
+    /// home" rule, because the lookup keeps a slice into `mem` too.
+    pub fn attachLookup(self: *Font, mem: []align(8) u8) void {
+        if (!self.ok) return;
+        self.lookup = cedar.Lookup.init(mem, .{}) catch return;
+        self.lookup_ok = true;
+    }
+
+    /// Counters for the codepoint lookup, or null when none is attached.
+    pub fn lookupStats(self: *const Font) ?cedar.Lookup.Stats {
+        if (!self.lookup_ok) return null;
+        return self.lookup.stats;
+    }
+
+    /// Resolve a codepoint to its glyph and advance, through the lookup when
+    /// one is attached. A hit costs a probe; a miss costs the cmap search plus
+    /// the hmtx read, which is the per-glyph-per-draw cost this exists to
+    /// remove. Answers gid 0 with a zero advance whenever the face cannot,
+    /// which is what every caller did with the error anyway.
+    ///
+    /// The advance here is the RESOLVED one, so a composite that borrows its
+    /// metrics through USE_MY_METRICS reports the component's advance rather
+    /// than a stale copy from hmtx.
+    fn glyphFor(self: *const Font, cp: u21) cedar.Lookup.Entry {
+        if (self.lookup_ok) {
+            const mut = @constCast(self);
+            return mut.lookup.resolve(self.face, cp) catch .{ .gid = 0, .advance = 0 };
+        }
+        const gid = self.face.glyphIndex(cp) catch 0;
+        const hm = self.face.hMetrics(gid) catch cedar.HMetrics{ .advance = 0, .lsb = 0 };
+        return .{ .gid = gid, .advance = hm.advance };
     }
 
     /// Counters for the glyph cache, or null when no storage is attached.
@@ -97,14 +137,13 @@ pub const Font = struct {
     }
 
     fn advanceOf(self: *const Font, s: f32, prev: *u16, cp: u21) f32 {
-        const gid = self.face.glyphIndex(cp) catch 0;
+        const g = self.glyphFor(cp);
         var w: f32 = 0;
         // The legacy `kern` table only -- the same table stb reads. Both
         // therefore return 0 for faces that keep kerning in GPOS.
-        if (prev.* != 0) w += @as(f32, @floatFromInt(self.face.kern(prev.*, gid))) * s;
-        const hm = self.face.hMetrics(gid) catch cedar.HMetrics{ .advance = 0, .lsb = 0 };
-        prev.* = gid;
-        return w + @as(f32, @floatFromInt(hm.advance)) * s;
+        if (prev.* != 0) w += @as(f32, @floatFromInt(self.face.kern(prev.*, g.gid))) * s;
+        prev.* = g.gid;
+        return w + @as(f32, @floatFromInt(g.advance)) * s;
     }
 
     pub fn measure(self: *const Font, bytes: []const u8, size: f32) elmz.TextMetrics {
@@ -219,7 +258,8 @@ pub const Font = struct {
         while (idx < bytes.len) {
             const cp = decode(bytes, &idx);
             if (cp == '\n') continue;
-            const gid = self.face.glyphIndex(cpOf(cp)) catch 0;
+            const g = self.glyphFor(cpOf(cp));
+            const gid = g.gid;
             if (prev != 0) pen += @as(f32, @floatFromInt(self.face.kern(prev, gid))) * s;
 
             const r = mut.cache.maskAt(self.face, gid, s, .zero) catch null;
@@ -248,8 +288,7 @@ pub const Font = struct {
                 }
             }
 
-            const hm = self.face.hMetrics(gid) catch cedar.HMetrics{ .advance = 0, .lsb = 0 };
-            pen += @as(f32, @floatFromInt(hm.advance)) * s;
+            pen += @as(f32, @floatFromInt(g.advance)) * s;
             prev = gid;
         }
     }

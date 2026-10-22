@@ -38,6 +38,7 @@ pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
 
 pub const testing_font = struct {
     var mem: [Face.cache_bytes]u8 align(8) = undefined;
+    var lmem: [Face.lookup_bytes]u8 align(8) = undefined;
     var face: Face = .none;
     var ready = false;
 
@@ -49,6 +50,7 @@ pub const testing_font = struct {
         if (!ready) {
             face = Face.init(@embedFile("font.ttf"));
             face.attachCache(&mem);
+            face.attachLookup(&lmem);
             ready = true;
         }
         return &face;
@@ -266,7 +268,13 @@ fn boxBlur(buf: []u8, w: usize, h: usize, rad: usize, horizontal: bool, scratch:
 /// Glyph-cache storage. Owned by the CANVAS, not by the font: the cache keeps
 /// slices into these bytes, so a font that carried its own arena would be left
 /// pointing at a temporary the first time the value was returned or copied.
-const FontMem = struct { bytes: [Face.cache_bytes]u8 align(8) };
+const FontMem = struct {
+    bytes: [Face.cache_bytes]u8 align(8),
+    /// Resolved codepoint -> (glyph, advance),  stored beside the mask cache for
+    /// the same reason: both must outlive the value copies a `Face` goes
+    /// through, so neither can be a field of the face itself.
+    lookup: [Face.lookup_bytes]u8 align(8),
+};
 
 pub const Canvas = struct {
     const Self = @This();
@@ -414,7 +422,10 @@ pub const Canvas = struct {
         self.clearMeasureCache();
         self.clearWrapCache();
         self.font = Face.init(bytes);
-        if (self.font_mem) |m| self.font.attachCache(&m.bytes);
+        if (self.font_mem) |m| {
+            self.font.attachCache(&m.bytes);
+            self.font.attachLookup(&m.lookup);
+        }
     }
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
