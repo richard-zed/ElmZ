@@ -99,7 +99,7 @@ pub const Font = struct {
     fn glyphFor(self: *const Font, cp: u21) cedar.Lookup.Entry {
         if (self.lookup_ok) {
             const mut = @constCast(self);
-            return mut.lookup.resolve(self.face, cp) catch .{ .gid = 0, .advance = 0 };
+            return mut.lookup.resolve(&self.face, cp) catch .{ .gid = 0, .advance = 0 };
         }
         const gid = self.face.glyphIndex(cp) catch 0;
         const hm = self.face.hMetrics(gid) catch cedar.HMetrics{ .advance = 0, .lsb = 0 };
@@ -136,14 +136,53 @@ pub const Font = struct {
         };
     }
 
-    fn advanceOf(self: *const Font, s: f32, prev: *u16, cp: u21) f32 {
-        const g = self.glyphFor(cp);
-        var w: f32 = 0;
-        // The legacy `kern` table only -- the same table stb reads. Both
-        // therefore return 0 for faces that keep kerning in GPOS.
-        if (prev.* != 0) w += @as(f32, @floatFromInt(self.face.kern(prev.*, g.gid))) * s;
-        prev.* = g.gid;
-        return w + @as(f32, @floatFromInt(g.advance)) * s;
+    /// A laid-out window of text: glyph ids and their advances, in font units,
+    /// with pair kerning already applied.
+    ///
+    /// Kerning is Cedar's business. Nothing above this line asks which table
+    /// answered, and nothing above it runs a pair loop -- that loop is what
+    /// made the old path apply a pair twice, once to place the glyph and once
+    /// in the advance to the next one.
+    const run_max = 128;
+
+    const Run = struct {
+        gids: [run_max]u16 = undefined,
+        advs: [run_max]i32 = undefined,
+        len: usize = 0,
+    };
+
+    /// Lay out from `at`, stopping at a newline, the end of the text, or the
+    /// window. Returns the byte to resume from.
+    ///
+    /// Substitution runs, so `liga` may re-spell "fi" into one glyph -- the
+    /// advances that come back already account for it, which is the reason
+    /// measurement and drawing share this one call.
+    fn layoutRun(self: *const Font, bytes: []const u8, at: usize, run: *Run) usize {
+        var cps: [run_max]u21 = undefined;
+        var i = at;
+        var n: usize = 0;
+        while (i < bytes.len and n < run_max) {
+            const cp = decode(bytes, &i);
+            if (cp == '\n') break;
+            cps[n] = cpOf(cp);
+            n += 1;
+        }
+        run.len = 0;
+        if (n == 0 or !self.ok) return i;
+        run.len = self.face.shape(cps[0..n], run.gids[0..n], null, .{
+            .advances = run.advs[0..n],
+            .substitute = true,
+        }) catch blk: {
+            // A face Cedar will not lay out still draws: fall back to the
+            // plain per-glyph answer rather than losing the run.
+            for (cps[0..n], 0..) |cp, k| {
+                const g = self.glyphFor(cp);
+                run.gids[k] = g.gid;
+                run.advs[k] = g.advance;
+            }
+            break :blk n;
+        };
+        return i;
     }
 
     pub fn measure(self: *const Font, bytes: []const u8, size: f32) elmz.TextMetrics {
@@ -151,12 +190,11 @@ pub const Font = struct {
         if (!self.ok) return .{ .width = 0, .height = size, .ascent = size, .descent = 0, .line_height = size };
         const s = self.scaleFor(size);
         var w: f32 = 0;
-        var prev: u16 = 0;
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const cp = decode(bytes, &i);
-            if (cp == '\n') continue; // a newline is not ink
-            w += self.advanceOf(s, &prev, cpOf(cp));
+        var run: Run = .{};
+        var at: usize = 0;
+        while (at < bytes.len) {
+            at = self.layoutRun(bytes, at, &run);
+            for (run.advs[0..run.len]) |a| w += @as(f32, @floatFromInt(a)) * s;
         }
         return .{
             .width = w,
@@ -185,7 +223,6 @@ pub const Font = struct {
             }
             var i = start;
             var w: f32 = 0;
-            var prev: u16 = 0;
             var break_end = bytes.len;
             var break_next = bytes.len;
             var last_space: ?usize = null;
@@ -199,8 +236,12 @@ pub const Font = struct {
                     break;
                 }
                 if (cp == ' ') last_space = at;
+                // Unkerned on purpose: this loop's quirks decide a line count,
+                // and a line count that disagrees by one moves every border
+                // below it. Pair adjustment shifts a line by a rounding error;
+                // it does not decide where a line breaks.
                 if (self.ok) {
-                    w += self.advanceOf(s, &prev, cpOf(cp));
+                    w += @as(f32, @floatFromInt(self.glyphFor(cpOf(cp)).advance)) * s;
                 } else w += fallback;
                 if (w > max_w and at > start) {
                     if (last_space) |sp| {
@@ -253,43 +294,39 @@ pub const Font = struct {
         const baseline = y + self.verticalMetrics(size).ascent;
         const mut = @constCast(self);
         var pen = x;
-        var prev: u16 = 0;
-        var idx: usize = 0;
-        while (idx < bytes.len) {
-            const cp = decode(bytes, &idx);
-            if (cp == '\n') continue;
-            const g = self.glyphFor(cpOf(cp));
-            const gid = g.gid;
-            if (prev != 0) pen += @as(f32, @floatFromInt(self.face.kern(prev, gid))) * s;
+        var at: usize = 0;
+        var run: Run = .{};
+        while (at < bytes.len) {
+            at = self.layoutRun(bytes, at, &run);
+            for (run.gids[0..run.len], run.advs[0..run.len]) |gid, adv| {
+                const r = mut.cache.maskAt(&self.face, gid, s, .zero) catch null;
 
-            const r = mut.cache.maskAt(self.face, gid, s, .zero) catch null;
-
-            if (r) |rr| {
-                if (rr.w > 0 and rr.h > 0) {
-                    const ox: i64 = @intFromFloat(@round(pen + @as(f32, @floatFromInt(rr.x0))));
-                    const oy: i64 = @intFromFloat(@round(baseline + @as(f32, @floatFromInt(rr.y0))));
-                    var row: u32 = 0;
-                    while (row < rr.h) : (row += 1) {
-                        const py = oy + row;
-                        if (py < cy0 or py >= cy1) continue;
-                        var col: u32 = 0;
-                        while (col < rr.w) : (col += 1) {
-                            const gx_px = ox + @as(i64, col);
-                            if (gx_px < cx0 or gx_px >= cx1) continue;
-                            const cov = rr.pixels[row * rr.w + col];
-                            if (cov == 0) continue;
-                            blend(px, cw, ch, gx_px, py, solid_c orelse fill.colorAt(
-                                box,
-                                @as(f32, @floatFromInt(gx_px)) + 0.5,
-                                @as(f32, @floatFromInt(py)) + 0.5,
-                            ), cov);
+                if (r) |rr| {
+                    if (rr.w > 0 and rr.h > 0) {
+                        const ox: i64 = @intFromFloat(@round(pen + @as(f32, @floatFromInt(rr.x0))));
+                        const oy: i64 = @intFromFloat(@round(baseline + @as(f32, @floatFromInt(rr.y0))));
+                        var row: u32 = 0;
+                        while (row < rr.h) : (row += 1) {
+                            const py = oy + row;
+                            if (py < cy0 or py >= cy1) continue;
+                            var col: u32 = 0;
+                            while (col < rr.w) : (col += 1) {
+                                const gx_px = ox + @as(i64, col);
+                                if (gx_px < cx0 or gx_px >= cx1) continue;
+                                const cov = rr.pixels[row * rr.w + col];
+                                if (cov == 0) continue;
+                                blend(px, cw, ch, gx_px, py, solid_c orelse fill.colorAt(
+                                    box,
+                                    @as(f32, @floatFromInt(gx_px)) + 0.5,
+                                    @as(f32, @floatFromInt(py)) + 0.5,
+                                ), cov);
+                            }
                         }
                     }
                 }
-            }
 
-            pen += @as(f32, @floatFromInt(g.advance)) * s;
-            prev = gid;
+                pen += @as(f32, @floatFromInt(adv)) * s;
+            }
         }
     }
 };
