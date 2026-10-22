@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .glyfz = .{
-            .url = "git+https://github.com/scribbles-code/glyfz?ref=zig-0.16#90ded0f67556491c3e77568349c22f2858ce5dfa",
-            .hash = "glyfz-0.2.0-NGxR_PlRAgCv_FK-d450MAicToTiSdkySTd0wizc3ndw",
+            .url = "git+https://github.com/scribbles-code/glyfz?ref=zig-0.16#ab2e19671a5eb0ac23641d517d3874acdfeffbf1",
+            .hash = "glyfz-0.2.0-NGxR_GFwAgCodfbO0_wAOmXKieyQK2scISwghN-6E4mw",
         },
     },
     .paths = .{
