@@ -63,6 +63,17 @@ pub const Font = struct {
         return if (self.ok) self.id else 0;
     }
 
+    /// Whether a real typeface is attached.
+    ///
+    /// A caller that sees `false` has no glyphs to draw with, which is why the
+    /// renderer keeps a face of its own for exactly this case (`bitfont`). The
+    /// question is asked at the seam rather than guessed at the edge: `Font`
+    /// with no face is a legal value, so "is there a face" has to be answerable
+    /// without trying to measure something and finding out it measured zero.
+    pub fn available(self: *const Font) bool {
+        return self.ok;
+    }
+
     pub fn init(bytes: []const u8) Font {
         var f: Font = .{};
         if (bytes.len == 0) return f;

@@ -1,5 +1,6 @@
-//! Software backend for elmz: an RGB framebuffer with a 5x7 bitmap font, plus a
-//! dependency-free PNG encoder. This is the backend you want while you are
+//! Software backend for elmz: an RGB framebuffer with a dependency-free PNG
+//! encoder, plus `bitfont` -- the built-in 5x6 face used when no real typeface
+//! is attached, so a missing font is legible instead of blank. This is the backend you want while you are
 //! still arguing with layout; swap in a GPU backend later behind the same
 //! `elmz.Renderer` vtable.
 
@@ -7,6 +8,7 @@ const std = @import("std");
 const elmz = @import("elmz");
 const cedar = @import("cedar.zig");
 const gamma = @import("gamma.zig");
+const bitfont = @import("bitfont.zig");
 
 /// Cedar is the font backend. One name, because a canvas built against a face
 /// the rest of the library does not know is not a configuration anyone wants.
@@ -879,7 +881,71 @@ pub const Canvas = struct {
     }
 
     pub fn drawTextClip(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+        if (!self.font.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
         self.font.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
+    }
+
+    /// Text in the built-in face, for a canvas with no typeface attached.
+    ///
+    /// The alternative is not "slightly worse text", it is no text: the band
+    /// reporting a missing font is itself drawn with text, so the failure used
+    /// to leave a blank window that looked like a broken renderer. Blending
+    /// goes through `blendCoverage` like every other glyph, so a gradient fill
+    /// and a fractional alpha behave the same here as they do above.
+    fn drawTextBitmap(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+        const s = bitfont.scaleFor(size);
+        const cell: f32 = @floatFromInt(s);
+        const solid: ?elmz.Color = switch (fill) {
+            .solid => |c| c,
+            else => null,
+        };
+        var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
+        if (solid == null) {
+            const tm = bitfont.measure(bytes, size);
+            box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
+        }
+        const cx0: i64 = @intFromFloat(@floor(clip.x));
+        const cy0: i64 = @intFromFloat(@floor(clip.y));
+        const cx1: i64 = @intFromFloat(@ceil(clip.x + clip.w));
+        const cy1: i64 = @intFromFloat(@ceil(clip.y + clip.h));
+
+        var pen = x;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const cp = cedar.decode(bytes, &i);
+            if (cp != '\n') {
+                const rows = bitfont.glyphFor(cp);
+                const gx0: i64 = @intFromFloat(@round(pen));
+                const gy0: i64 = @intFromFloat(@round(y));
+                for (rows, 0..) |row, gy| {
+                    var gx: u32 = 0;
+                    while (gx < bitfont.glyph_w) : (gx += 1) {
+                        const lit = (row >> @intCast(bitfont.glyph_w - 1 - gx)) & 1;
+                        if (lit == 0) continue;
+                        // One glyph pixel is `s` square: a bitmap stays square
+                        // because `scaleFor` returns whole multiples only.
+                        var dy: u32 = 0;
+                        while (dy < s) : (dy += 1) {
+                            const yy = gy0 + @as(i64, @intCast(gy)) * @as(i64, @intCast(s)) + @as(i64, @intCast(dy));
+                            if (yy < cy0 or yy >= cy1) continue;
+                            var dx: u32 = 0;
+                            while (dx < s) : (dx += 1) {
+                                const xx = gx0 + @as(i64, @intCast(gx)) * @as(i64, @intCast(s)) + @as(i64, @intCast(dx));
+                                if (xx < cx0 or xx >= cx1) continue;
+                                if (xx < 0 or yy < 0 or xx >= self.w or yy >= self.h) continue;
+                                const cover = solid orelse fill.colorAt(
+                                    box,
+                                    @as(f32, @floatFromInt(xx)) + 0.5,
+                                    @as(f32, @floatFromInt(yy)) + 0.5,
+                                );
+                                self.blendCoverage(xx, yy, cover, 1.0);
+                            }
+                        }
+                    }
+                }
+            }
+            pen += cell * @as(f32, @floatFromInt(bitfont.advance));
+        }
     }
 
     fn blendCoverage(self: *Self, x: i64, y: i64, color: elmz.Color, cov: f32) void {
@@ -1692,7 +1758,7 @@ pub const Canvas = struct {
             return m;
         }
         self.measure_misses += 1;
-        const m = self.font.measure(bytes, dev);
+        const m = if (self.font.available()) self.font.measure(bytes, dev) else bitfont.measure(bytes, dev);
         if (self.measure_cache.count() >= measure_cap) self.clearMeasureCache();
         const owned = self.gpa.dupe(u8, bytes) catch return m;
         self.measure_cache.put(self.gpa, .{ .text = owned, .dev = dev, .face = face }, m) catch {
@@ -1731,7 +1797,10 @@ pub const Canvas = struct {
             return n;
         }
         self.wrap_misses += 1;
-        const n = self.font.wrapLines(bytes, dev, max_w, out);
+        const n = if (self.font.available())
+            self.font.wrapLines(bytes, dev, max_w, out)
+        else
+            bitfont.wrap(bytes, dev, max_w, out);
         if (self.wrap_cache.count() >= wrap_cap) self.clearWrapCache();
         // `wrapLines` returns subslices of `bytes`, so a break is an offset
         // into the text and never a pointer into anything borrowed.
@@ -1868,10 +1937,6 @@ pub const Canvas = struct {
         return out.toOwnedSlice(gpa);
     }
 };
-
-// ---------------------------------------------------------------------------
-// 5x7 font. MSB is the leftmost pixel.
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // the rasterizer, under test instead of under eyeball
@@ -3282,4 +3347,64 @@ test "a face with no cache storage measures but paints nothing" {
     c.clear(black);
     f.drawText(c.px, c.w, c.h, 2, 2, 16, .{ .solid = white }, "Wm", .{ .x = 0, .y = 0, .w = 80, .h = 30 });
     try std.testing.expectEqual(@as(usize, 0), inkPixels(c.px));
+}
+
+test "a canvas with no face still paints text, because the band is text too" {
+    var c = try testCanvas(testing.allocator, 140, 24);
+    defer c.deinit();
+
+    // A font path the app named and the filesystem could not produce leaves
+    // `Font.none` attached. Every diagnostic the runtime raises -- including
+    // "cannot read font" -- is drawn with text, so this used to be the one
+    // state that reported nothing at all: a blank window, indistinguishable
+    // from a broken renderer.
+    c.setFont("");
+    try testing.expect(!c.font.available());
+    try testing.expectEqual(@as(usize, 0), inkPixels(c.px));
+
+    const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    c.drawText(2, 2, 12, .{ .solid = white }, "font is missing");
+    try testing.expect(inkPixels(c.px) > 60);
+}
+
+test "the built-in face stays out of the way when a real one is attached" {
+    var c = try testCanvas(testing.allocator, 200, 24);
+    defer c.deinit();
+    try testing.expect(c.font.available());
+
+    // Not a pixel comparison -- a real face would pass that by accident. This
+    // compares the measurement, because the built-in face measures in whole
+    // multiples of six and a real one does not: a fallback that quietly took
+    // over would be a layout bug wearing a font's clothes.
+    const r = c.renderer();
+    const real = r.measureText("Hamburgefonstiv", 16);
+    const bitmap = bitfont.measure("Hamburgefonstiv", 16);
+    try testing.expect(real.width != bitmap.width);
+
+    c.setFont("");
+    const gone = c.renderer().measureText("Hamburgefonstiv", 16);
+    try testing.expectEqual(bitmap.width, gone.width);
+}
+
+test "the built-in face draws exactly the rows its table holds" {
+    // Every pixel of every glyph, against the table. Not a smoke test: a
+    // transposed bit, an off-by-one pitch or a dropped final column is exactly
+    // the class of error that a picture of legible text hides.
+    const w = bitfont.order.len * bitfont.advance;
+    var c = try testCanvas(testing.allocator, w, 8);
+    defer c.deinit();
+    c.setFont("");
+    c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+    c.drawText(0, 0, 6, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } }, bitfont.order);
+
+    for (bitfont.order, 0..) |ch, i| {
+        const rows = bitfont.glyphFor(ch);
+        for (rows, 0..) |row, gy| {
+            for (0..bitfont.glyph_w) |gx| {
+                const lit = (row >> @intCast(bitfont.glyph_w - 1 - gx)) & 1;
+                const got = c.px[(gy * w + i * bitfont.advance + gx) * 4];
+                try testing.expectEqual(@as(u8, if (lit == 1) 255 else 0), got);
+            }
+        }
+    }
 }
