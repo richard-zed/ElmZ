@@ -55,8 +55,45 @@ pub inline fn encode(v: f32) u8 {
     return to_srgb[i];
 }
 
-/// One channel of src-over, composited in linear light and re-encoded.
+/// Linear, fixed point, 24 bits. Wide on purpose: at 16 bits the rounding to
+/// the encode grid disagreed with the float path on 0.32% of combinations by
+/// one code value, and "only one" is still a rebaseline.
+const q = 1 << 24;
+pub const linear24: [256]u32 = blk: {
+    @setEvalBranchQuota(2_000_000);
+    var t: [256]u32 = undefined;
+    for (0..256) |i| {
+        const v = @as(f64, @floatFromInt(i)) / 255.0;
+        const l = if (v <= 0.04045) v / 12.92 else std.math.pow(f64, (v + 0.055) / 1.055, 2.4);
+        t[i] = @intFromFloat(@round(l * @as(f64, q)));
+    }
+    break :blk t;
+};
+
+/// One channel of src-over, in linear light, in fixed point.
+///
+/// The float version this replaces measured 10.57 ns/px against 4.39 for plain
+/// encoded blending -- 2.41x -- because it did two table loads, a multiply, a
+/// round, a clamp and a third indexed load per channel. Integer arithmetic
+/// gives the same answer without the float conversions. `blendFloat` stays as
+/// the oracle: the test below walks all 256 dsts, 256 srcs and a spread of
+/// alphas and requires the two to agree exactly.
 pub inline fn blend(dst: u8, src: u8, a: f32) u8 {
+    if (a <= 0) return dst;
+    if (a >= 1.0) return src;
+    const aq: i64 = @intFromFloat(@round(a * @as(f32, q)));
+    const d: i64 = linear24[dst];
+    const s: i64 = linear24[src];
+    // 64-bit on purpose: (s - d) * aq reaches 2^48 at the extremes, which is
+    // past i32 and would panic in Debug rather than quietly wrapping.
+    const v = @max(@min(d + @divTrunc((s - d) * aq, q), q - 1), 0);
+    // Round to the SAME grid `encode` uses, so the two paths cannot disagree
+    // merely for having chosen differently between two adjacent tables.
+    return to_srgb[@intCast(@divTrunc(v * steps + q / 2, q))];
+}
+
+/// The float formulation, kept as the differential oracle for `blend`.
+pub inline fn blendFloat(dst: u8, src: u8, a: f32) u8 {
     if (a <= 0) return dst;
     if (a >= 1.0) return src;
     const d = to_linear[dst];

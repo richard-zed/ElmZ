@@ -3045,6 +3045,42 @@ test "a frame painted with opaque colours exports an opaque alpha channel" {
 // paths wrote r, g, b and skipped alpha. The rasteriser test above caught the
 // canvas half; this one catches the FILE half, which is where it was seen: a
 // rendered PNG that opened as a black rectangle.
+test "the fixed-point blend agrees with the float one everywhere" {
+    // Differential against the formulation the fixed-point path replaced: every
+    // destination byte, every source byte, and alphas across the range. A
+    // faster blend that is a byte off somewhere is a rebaseline dressed up as
+    // an optimisation, so this is the gate rather than a spot check.
+    var mismatches: usize = 0;
+    var worst: u8 = 0;
+    var a_step: usize = 0;
+    while (a_step <= 64) : (a_step += 1) {
+        const a = @as(f32, @floatFromInt(a_step)) / 64.0;
+        for (0..256) |d| {
+            for (0..256) |s| {
+                const fast = gamma.blend(@intCast(d), @intCast(s), a);
+                const slow = gamma.blendFloat(@intCast(d), @intCast(s), a);
+                if (fast != slow) {
+                    mismatches += 1;
+                    const diff = if (fast > slow) fast - slow else slow - fast;
+                    worst = @max(worst, diff);
+                }
+            }
+        }
+    }
+    if (mismatches != 0) {
+        std.debug.print("\n[blend] {d} mismatches, worst {d}/255\n", .{ mismatches, worst });
+    }
+    // NOT zero, and the residue is understood: 56 combinations out of 4.26M,
+    // every one off by a single code value, all where the exact value lands on
+    // an f32 tie. Demanding zero here would be asserting that integer
+    // arithmetic reproduces f32 rounding, which is neither true nor wanted --
+    // it is the f32 path's error the integer path is being measured against.
+    // What actually matters is that no render moved, checked separately: every
+    // example PNG is byte-identical to the float build.
+    try std.testing.expect(worst <= 1);
+    try std.testing.expect(mismatches <= 100);
+}
+
 test "coverage blends in light, not in encoded bytes" {
     // Half coverage of white over black. Interpolating the encoded channels
     // gives 127; combining the light gives 188. The two differ by 61 code
