@@ -35,7 +35,7 @@ pub const OverlayStats = struct {
 /// is the number that decides whether the app feels smooth.
 pub const FrameRing = struct {
     pub const capacity = 60;
-    ns: [capacity]u64 = [_]u64{0} ** capacity,
+    ns: [capacity]u64 = @splat(0),
     head: usize = 0,
     len: usize = 0,
 

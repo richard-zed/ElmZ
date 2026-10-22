@@ -2975,7 +2975,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// Offsets for keyed scroll viewports. Fixed capacity, drop-oldest:
         /// an allocator for this would be state that can fail mid-frame, and a
         /// viewport that left the tree is not worth remembering anyway.
-        scroll_slots: [64]ScrollSlot = [_]ScrollSlot{.{}} ** 64,
+        scroll_slots: [64]ScrollSlot = @splat(.{}),
         scroll_n: usize = 0,
 
         pub fn init(
@@ -3888,7 +3888,8 @@ test "the band carries a formatted detail, then the kind's own text" {
 
     // Longer than the buffer is truncated rather than corrupt: the band must
     // not be able to fail while reporting a failure.
-    const long = "x" ** 232;
+    const long_buf: [232]u8 = @splat('x');
+    const long: []const u8 = &long_buf;
     ui.failFmt(.theme, "{s}", .{long});
     try std.testing.expectEqual(ui.fail_buf.len, ui.failMessage().len);
 
