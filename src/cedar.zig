@@ -66,7 +66,7 @@ pub const Font = struct {
     /// Whether a real typeface is attached.
     ///
     /// A caller that sees `false` has no glyphs to draw with, which is why the
-    /// renderer keeps a face of its own for exactly this case (`bitfont`). The
+    /// renderer keeps a face of its own for exactly this case (`elmfont`). The
     /// question is asked at the seam rather than guessed at the edge: `Font`
     /// with no face is a legal value, so "is there a face" has to be answerable
     /// without trying to measure something and finding out it measured zero.

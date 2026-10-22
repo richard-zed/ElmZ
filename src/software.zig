@@ -1,5 +1,5 @@
 //! Software backend for elmz: an RGB framebuffer with a dependency-free PNG
-//! encoder, plus `bitfont` -- the built-in 5x6 face used when no real typeface
+//! encoder, plus `elmfont` -- the built-in 5x6 face used when no real typeface
 //! is attached, so a missing font is legible instead of blank. This is the backend you want while you are
 //! still arguing with layout; swap in a GPU backend later behind the same
 //! `elmz.Renderer` vtable.
@@ -8,7 +8,7 @@ const std = @import("std");
 const elmz = @import("elmz");
 const cedar = @import("cedar.zig");
 const gamma = @import("gamma.zig");
-const bitfont = @import("bitfont.zig");
+const elmfont = @import("elmfont.zig");
 
 /// Cedar is the font backend. One name, because a canvas built against a face
 /// the rest of the library does not know is not a configuration anyone wants.
@@ -893,7 +893,7 @@ pub const Canvas = struct {
     /// goes through `blendCoverage` like every other glyph, so a gradient fill
     /// and a fractional alpha behave the same here as they do above.
     fn drawTextBitmap(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
-        const s = bitfont.scaleFor(size);
+        const s = elmfont.scaleFor(size);
         const cell: f32 = @floatFromInt(s);
         const solid: ?elmz.Color = switch (fill) {
             .solid => |c| c,
@@ -901,7 +901,7 @@ pub const Canvas = struct {
         };
         var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
         if (solid == null) {
-            const tm = bitfont.measure(bytes, size);
+            const tm = elmfont.measure(bytes, size);
             box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
         }
         const cx0: i64 = @intFromFloat(@floor(clip.x));
@@ -914,13 +914,13 @@ pub const Canvas = struct {
         while (i < bytes.len) {
             const cp = cedar.decode(bytes, &i);
             if (cp != '\n') {
-                const rows = bitfont.glyphFor(cp);
+                const rows = elmfont.glyphFor(cp);
                 const gx0: i64 = @intFromFloat(@round(pen));
                 const gy0: i64 = @intFromFloat(@round(y));
                 for (rows, 0..) |row, gy| {
                     var gx: u32 = 0;
-                    while (gx < bitfont.glyph_w) : (gx += 1) {
-                        const lit = (row >> @intCast(bitfont.glyph_w - 1 - gx)) & 1;
+                    while (gx < elmfont.glyph_w) : (gx += 1) {
+                        const lit = (row >> @intCast(elmfont.glyph_w - 1 - gx)) & 1;
                         if (lit == 0) continue;
                         // One glyph pixel is `s` square: a bitmap stays square
                         // because `scaleFor` returns whole multiples only.
@@ -944,7 +944,7 @@ pub const Canvas = struct {
                     }
                 }
             }
-            pen += cell * @as(f32, @floatFromInt(bitfont.advance));
+            pen += cell * @as(f32, @floatFromInt(elmfont.advance));
         }
     }
 
@@ -1758,7 +1758,7 @@ pub const Canvas = struct {
             return m;
         }
         self.measure_misses += 1;
-        const m = if (self.font.available()) self.font.measure(bytes, dev) else bitfont.measure(bytes, dev);
+        const m = if (self.font.available()) self.font.measure(bytes, dev) else elmfont.measure(bytes, dev);
         if (self.measure_cache.count() >= measure_cap) self.clearMeasureCache();
         const owned = self.gpa.dupe(u8, bytes) catch return m;
         self.measure_cache.put(self.gpa, .{ .text = owned, .dev = dev, .face = face }, m) catch {
@@ -1800,7 +1800,7 @@ pub const Canvas = struct {
         const n = if (self.font.available())
             self.font.wrapLines(bytes, dev, max_w, out)
         else
-            bitfont.wrap(bytes, dev, max_w, out);
+            elmfont.wrap(bytes, dev, max_w, out);
         if (self.wrap_cache.count() >= wrap_cap) self.clearWrapCache();
         // `wrapLines` returns subslices of `bytes`, so a break is an offset
         // into the text and never a pointer into anything borrowed.
@@ -3378,7 +3378,7 @@ test "the built-in face stays out of the way when a real one is attached" {
     // over would be a layout bug wearing a font's clothes.
     const r = c.renderer();
     const real = r.measureText("Hamburgefonstiv", 16);
-    const bitmap = bitfont.measure("Hamburgefonstiv", 16);
+    const bitmap = elmfont.measure("Hamburgefonstiv", 16);
     try testing.expect(real.width != bitmap.width);
 
     c.setFont("");
@@ -3390,19 +3390,19 @@ test "the built-in face draws exactly the rows its table holds" {
     // Every pixel of every glyph, against the table. Not a smoke test: a
     // transposed bit, an off-by-one pitch or a dropped final column is exactly
     // the class of error that a picture of legible text hides.
-    const w = bitfont.order.len * bitfont.advance;
+    const w = elmfont.order.len * elmfont.advance;
     var c = try testCanvas(testing.allocator, w, 8);
     defer c.deinit();
     c.setFont("");
     c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
-    c.drawText(0, 0, 6, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } }, bitfont.order);
+    c.drawText(0, 0, 6, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } }, elmfont.order);
 
-    for (bitfont.order, 0..) |ch, i| {
-        const rows = bitfont.glyphFor(ch);
+    for (elmfont.order, 0..) |ch, i| {
+        const rows = elmfont.glyphFor(ch);
         for (rows, 0..) |row, gy| {
-            for (0..bitfont.glyph_w) |gx| {
-                const lit = (row >> @intCast(bitfont.glyph_w - 1 - gx)) & 1;
-                const got = c.px[(gy * w + i * bitfont.advance + gx) * 4];
+            for (0..elmfont.glyph_w) |gx| {
+                const lit = (row >> @intCast(elmfont.glyph_w - 1 - gx)) & 1;
+                const got = c.px[(gy * w + i * elmfont.advance + gx) * 4];
                 try testing.expectEqual(@as(u8, if (lit == 1) 255 else 0), got);
             }
         }
