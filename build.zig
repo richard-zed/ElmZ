@@ -228,6 +228,22 @@ pub fn build(b: *std.Build) void {
     const effects_exe_install = b.addInstallArtifact(effects_exe, .{});
     b.getInstallStep().dependOn(&effects_exe_install.step);
     b.step("effects", "build the shadow + frost render").dependOn(&effects_exe_install.step);
+
+    const path_exe = b.addExecutable(.{
+        .name = "path",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/path.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+            },
+        }),
+    });
+    const path_exe_install = b.addInstallArtifact(path_exe, .{});
+    b.getInstallStep().dependOn(&path_exe_install.step);
+    b.step("path", "build the outline fill render").dependOn(&path_exe_install.step);
     const overlay_exe = b.addExecutable(.{
         .name = "overlay",
         .root_module = b.createModule(.{
@@ -621,6 +637,7 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&radius_exe_install.step);
     examples_step.dependOn(&paint_exe_install.step);
     examples_step.dependOn(&effects_exe_install.step);
+    examples_step.dependOn(&path_exe_install.step);
     examples_step.dependOn(&overlay_exe_install.step);
     examples_step.dependOn(&bench_install.step);
     examples_step.dependOn(&showcase_exe_install.step);
