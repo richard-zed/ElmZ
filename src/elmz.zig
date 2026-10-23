@@ -3379,10 +3379,22 @@ pub fn Executor(comptime M: type) type {
             };
         }
 
+        /// Queue a completed message. The CALLER holds the mutex.
+        ///
+        /// A result that cannot be queued is the same outcome as a command that
+        /// never started: the app waits for a message that will not arrive, and
+        /// cannot tell that from slow work. It is counted in `lost` for exactly
+        /// that reason rather than dropped.
+        fn queueLocked(self: *Self, m: M) void {
+            self.done.append(self.gpa, m) catch {
+                self.lost += 1;
+            };
+        }
+
         fn worker(self: *Self, cmd: Cmd(M), job: *Job) void {
             const out = cmd.run(cmd.ctx);
             self.mutex.lock();
-            if (out) |m| self.done.append(self.gpa, m) catch {};
+            if (out) |m| self.queueLocked(m);
             self.outstanding -= 1;
             self.mutex.unlock();
             // LAST statement: once this store is visible, `reap` may join this
@@ -6583,4 +6595,18 @@ test "a command still running does not stop finished ones being reaped" {
     try std.testing.expect(!ex.busy());
     ex.reap();
     try std.testing.expectEqual(@as(usize, 0), ex.handles.items.len);
+}
+
+test "a result that cannot be queued is counted, not dropped in silence" {
+    // `lost` exists because a command with no message is indistinguishable, from
+    // the app's side, from one that is merely slow. A result that finished and
+    // then failed to fit is the same situation and gets the same count -- the
+    // alternative is a screen that waits forever with no way to tell why.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var ex: Executor(u32) = .{ .gpa = failing.allocator() };
+    defer ex.deinit();
+
+    ex.queueLocked(7);
+    try std.testing.expectEqual(@as(usize, 0), ex.done.items.len);
+    try std.testing.expectEqual(@as(usize, 1), ex.lostCommands());
 }
