@@ -725,6 +725,7 @@ pub fn run(
             const secs = raw / std.time.ns_per_s;
             rt.elapsed += secs;
             rt.since_input += secs;
+            rt.hover_since += secs;
         }
         // Outbound clipboard writes are applied by `dispatch`, which has no
         // other route to the platform. Assigned each iteration because a
@@ -896,6 +897,10 @@ pub fn run(
                     const now: ?elmz.Rect = if (f.hit(p)) |h| h.rect else null;
                     if (!sameRect(now, hovered)) {
                         hovered = now;
+                        // The pointer arrived somewhere new, so the dwell
+                        // clock starts again -- that is what makes a tooltip
+                        // wait exactly once per target.
+                        rt.hover_since = 0;
                         dirty = true;
                     }
                 } else dirty = true;

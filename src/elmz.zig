@@ -1017,6 +1017,14 @@ pub fn Hit(comptime M: type) type {
         /// nothing, and its identity is the viewport's, so the duplicate-key
         /// scan stays meaningful.
         drag: ?Drag = null,
+        /// The focus scope this region was recorded inside, or null at the
+        /// root. Assigned after the subtree paints, so an element cannot
+        /// disagree with its own container about where it lives.
+        scope: ?u64 = null,
+        /// Set on a row of a roving control: the control's key. Null on
+        /// everything else, including the control itself.
+        roving: ?u64 = null,
+        roving_index: u16 = 0,
         /// Identity of the element that produced this region, if it declared
         /// one. A keyed press re-binds to the element carrying the same key
         /// instead of to a rectangle, so it survives the content reordering
@@ -1181,6 +1189,17 @@ pub fn Element(comptime M: type) type {
         /// makes any element pressable, not just buttons
         on_press: ?M = null,
         /// What the runtime needs to ask this node after layout, if it is a
+        /// Declares that this subtree is a FOCUS SCOPE keyed by this element.
+        /// Focus does not leave it while it is open: with a dialog up, Tab
+        /// cycles the dialog instead of walking the page behind it. The regions
+        /// the subtree records are stamped with this key on the way out, so no
+        /// parameter has to be threaded through `paint`.
+        focus_scope: bool = false,
+        /// Set by a builder on rows belonging to a roving control. Such a row is
+        /// NOT a Tab stop -- the control is -- which is what collapses a
+        /// twenty-row list into one press of Tab.
+        roving: ?u64 = null,
+        roving_index: u16 = 0,
         /// control. Declared by a widget builder and owned by the frame arena;
         /// an app never writes it, and the builder owns the pairing with
         /// `geometry` so the two cannot disagree.
@@ -1592,6 +1611,18 @@ pub fn Element(comptime M: type) type {
             // inherited. Its children get one more intersection if it clips.
             const child_clip = if (self.clips) rect.intersect(clip) else clip;
 
+            // Everything recorded from here down belongs to this scope, and it
+            // is stamped on the way OUT: the subtree is measured as it paints,
+            // so the region list is only complete once the children are done.
+            // Doing it here rather than threading a parameter through `paint`
+            // keeps one source of truth -- the element that declared the scope.
+            const scope_start = hits.items.len;
+            defer if (self.focus_scope) {
+                if (self.key) |k| {
+                    for (hits.items[scope_start..]) |*h| h.scope = k;
+                }
+            };
+
             // Derived appearance. A press in flight beats hover, and it beats
             // it everywhere: while one element owns the press, nothing else
             // lights up. That is capture made visible.
@@ -1715,6 +1746,8 @@ pub fn Element(comptime M: type) type {
                     .radius = self.radius,
                     .focusable = self.focusable and self.key != null,
                     .widget = self.widget,
+                    .roving = self.roving,
+                    .roving_index = self.roving_index,
                     // Only a slider takes the pointer as a drag. Everything else
                     // with a widget is a press or a popup anchor, and a region
                     // that claimed a drag without a mapping would swallow motion
@@ -2032,6 +2065,11 @@ pub fn Ui(comptime M: type) type {
         /// blink while typing" costs the app nothing, and so four widgets
         /// cannot disagree about when typing stopped.
         since_input: f32 = 0,
+        /// How long the pointer has rested on the current region, reset when
+        /// it moves to a different one. The tooltip delay and nothing else:
+        /// `elapsed` says how long the app has run, not how long you have been
+        /// looking at that particular thing.
+        hover_since: f32 = 0,
         /// The READ side of the scroll store: whatever the runtime is holding
         /// for each keyed viewport. Read-only here because the offset is not
         /// the app's to write -- the wheel and the thumb own it.
@@ -2472,9 +2510,17 @@ pub fn Frame(comptime M: type) type {
         pub fn focusStep(self: *const Self, from: ?u64, forward: bool) ?u64 {
             var n: usize = 0;
             var at: ?usize = null;
+            // Focus does not leave an open scope. `from` says where focus is,
+            // and the scope it sits in is therefore the one in force -- no
+            // "which dialog is open" flag to keep in step with the tree.
+            const active_scope = self.scopeOf(from);
             for (self.hits) |h| {
                 if (!h.focusable or !h.active) continue;
                 const k = h.key orelse continue;
+                if (h.scope != active_scope) continue;
+                // A row of a roving control is not a stop of its own: the
+                // control is, so Tab crosses a twenty-row list in one press.
+                if (h.roving != null) continue;
                 if (from) |f| {
                     if (f == k and at == null) at = n;
                 }
@@ -2489,6 +2535,8 @@ pub fn Frame(comptime M: type) type {
             for (self.hits) |h| {
                 if (!h.focusable or !h.active) continue;
                 const k = h.key orelse continue;
+                if (h.scope != active_scope) continue;
+                if (h.roving != null) continue;
                 if (i == want) return k;
                 i += 1;
             }
@@ -2515,6 +2563,48 @@ pub fn Frame(comptime M: type) type {
                 }
             }
             return null;
+        }
+
+        /// The scope a keyed region lives in: the innermost element that
+        /// declared `focus_scope`, or null at the root.
+        pub fn scopeOf(self: *const Self, key: ?u64) ?u64 {
+            const k = key orelse return null;
+            for (self.hits) |h| {
+                if (h.key) |hk| {
+                    if (hk == k) return h.scope;
+                }
+            }
+            return null;
+        }
+
+        /// One row of a roving control, as the runtime needs it: where it is
+        /// in the set, and what to focus or scroll to.
+        pub const Roamer = struct { index: u16, key: u64, rect: Rect };
+
+        /// The row `delta` places from `from_index` inside the control `owner`,
+        /// clamped rather than wrapped: running off the end of a list should
+        /// stop, not teleport to the other end. Rows are laid down in document
+        /// order, so their `roving_index` is already ascending.
+        pub fn rovingStep(self: *const Self, owner: u64, from_index: u16, delta: i32) ?Roamer {
+            var lo: ?Roamer = null;
+            var hi: ?Roamer = null;
+            const want: i32 = @as(i32, from_index) + delta;
+            for (self.hits) |h| {
+                if (h.roving) |o| {
+                    if (o != owner) continue;
+                    const k = h.key orelse continue;
+                    const r = Roamer{ .index = h.roving_index, .key = k, .rect = h.rect };
+                    // Clamp: remember the nearest row on each side of where we
+                    // want to be, so moving past either end lands on the end.
+                    if (r.index <= want) {
+                        if (lo == null or r.index > lo.?.index) lo = r;
+                    }
+                    if (r.index >= want) {
+                        if (hi == null or r.index < hi.?.index) hi = r;
+                    }
+                }
+            }
+            return hi orelse lo;
         }
 
         /// Activated by the focused control, if it has one.
@@ -3382,6 +3472,11 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// Seconds since the last key or text event. The runner resets it and
         /// mirrors it into `Ui`; nothing else writes it.
         since_input: f32 = 0,
+        /// How long the pointer has rested on the current region, reset when
+        /// it moves to a different one. The tooltip delay and nothing else:
+        /// `elapsed` says how long the app has run, not how long you have been
+        /// looking at that particular thing.
+        hover_since: f32 = 0,
         /// Whether a text-input widget holds focus, which is what suppresses
         /// bare-key shortcuts -- an unmodified `s` must type an `s`, not fire
         /// a command. Nothing sets it yet: there is no text input. The field
@@ -3611,6 +3706,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             self.ui.focus = self.focus;
             self.ui.elapsed = self.elapsed;
             self.ui.since_input = self.since_input;
+            self.ui.hover_since = self.hover_since;
             self.ui.scrolls = self.scroll_slots[0..self.scroll_n];
 
             const root = self.viewFn(&self.state, &self.ui);
@@ -5652,4 +5748,120 @@ test "a vertical slider is loudest at the top" {
     try std.testing.expectEqual(@as(f32, 0), sliderValueAt(d, .{ 5, 100 }));
     // Outside the track clamps instead of running off the end.
     try std.testing.expectEqual(@as(f32, 100), sliderValueAt(d, .{ 5, -50 }));
+}
+
+const ScopeMsg = enum { a, b, c };
+const ScopeState = struct { open: bool = true };
+
+/// A dialog (keys 10, 11) over a page that has one control of its own (20).
+fn scopeView(s: *ScopeState, ui: *Ui(ScopeMsg)) *Element(ScopeMsg) {
+    const behind = ui.button(.{ .label = "behind", .msg = .a, .key = 20 });
+    behind.focusable = true;
+    const one = ui.button(.{ .label = "one", .msg = .b, .key = 10 });
+    one.focusable = true;
+    const two = ui.button(.{ .label = "two", .msg = .b, .key = 11 });
+    two.focusable = true;
+    const dlg = ui.column(.{ .children = &.{ one, two } });
+    dlg.key = 99;
+    dlg.focus_scope = s.open;
+    return ui.column(.{ .children = &.{ behind, dlg } });
+}
+
+fn scopeUpdate(_: *ScopeState, _: ScopeMsg) Action(ScopeMsg) {
+    return .{};
+}
+
+test "focus does not leave an open scope" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(ScopeState, ScopeMsg).init(gpa, .{}, scopeUpdate, scopeView);
+    defer rt.deinit();
+
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        // The dialog's controls sit in the dialog's scope, the page control does
+        // not. Without this, Tab walks the page behind an open dialog.
+        try std.testing.expectEqual(@as(?u64, 99), f.scopeOf(10));
+        try std.testing.expectEqual(@as(?u64, 99), f.scopeOf(11));
+        try std.testing.expectEqual(@as(?u64, null), f.scopeOf(20));
+        // Cycling inside the dialog, never reaching the control behind it.
+        try std.testing.expectEqual(@as(?u64, 11), f.focusStep(10, true));
+        try std.testing.expectEqual(@as(?u64, 10), f.focusStep(11, true));
+        try std.testing.expectEqual(@as(?u64, 11), f.focusStep(10, false));
+    }
+
+    // Closed, the scope is gone and Tab crosses the whole page again.
+    rt.state.open = false;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(?u64, null), f.scopeOf(10));
+        try std.testing.expectEqual(@as(?u64, 11), f.focusStep(10, true));
+        try std.testing.expectEqual(@as(?u64, 20), f.focusStep(11, true));
+    }
+}
+
+const RoveMsg = enum { pick };
+const RoveState = struct {};
+
+/// A roving control (key 30) with three rows (40, 41, 42), then a control that
+/// follows it (50).
+fn roveView(_: *RoveState, ui: *Ui(RoveMsg)) *Element(RoveMsg) {
+    const owner = ui.button(.{ .label = "list", .msg = .pick, .key = 30 });
+    owner.focusable = true;
+    var kids: [5]*Element(RoveMsg) = undefined;
+    kids[0] = owner;
+    var i: u16 = 0;
+    while (i < 3) : (i += 1) {
+        const r = ui.button(.{ .label = "row", .msg = .pick, .key = 40 + i });
+        // Rows ARE focusable -- Enter has to be routable to one of them. It is
+        // `roving` that keeps them out of the Tab cycle, not inertness, so a
+        // test with inert rows would pass with the roving rule deleted.
+        r.focusable = true;
+        r.roving = 30;
+        r.roving_index = i;
+        kids[1 + i] = r;
+    }
+    const after = ui.button(.{ .label = "after", .msg = .pick, .key = 50 });
+    after.focusable = true;
+    kids[4] = after;
+    return ui.column(.{ .children = &kids });
+}
+
+fn roveUpdate(_: *RoveState, _: RoveMsg) Action(RoveMsg) {
+    return .{};
+}
+
+test "a roving control is one tab stop, not one per row" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(RoveState, RoveMsg).init(gpa, .{}, roveUpdate, roveView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+    defer f.deinit();
+
+    // Tab lands on the control and then leaves: no row is a stop of its own.
+    try std.testing.expectEqual(@as(?u64, 30), f.focusStep(null, true));
+    try std.testing.expectEqual(@as(?u64, 50), f.focusStep(30, true));
+    try std.testing.expectEqual(@as(?u64, 30), f.focusStep(50, true));
+    try std.testing.expectEqual(@as(?u64, 30), f.focusStep(50, false));
+}
+
+test "a roving cursor moves between rows and stops at the ends" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(RoveState, RoveMsg).init(gpa, .{}, roveUpdate, roveView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+    defer f.deinit();
+
+    try std.testing.expectEqual(@as(u16, 1), f.rovingStep(30, 0, 1).?.index);
+    try std.testing.expectEqual(@as(u64, 41), f.rovingStep(30, 0, 1).?.key);
+    // Walking off the end stops on the last row instead of wrapping, because
+    // the far end of a long list is usually offscreen and a teleport reads as
+    // a jump to nowhere.
+    try std.testing.expectEqual(@as(u16, 2), f.rovingStep(30, 2, 1).?.index);
+    try std.testing.expectEqual(@as(u16, 0), f.rovingStep(30, 0, -1).?.index);
+    // A control with no rows has nothing to step through.
+    try std.testing.expectEqual(@as(?Frame(RoveMsg).Roamer, null), f.rovingStep(50, 0, 1));
 }
