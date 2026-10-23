@@ -3330,6 +3330,15 @@ pub fn Executor(comptime M: type) type {
         handles: std.ArrayList(Handle) = .empty,
         outstanding: usize = 0, // guarded by mutex
         lost: usize = 0, // guarded by mutex
+        /// How many commands may hold a thread at once. A screen that fires a
+        /// command per row would otherwise be a thread per row. There is no
+        /// idle pool because a worker waiting for work needs a BLOCKING wait,
+        /// and 0.16 keeps those on `std.Io`, which this type deliberately has
+        /// none of -- so a worker that finds the queue empty exits instead.
+        max_running: usize = 8,
+        running: usize = 0, // guarded by mutex
+        /// Commands over the cap, waiting for a worker to take one.
+        pending: std.ArrayList(Cmd(M)) = .empty, // guarded by mutex
 
         /// Per-command completion, heap-owned so its address is stable: the
         /// handle list can reallocate while a worker is still writing to this,
@@ -3343,27 +3352,34 @@ pub fn Executor(comptime M: type) type {
         };
 
         pub fn submit(self: *Self, cmd: Cmd(M)) void {
+            self.mutex.lock();
+            self.outstanding += 1;
+            if (self.running >= self.max_running) {
+                // Every slot is taken. Waiting here is not an option, so the
+                // command is queued and a worker takes it when it finishes --
+                // which needs no waiting primitive at all.
+                self.pending.append(self.gpa, cmd) catch {
+                    self.outstanding -= 1;
+                    self.lost += 1;
+                };
+                self.mutex.unlock();
+                return;
+            }
+            self.running += 1;
+            self.mutex.unlock();
+
             const job = self.gpa.create(Job) catch {
                 // Without a completion flag the handle could never be reaped,
                 // which is the unbounded list this type exists to avoid. Not
                 // starting is the honest outcome, and it is counted.
-                self.mutex.lock();
-                self.lost += 1;
-                self.mutex.unlock();
+                self.failStart();
                 return;
             };
             job.* = .{};
 
-            self.mutex.lock();
-            self.outstanding += 1;
-            self.mutex.unlock();
-
             const t = std.Thread.spawn(.{}, worker, .{ self, cmd, job }) catch {
-                self.mutex.lock();
-                self.outstanding -= 1;
-                self.lost += 1;
-                self.mutex.unlock();
                 self.gpa.destroy(job);
+                self.failStart();
                 return;
             };
             self.handles.append(self.gpa, .{ .thread = t, .job = job }) catch {
@@ -3379,6 +3395,16 @@ pub fn Executor(comptime M: type) type {
             };
         }
 
+        /// Give back a slot that never became a thread. It is not in flight, so
+        /// it must not keep `busy()` true, and the app will never hear from it.
+        fn failStart(self: *Self) void {
+            self.mutex.lock();
+            self.running -= 1;
+            self.outstanding -= 1;
+            self.lost += 1;
+            self.mutex.unlock();
+        }
+
         /// Queue a completed message. The CALLER holds the mutex.
         ///
         /// A result that cannot be queued is the same outcome as a command that
@@ -3391,16 +3417,33 @@ pub fn Executor(comptime M: type) type {
             };
         }
 
-        fn worker(self: *Self, cmd: Cmd(M), job: *Job) void {
-            const out = cmd.run(cmd.ctx);
-            self.mutex.lock();
-            if (out) |m| self.queueLocked(m);
-            self.outstanding -= 1;
-            self.mutex.unlock();
-            // LAST statement: once this store is visible, `reap` may join this
-            // thread at any moment, so nothing may touch `self` or `job` after
-            // it, and the unlock has to have happened first.
-            job.finished.store(true, .release);
+        fn worker(self: *Self, first: Cmd(M), job: *Job) void {
+            var cmd = first;
+            while (true) {
+                const out = cmd.run(cmd.ctx);
+                self.mutex.lock();
+                if (out) |m| self.queueLocked(m);
+                // THIS command is finished, whichever thread ran it. Counting
+                // the decrement once at exit instead would leave every adopted
+                // command on `outstanding` forever -- `busy()` true for the
+                // session and `deinit` spinning, which is how this bug first
+                // showed up: as a hang, not a failure.
+                self.outstanding -= 1;
+                if (self.pending.items.len != 0) {
+                    // Take over a command that could not have a thread of its
+                    // own. The slot is unchanged, so `running` does not move.
+                    cmd = self.pending.orderedRemove(0);
+                    self.mutex.unlock();
+                    continue;
+                }
+                self.running -= 1;
+                self.mutex.unlock();
+                // LAST statement: once this store is visible, `reap` may join
+                // this thread at any moment, so nothing may touch `self` or
+                // `job` after it, and the unlock has to have happened first.
+                job.finished.store(true, .release);
+                return;
+            }
         }
 
         /// Commands that could not be started. A command that never runs is a
@@ -3472,6 +3515,9 @@ pub fn Executor(comptime M: type) type {
             }
             self.handles.deinit(self.gpa);
             self.done.deinit(self.gpa);
+            // Emptied by the workers above: one only exits when it finds this
+            // queue empty, so reaching zero `outstanding` means it is empty.
+            self.pending.deinit(self.gpa);
         }
     };
 }
@@ -6609,4 +6655,50 @@ test "a result that cannot be queued is counted, not dropped in silence" {
     ex.queueLocked(7);
     try std.testing.expectEqual(@as(usize, 0), ex.done.items.len);
     try std.testing.expectEqual(@as(usize, 1), ex.lostCommands());
+}
+
+test "a burst of commands cannot grow threads without bound" {
+    // The commands BLOCK until released, or the fast ones would finish before
+    // the next submit and the cap would never bind -- the first version of this
+    // test passed for exactly that reason and proved nothing.
+    var ex: Executor(u32) = .{ .gpa = std.testing.allocator, .max_running = 2 };
+    defer ex.deinit();
+
+    const Gate = struct {
+        ran: std.atomic.Value(usize) = .init(0),
+        release: std.atomic.Value(bool) = .init(false),
+    };
+    var gate = Gate{};
+    const H = struct {
+        fn hold(ctx: *const anyopaque) ?u32 {
+            const g: *Gate = @ptrCast(@alignCast(@constCast(ctx)));
+            _ = g.ran.fetchAdd(1, .monotonic);
+            while (!g.release.load(.acquire)) std.Thread.yield() catch {};
+            return 1;
+        }
+    };
+    // If any assertion below fails, `deinit` waits for `outstanding` to reach
+    // zero and the blocked workers only stop when released -- so a failing
+    // assert used to HANG the test binary instead of reporting. Release first.
+    errdefer gate.release.store(true, .release);
+    for (0..6) |_| ex.submit(.{ .ctx = @ptrCast(&gate), .run = H.hold });
+
+    try std.testing.expectEqual(@as(usize, 2), ex.handles.items.len);
+    ex.mutex.lock();
+    const queued = ex.pending.items.len;
+    ex.mutex.unlock();
+    try std.testing.expectEqual(@as(usize, 4), queued);
+
+    // Releasing lets a worker take the next queued command before it exits, so
+    // the queue drains with no extra threads and no `reap` in this loop.
+    gate.release.store(true, .release);
+    var guard: usize = 0;
+    while (ex.busy() and guard < 400_000) : (guard += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!ex.busy());
+    try std.testing.expectEqual(@as(usize, 6), gate.ran.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), ex.lostCommands());
+    try std.testing.expectEqual(@as(usize, 2), ex.handles.items.len);
+
+    ex.reap();
+    try std.testing.expectEqual(@as(usize, 0), ex.handles.items.len);
 }
