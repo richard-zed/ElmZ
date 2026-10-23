@@ -1930,6 +1930,21 @@ pub fn Ui(comptime M: type) type {
         /// belongs to it, and the app does not have to keep a second copy of
         /// the answer in its Model. Null means nothing holds focus.
         focus: ?u64 = null,
+        /// Seconds since the runtime started, mirrored before `view` runs.
+        ///
+        /// The READ half of the frame clock, and the reason `view` needs none
+        /// of its own: a caret that blinks, a tooltip held long enough to
+        /// appear, a toast that expires and a typeahead buffer that lapses ask
+        /// the same question, and the runtime is the one thing that always
+        /// knows the answer.
+        ///
+        /// A number rather than a callback, so the tree stays a value and a
+        /// headless test can hand `view` whatever time it likes.
+        elapsed: f32 = 0,
+        /// Seconds since the last key or text event. Read here so "do not
+        /// blink while typing" costs the app nothing, and so four widgets
+        /// cannot disagree about when typing stopped.
+        since_input: f32 = 0,
         /// The READ side of the scroll store: whatever the runtime is holding
         /// for each keyed viewport. Read-only here because the offset is not
         /// the app's to write -- the wheel and the thumb own it.
@@ -2825,6 +2840,16 @@ pub fn Action(comptime M: type) type {
         /// frame. This is the channel for "show me the top" and "reveal the
         /// row I just added"; the wheel and the thumb do not come through here.
         scroll: ?ScrollChange = null,
+        /// Put these bytes on the clipboard. An EFFECT, like `focus` and
+        /// `scroll`, because the app can ask but cannot do it: `view` has no
+        /// platform, and `Cmd` runs off-thread and returns a ?M rather than a
+        /// side effect. There is no `cut` variant -- a cut is a copy plus the
+        /// app deleting from its own Model, which only it can do anyway, and a
+        /// field that changed nothing would be a lie in the type.
+        ///
+        /// The bytes are arena-lived: valid until the frame ends. A caller that
+        /// keeps them past `update` must own them.
+        clipboard: ?[]const u8 = null,
 
         pub fn then(c: Cmd(M)) @This() {
             return .{ .cmd = c };
@@ -2984,6 +3009,98 @@ pub const Key = struct {
     repeat: bool = false,
 };
 
+/// How a shortcut names its key.
+///
+/// Two spellings because they answer different questions. `ch` is the LABEL --
+/// what Ctrl+S means, which on Dvorak is the key that types `o` -- and `named`
+/// is the common set of named keys. A raw `code` is deliberately NOT bindable:
+/// a shortcut bound to a physical position is the one that stops working the
+/// day somebody switches layout.
+pub const ShortcutKey = union(enum) {
+    ch: u8,
+    named: Named,
+
+    /// So a call site reads `.key = ShortcutKey.char('s')`.
+    pub fn char(c: u8) ShortcutKey {
+        return .{ .ch = c };
+    }
+};
+
+/// One binding. Declared on the app, comptime, so a collision is a build error.
+pub fn Shortcut(comptime M: type) type {
+    return struct {
+        key: ShortcutKey,
+        ctrl: bool = false,
+        shift: bool = false,
+        alt: bool = false,
+        gui: bool = false,
+        msg: M,
+    };
+}
+
+/// Whether `k` is exactly the chord `sc` names.
+///
+/// Every modifier must match, including the absent ones: Ctrl+Shift+S is not
+/// Ctrl+S, and a rule that ignored `shift` would make the two impossible to
+/// tell apart. Pure, so the matching rule is testable without a window, a
+/// runner or a frame.
+pub fn shortcutMatches(sc: anytype, k: Key) bool {
+    if (k.mods.ctrl != sc.ctrl) return false;
+    if (k.mods.shift != sc.shift) return false;
+    if (k.mods.alt != sc.alt) return false;
+    if (k.mods.gui != sc.gui) return false;
+    return switch (sc.key) {
+        .ch => |c| blk: {
+            if (k.code > 127) break :blk false;
+            break :blk std.ascii.toLower(@as(u8, @intCast(k.code))) == std.ascii.toLower(c);
+        },
+        .named => |n| k.named == n,
+    };
+}
+
+/// A binding with no command modifier is BARE: it types a character.
+///
+/// Shift does not count as a modifier here, because Shift+S is how a capital S
+/// is typed -- treating it as a chord would make "select all" fire on a
+/// keystroke someone meant as a letter.
+pub fn isBareShortcut(sc: anytype) bool {
+    return !sc.ctrl and !sc.alt and !sc.gui;
+}
+
+/// The message `k` should dispatch, or null when no binding claims it.
+///
+/// Bare bindings are skipped while a text field has focus, or every letter
+/// typed into it would also run a command.
+pub fn shortcutFor(comptime M: type, comptime list: anytype, k: Key, text_editing: bool) ?M {
+    inline for (list) |sc| {
+        // One combined condition rather than two `continue`s: `continue` inside
+        // `inline for` is comptime control flow and does not belong in a
+        // function the runtime calls.
+        if (shortcutMatches(sc, k) and !(text_editing and isBareShortcut(sc))) {
+            return sc.msg;
+        }
+    }
+    return null;
+}
+
+/// Comptime guard: two commands on one chord is a build error, never a race
+/// decided by whichever arm was written first.
+pub fn checkShortcuts(comptime list: anytype) void {
+    comptime {
+        for (0..list.len) |i| {
+            for (i + 1..list.len) |j| {
+                const a = list[i];
+                const b = list[j];
+                if (a.ctrl == b.ctrl and a.shift == b.shift and a.alt == b.alt and
+                    a.gui == b.gui and std.meta.eql(a.key, b.key))
+                {
+                    @compileError("two shortcuts are bound to the same chord");
+                }
+            }
+        }
+    }
+}
+
 /// Scroll wheel movement, in the platform's own units.
 ///
 /// The deltas are NOT normalised. A notched wheel reports whole steps, a
@@ -3097,6 +3214,18 @@ pub const Window = struct {
         /// device pixels. Nothing else above the renderer should read it.
         density: *const fn (ptr: *anyopaque) f32,
         deinit: *const fn (ptr: *anyopaque) void,
+        /// Clipboard text, for PASTE. Borrowed, valid until the next call, so
+        /// a caller that keeps it must copy it -- the same contract as
+        /// `Event.text`. Optional because a headless backend has no clipboard
+        /// and null is the honest answer.
+        ///
+        /// This cannot arrive as `Event.text`: a Ctrl chord produces no text
+        /// event, and no platform synthesises a paste. So the runtime reads the
+        /// clipboard itself, at the one point it sees the key first.
+        clipboard_text: ?*const fn (ptr: *anyopaque) ?[]const u8 = null,
+        /// Put text on the clipboard: the outbound half of the same seam.
+        /// Optional for the same reason.
+        set_clipboard: ?*const fn (ptr: *anyopaque, text: []const u8) void = null,
     };
 
     pub fn poll(self: Window, timeout_ms: i32) ?Event {
@@ -3117,6 +3246,17 @@ pub const Window = struct {
 
     pub fn deinit(self: Window) void {
         self.vtable.deinit(self.ptr);
+    }
+
+    /// What is on the clipboard, or null when there is nothing to read.
+    pub fn clipboardText(self: Window) ?[]const u8 {
+        const f = self.vtable.clipboard_text orelse return null;
+        return f(self.ptr);
+    }
+
+    pub fn setClipboard(self: Window, text: []const u8) void {
+        const f = self.vtable.set_clipboard orelse return;
+        f(self.ptr, text);
     }
 };
 
@@ -3147,6 +3287,26 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// `?u64` rather than a focus ring with a destination, so the tree stays
         /// a value and no widget needs a closure to ask "am I focused".
         focus: ?u64 = null,
+        /// Seconds since the runtime started, accumulated from the RAW clock
+        /// delta rather than the clamped `dt` given to `on_tick`: the clamp
+        /// exists so a stall cannot teleport an animation, and freezing a blink
+        /// for the same stall would be the worse of the two failures.
+        elapsed: f32 = 0,
+        /// Seconds since the last key or text event. The runner resets it and
+        /// mirrors it into `Ui`; nothing else writes it.
+        since_input: f32 = 0,
+        /// Whether a text-input widget holds focus, which is what suppresses
+        /// bare-key shortcuts -- an unmodified `s` must type an `s`, not fire
+        /// a command. Nothing sets it yet: there is no text input. The field
+        /// exists so that widget has somewhere to say so, rather than the rule
+        /// arriving later as a second mechanism.
+        text_editing: bool = false,
+        /// The window, when there is one. Held ONLY for outbound effects the
+        /// runtime applies on the app's behalf -- today that is the clipboard
+        /// -- because `dispatch` is the single funnel for those and it has no
+        /// other route to the platform. Null in tests, which is what keeps a
+        /// clipboard write headlessly observable.
+        window: ?Window = null,
         /// Optional keystroke hooks, wired by `runApp` from the app declaration.
         ///
         /// The app owns FOCUS -- which element a keystroke belongs to -- because
@@ -3223,6 +3383,13 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 .to => |t| self.scrollTo(t.key, t.offset),
                 .by => |b| self.scrollBy(b.key, b.dy),
             };
+            // Outbound clipboard. The app decides WHAT and WHEN -- it owns the
+            // selection -- and the runtime only knows how to reach the
+            // platform. An effect rather than a message for the same reason
+            // `focus` is: there is no one to send it to.
+            if (action.clipboard) |text| {
+                if (self.window) |w| w.setClipboard(text);
+            }
             if (action.cmd) |cmd| {
                 if (self.exec == null) self.exec = Executor(M){ .gpa = self.gpa };
                 self.exec.?.submit(cmd);
@@ -3355,6 +3522,8 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             // The read side of `Action.focus`. Mirrored every frame, so view
             // never has to remember what it asked for.
             self.ui.focus = self.focus;
+            self.ui.elapsed = self.elapsed;
+            self.ui.since_input = self.since_input;
             self.ui.scrolls = self.scroll_slots[0..self.scroll_n];
 
             const root = self.viewFn(&self.state, &self.ui);
@@ -4466,6 +4635,97 @@ fn actView(m: *ActState, ui: *Ui(ActMsg)) *Element(ActMsg) {
     off.disabled = true;
 
     return ui.column(.{ .children = &.{ ok, field, off } });
+}
+
+const ScMsg = enum { save, new_doc, all_done };
+
+const sc_list = &.{
+    Shortcut(ScMsg){ .key = ShortcutKey.char('s'), .ctrl = true, .msg = .save },
+    Shortcut(ScMsg){ .key = ShortcutKey.char('n'), .ctrl = true, .shift = true, .msg = .new_doc },
+    Shortcut(ScMsg){ .key = .{ .named = .f5 }, .msg = .all_done },
+};
+
+test "a shortcut matches the whole chord, not just the key" {
+    const ctrl_s: Key = .{ .code = 's', .mods = .{ .ctrl = true } };
+    try std.testing.expectEqual(ScMsg.save, shortcutFor(ScMsg, sc_list, ctrl_s, false).?);
+
+    // The same key with no ctrl is somebody typing an `s`.
+    const plain_s: Key = .{ .code = 's' };
+    try std.testing.expect(shortcutFor(ScMsg, sc_list, plain_s, false) == null);
+
+    // Ctrl+Shift+S is a different chord, not a synonym for Ctrl+S. A rule that
+    // ignored shift would make the two impossible to distinguish.
+    const ctrl_shift_s: Key = .{ .code = 'S', .mods = .{ .ctrl = true, .shift = true } };
+    try std.testing.expect(shortcutFor(ScMsg, sc_list, ctrl_shift_s, false) == null);
+
+    // ...and the one that DID bind shift matches, capital and all.
+    const ctrl_shift_n: Key = .{ .code = 'N', .mods = .{ .ctrl = true, .shift = true } };
+    try std.testing.expectEqual(ScMsg.new_doc, shortcutFor(ScMsg, sc_list, ctrl_shift_n, false).?);
+}
+
+test "a bare binding yields to a text field, a modified one does not" {
+    const f5: Key = .{ .named = .f5 };
+    try std.testing.expectEqual(ScMsg.all_done, shortcutFor(ScMsg, sc_list, f5, false).?);
+
+    // Every keystroke into a field must reach the field, so an unmodified
+    // binding has to stand down while one has focus.
+    try std.testing.expect(shortcutFor(ScMsg, sc_list, f5, true) == null);
+
+    // A chord still fires there, or Ctrl+S would stop working in exactly the
+    // place people press it most.
+    const ctrl_s: Key = .{ .code = 's', .mods = .{ .ctrl = true } };
+    try std.testing.expectEqual(ScMsg.save, shortcutFor(ScMsg, sc_list, ctrl_s, true).?);
+}
+
+test "shift alone is bare, because Shift+S is how a capital is typed" {
+    const sc = Shortcut(ScMsg){ .key = ShortcutKey.char('s'), .shift = true, .msg = .save };
+    try std.testing.expect(isBareShortcut(sc));
+    // One command modifier is enough to stop being bare.
+    const chord = Shortcut(ScMsg){ .key = ShortcutKey.char('s'), .ctrl = true, .msg = .save };
+    try std.testing.expect(!isBareShortcut(chord));
+}
+
+// ---------------------------------------------------------------------------
+// time into paint
+// ---------------------------------------------------------------------------
+
+const TimeState = struct { elapsed: f32 = -1, since_input: f32 = -1, n: i32 = 0 };
+
+fn timeUpdate(m: *TimeState, msg: TMsg) Action(TMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+fn timeView(m: *TimeState, ui: *Ui(TMsg)) *Element(TMsg) {
+    m.elapsed = ui.elapsed;
+    m.since_input = ui.since_input;
+    return ui.text(.{ .label = "-", .size = 14 });
+}
+
+test "the clock reaches paint, so a caret needs no clock of its own" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(TimeState, TMsg).init(gpa, .{}, timeUpdate, timeView);
+    defer rt.deinit();
+
+    // Nothing has ticked: both read zero rather than a sentinel the app would
+    // have to defend against.
+    {
+        var f = try rt.frame(.{ .w = 100, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(f32, 0), rt.state.elapsed);
+        try std.testing.expectEqual(@as(f32, 0), rt.state.since_input);
+    }
+
+    // Whatever the runtime holds is what paint sees, unmodified.
+    rt.elapsed = 1.25;
+    rt.since_input = 0.5;
+    {
+        var f = try rt.frame(.{ .w = 100, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(f32, 1.25), rt.state.elapsed);
+        try std.testing.expectEqual(@as(f32, 0.5), rt.state.since_input);
+    }
 }
 
 test "activation is derived from the message, so a value control falls through" {

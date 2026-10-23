@@ -555,6 +555,11 @@ pub fn run(
     errdefer if (frame) |*f| f.deinit();
 
     var dirty = true;
+    // A shortcut collision is a BUILD error, not a race decided by whichever
+    // arm was written first. Declared data can be checked before it ever runs,
+    // so it is.
+    if (@hasField(App, "shortcuts")) comptime elmz.checkShortcuts(App.shortcuts);
+
     var last_ns: u64 = clockNs(opts, opts.io);
     var running = true;
 
@@ -699,6 +704,22 @@ pub fn run(
         const now_ns = clockNs(opts, opts.io);
         const dt_ns = now_ns -% last_ns;
         last_ns = now_ns;
+        // Time for paint. Accumulated from the raw delta, capped only so a
+        // pathological stall cannot overflow f32 precision in one step; the
+        // clamp `on_tick` gets is deliberately NOT reused, because a blink
+        // frozen by a stall is worse than one that jumped.
+        {
+            const raw: f32 = @floatFromInt(@min(dt_ns, std.time.ns_per_s));
+            const secs = raw / std.time.ns_per_s;
+            rt.elapsed += secs;
+            rt.since_input += secs;
+        }
+        // Outbound clipboard writes are applied by `dispatch`, which has no
+        // other route to the platform. Assigned each iteration because a
+        // Window is a two-field value: copying it is free and it cannot go
+        // stale the way a cached pointer could.
+        rt.window = window;
+
         if (rt.animate and rt.on_tick != null) {
             const secs: f32 = @floatFromInt(@min(dt_ns, std.time.ns_per_s));
             const dt: f32 = @min(secs / std.time.ns_per_s, 0.1);
@@ -713,6 +734,13 @@ pub fn run(
         const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null, rt.animate);
         const ev = window.poll(timeout) orelse continue;
         stats.events += 1;
+
+        // Any key or text event restarts the "typing" window, which is what a
+        // blinking caret reads to stay solid while the user is working.
+        switch (ev) {
+            .key, .key_up, .text => rt.since_input = 0,
+            else => {},
+        }
 
         switch (ev) {
             .quit => {
@@ -851,6 +879,25 @@ pub fn run(
                         }
                     }
                 }
+                // Paste. A Ctrl chord produces no text event on any platform,
+                // so the clipboard has to be read here -- at the one point a
+                // key is seen before the app. The bytes are borrowed for the
+                // dispatch only; a hook that keeps them must copy them.
+                if (!k.repeat and k.mods.ctrl and !k.mods.alt and
+                    (k.code == 'v' or k.code == 'V'))
+                {
+                    if (window.clipboardText()) |clip| {
+                        if (rt.on_text) |hook| {
+                            if (hook(&rt.state, clip)) |msg| {
+                                const action = rt.dispatch(msg);
+                                stats.messages += 1;
+                                if (action.quit) running = false;
+                                dirty = dirty or action.repaint;
+                            }
+                            break :tab;
+                        }
+                    }
+                }
                 // Activation, before the app's hook: Enter, or Space, on a
                 // focused control that carries a message. Which controls those
                 // are is derived, not declared -- see `Frame.activate`. The
@@ -870,6 +917,21 @@ pub fn run(
                             dirty = dirty or action.repaint;
                             break :tab;
                         }
+                    }
+                }
+                // Shortcuts, ahead of the app's hook. The runtime is the only
+                // thing that sees a key before the app, and a menu item that
+                // stored "Ctrl+S" as text would drift from the binding the
+                // moment either changed -- so the chord lives here and the
+                // label is derived from it. Only the DOWN fires: a release
+                // running a command again is how one press saves twice.
+                if (!k.repeat and @hasField(App, "shortcuts") and App.shortcuts.len > 0) {
+                    if (elmz.shortcutFor(M, App.shortcuts, k, rt.text_editing)) |msg| {
+                        const action = rt.dispatch(msg);
+                        stats.messages += 1;
+                        if (action.quit) running = false;
+                        dirty = dirty or action.repaint;
+                        break :tab;
                     }
                 }
                 const hook = rt.on_key orelse break :tab;
