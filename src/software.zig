@@ -317,6 +317,11 @@ pub const Canvas = struct {
     /// scanline. Reused rather than allocated per call: a path is a paint-time
     /// shape and the paint path is not allowed to grow the heap every frame.
     poly: std.ArrayListUnmanaged([2]f32) = .empty,
+    /// Where each SUBPATH starts inside `poly`. A fill closes a subpath back to
+    /// its own first point; without these the filler joined one subpath's last
+    /// point to the next one's first, drawing an edge nobody asked for.
+    sub_starts: std.ArrayListUnmanaged(usize) = .empty,
+    pending_break: bool = false,
     xs: std.ArrayListUnmanaged(Cross) = .empty,
 
     /// Per-pixel coverage for one row, so overlapping spans of the same
@@ -493,6 +498,7 @@ pub const Canvas = struct {
         for (self.masks.items) |m| self.gpa.free(m.px);
         self.masks.deinit(self.gpa);
         self.poly.deinit(self.gpa);
+        self.sub_starts.deinit(self.gpa);
         self.xs.deinit(self.gpa);
         if (self.cover.len > 0) self.gpa.free(self.cover);
         self.clearMeasureCache();
@@ -1045,6 +1051,8 @@ pub const Canvas = struct {
     /// every scale without the caller knowing what the scale is.
     pub fn pathClip(self: *Self, ox: f32, oy: f32, p: elmz.Path, fill: elmz.Fill, clip: elmz.Rect) void {
         self.poly.clearRetainingCapacity();
+        self.sub_starts.clearRetainingCapacity();
+        self.pending_break = true;
         var cur: [2]f32 = .{ ox, oy };
         var start: [2]f32 = cur;
         var pi: usize = 0;
@@ -1054,13 +1062,14 @@ pub const Canvas = struct {
                     if (pi >= p.points.len) return;
                     cur = .{ ox + p.points[pi][0] * self.scale, oy + p.points[pi][1] * self.scale };
                     start = cur;
+                    self.pending_break = true;
                     pi += 1;
                 },
                 .line => {
                     if (pi >= p.points.len) return;
                     const e = [2]f32{ ox + p.points[pi][0] * self.scale, oy + p.points[pi][1] * self.scale };
-                    if (!self.polyAppend(cur)) return;
-                    if (!self.polyAppend(e)) return;
+                    if (!self.emit(cur)) return;
+                    if (!self.emit(e)) return;
                     cur = e;
                     pi += 1;
                 },
@@ -1082,18 +1091,40 @@ pub const Canvas = struct {
                     pi += 3;
                 },
                 .close => {
-                    if (!self.polyAppend(cur)) return;
-                    if (!self.polyAppend(start)) return;
+                    if (!self.emit(cur)) return;
+                    if (!self.emit(start)) return;
                     cur = start;
+                    // SVG/PDF: a command after a `close` starts a NEW subpath at
+                    // the same initial point. Recording the break is what keeps
+                    // that subpath from being joined onto this one.
+                    self.pending_break = true;
                 },
             }
         }
-        self.fillPolygonClip(self.poly.items, p.rule, fill, clip);
+        self.fillPolygonClip(self.poly.items, self.sub_starts.items, p.rule, fill, clip);
     }
 
     /// A tuple allocator failure mid-outline would otherwise paint a shape with
     /// a vertex missing -- wrong in a way that looks like a path bug. Bailing
     /// out of the whole fill is the honest failure.
+    /// Append a point, recording where a SUBPATH begins.
+    ///
+    /// The filler closes each subpath back to its own first point, which is
+    /// both what the spec says and the only way to keep subpaths apart. With a
+    /// single flat list the edge from one subpath's end to the next one's
+    /// start was never drawn but was still filled as though it had been: with
+    /// two CLOSED subpaths the join and the modulo wrap coincide, so they
+    /// cancelled and everything looked right; with three they form a triangle
+    /// and the fill spills across the whole element (see the three-squares
+    /// test). Unclosed subpaths broke even with two.
+    fn emit(self: *Self, pt: [2]f32) bool {
+        if (self.pending_break) {
+            self.sub_starts.append(self.gpa, self.poly.items.len) catch return false;
+            self.pending_break = false;
+        }
+        return self.polyAppend(pt);
+    }
+
     fn polyAppend(self: *Self, pt: [2]f32) bool {
         self.poly.append(self.gpa, pt) catch return false;
         return true;
@@ -1123,7 +1154,7 @@ pub const Canvas = struct {
             const u = 1 - t;
             const x = u * u * p0[0] + 2 * u * t * c[0] + t * t * p1[0];
             const y = u * u * p0[1] + 2 * u * t * c[1] + t * t * p1[1];
-            if (!self.polyAppend(.{ x, y })) return false;
+            if (!self.emit(.{ x, y })) return false;
         }
         return true;
     }
@@ -1140,7 +1171,7 @@ pub const Canvas = struct {
             const dd = t * t * t;
             const x = a * p0[0] + b * c1[0] + cc * c2[0] + dd * p1[0];
             const y = a * p0[1] + b * c1[1] + cc * c2[1] + dd * p1[1];
-            if (!self.polyAppend(.{ x, y })) return false;
+            if (!self.emit(.{ x, y })) return false;
         }
         return true;
     }
@@ -1148,7 +1179,7 @@ pub const Canvas = struct {
     /// Each pixel row is sampled four times vertically, and horizontally each
     /// span contributes its exact overlap, so the edge is antialiased in both
     /// axes without supersampling the interior.
-    pub fn fillPolygonClip(self: *Self, pts: []const [2]f32, rule: elmz.FillRule, fill: elmz.Fill, clip: elmz.Rect) void {
+    pub fn fillPolygonClip(self: *Self, pts: []const [2]f32, starts: []const usize, rule: elmz.FillRule, fill: elmz.Fill, clip: elmz.Rect) void {
         if (pts.len < 3) return;
         var minx = pts[0][0];
         var maxx = pts[0][0];
@@ -1184,16 +1215,25 @@ pub const Canvas = struct {
             while (s < sub) : (s += 1) {
                 const sy = @as(f32, @floatFromInt(y)) + (@as(f32, @floatFromInt(s)) + 0.5) * w;
                 self.xs.clearRetainingCapacity();
-                var i: usize = 0;
-                while (i < pts.len) : (i += 1) {
-                    const a = pts[i];
-                    const b = pts[(i + 1) % pts.len];
-                    const da = a[1] <= sy;
-                    const db = b[1] <= sy;
-                    if (da == db) continue;
-                    const t = (sy - a[1]) / (b[1] - a[1]);
-                    const cxx = a[0] + t * (b[0] - a[0]);
-                    self.xs.append(self.gpa, .{ .x = cxx, .dir = if (b[1] > a[1]) 1 else -1 }) catch return;
+                // One loop PER SUBPATH, closing each back to its own first
+                // point. A subpath with fewer than three points encloses no
+                // area, so it contributes nothing to either rule.
+                var si: usize = 0;
+                while (si < starts.len) : (si += 1) {
+                    const s0 = starts[si];
+                    const s1 = if (si + 1 < starts.len) starts[si + 1] else pts.len;
+                    if (s0 >= s1 or s1 > pts.len or s1 - s0 < 3) continue;
+                    var i: usize = s0;
+                    while (i < s1) : (i += 1) {
+                        const a = pts[i];
+                        const b = pts[if (i + 1 == s1) s0 else i + 1];
+                        const da = a[1] <= sy;
+                        const db = b[1] <= sy;
+                        if (da == db) continue;
+                        const t = (sy - a[1]) / (b[1] - a[1]);
+                        const cxx = a[0] + t * (b[0] - a[0]);
+                        self.xs.append(self.gpa, .{ .x = cxx, .dir = if (b[1] > a[1]) 1 else -1 }) catch return;
+                    }
                 }
                 const crossings = self.xs.items;
                 if (crossings.len < 2) continue;
@@ -2248,6 +2288,66 @@ pub const Canvas = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "three disjoint squares stay disjoint" {
+    // The filler closes a polygon back to its first point. While every subpath
+    // shared one point list, that closing edge ran from one SQUARE's corner to
+    // the NEXT square's corner -- an edge nobody drew, filled as though it were
+    // real. With two closed subpaths the join and the list's modulo wrap are the
+    // same segment in opposite directions and cancel, so the donut case looks
+    // perfect; with three they form a triangle and the fill spills across the
+    // whole element. Icons are multi-subpath shapes, so this was the difference
+    // between a glyph and a smear.
+    const gpa = testing.allocator;
+    const ops = [_]elmz.PathOp{
+        .move, .line, .line, .line, .close,
+        .move, .line, .line, .line, .close,
+        .move, .line, .line, .line, .close,
+    };
+    const pts = [_][2]f32{
+        .{ 2, 2 },  .{ 9, 2 },  .{ 9, 9 },  .{ 2, 9 },
+        .{ 22, 2 }, .{ 29, 2 }, .{ 29, 9 }, .{ 22, 9 },
+        .{ 2, 22 }, .{ 9, 22 }, .{ 9, 29 }, .{ 2, 29 },
+    };
+    var c = try testCanvas(gpa, 32, 32);
+    defer c.deinit();
+    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .evenodd }, .{ .solid = .{ .r = 255, .g = 255, .b = 255 } }, elmz.Rect.unbounded);
+
+    var inside: usize = 0;
+    var outside: usize = 0;
+    for (0..32) |y| {
+        for (0..32) |x| {
+            const lit = c.px[(y * 32 + x) * 4] > 127;
+            const b1 = x >= 2 and x < 9 and y >= 2 and y < 9;
+            const b2 = x >= 22 and x < 29 and y >= 2 and y < 9;
+            const b3 = x >= 2 and x < 9 and y >= 22 and y < 29;
+            if (!lit) continue;
+            if (b1 or b2 or b3) inside += 1 else outside += 1;
+        }
+    }
+    // Three 7x7 squares, every pixel of each, and not one pixel anywhere else.
+    try testing.expectEqual(@as(usize, 147), inside);
+    try testing.expectEqual(@as(usize, 0), outside);
+
+    // An UNCLOSED subpath is legal input and used to wedge even with two of
+    // them: the join ran from the open subpath's last point diagonally into the
+    // next one's first. `M2 2 L22 2 L22 22 L2 22` has no `Z`.
+    const ops2 = [_]elmz.PathOp{ .move, .line, .line, .line, .move, .line, .line, .line, .close };
+    const pts2 = [_][2]f32{
+        .{ 2, 2 },   .{ 22, 2 },  .{ 22, 22 }, .{ 2, 22 },
+        .{ 12, 12 }, .{ 18, 12 }, .{ 18, 18 }, .{ 12, 18 },
+    };
+    var d = try testCanvas(gpa, 24, 24);
+    defer d.deinit();
+    d.pathClip(0, 0, .{ .ops = &ops2, .points = &pts2, .rule = .evenodd }, .{ .solid = .{ .r = 255, .g = 255, .b = 255 } }, elmz.Rect.unbounded);
+    // Every row above the inner square is solid across the outer one; the wedge
+    // cut a diagonal notch out of exactly these.
+    for (3..11) |y| {
+        for (3..21) |x| {
+            try testing.expect(d.px[(y * 24 + x) * 4] > 127);
+        }
+    }
+}
 
 test "a quad covers exactly the pixels it names and nothing else" {
     var c = try testCanvas(testing.allocator, 20, 20);
