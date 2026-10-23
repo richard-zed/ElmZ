@@ -70,6 +70,24 @@ pub const Font = struct {
     /// question is asked at the seam rather than guessed at the edge: `Font`
     /// with no face is a legal value, so "is there a face" has to be answerable
     /// without trying to measure something and finding out it measured zero.
+    /// Family name from the face's own `name` table, e.g. "DejaVu Sans".
+    ///
+    /// This is the string a theme file's font name is matched against, so it
+    /// has to come from the face rather than from the filename: `Inter-Regular.otf`
+    /// and `inter_v2.ttf` are the same family, and a file merely CALLED
+    /// "Inter.ttf" is not necessarily Inter. Null when the face carries no
+    /// record, which is decoration like kerning, not a load failure.
+    pub fn family(self: *const Font, out: []u8) ?[]const u8 {
+        if (!self.ok) return null;
+        return self.face.family(out);
+    }
+
+    /// Style within the family, e.g. "Bold Oblique".
+    pub fn style(self: *const Font, out: []u8) ?[]const u8 {
+        if (!self.ok) return null;
+        return self.face.style(out);
+    }
+
     pub fn available(self: *const Font) bool {
         return self.ok;
     }

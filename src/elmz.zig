@@ -784,6 +784,7 @@ pub const GradientSpec = theme.GradientSpec;
 pub const ThemeFileType = theme.ThemeFileType;
 pub const Loaded = theme.Loaded;
 pub const ThemeDiag = theme.ThemeDiag;
+pub const font_name_max = theme.font_name_max;
 pub const ThemeLoadError = theme.ThemeLoadError;
 pub const theme_version = theme.theme_version;
 pub const defaults_zon = theme.defaults_zon;

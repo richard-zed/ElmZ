@@ -39,6 +39,239 @@ pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, full, gpa, .limited(16 * 1024 * 1024));
 }
 
+/// Where a NAMED face is looked for, in order.
+///
+/// A user font directory is deliberately absent: finding one means reading
+/// HOME, which needs environment access this file has no `io`-free way to do.
+/// A caller that has one passes it in `extra_dirs`, searched FIRST, so an app
+/// can prefer its own shipped directory over the system's.
+pub const font_dirs = [_][]const u8{ "/usr/share/fonts", "/usr/local/share/fonts", "/system/fonts" };
+
+fn looksLikePath(name: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return true;
+    inline for ([_][]const u8{ ".ttf", ".otf", ".ttc" }) |ext| {
+        if (name.len > ext.len and std.ascii.eqlIgnoreCase(name[name.len - ext.len ..], ext)) return true;
+    }
+    return false;
+}
+
+fn hasFontExt(name: []const u8) bool {
+    inline for ([_][]const u8{ ".ttf", ".otf" }) |ext| {
+        if (name.len > ext.len and std.ascii.eqlIgnoreCase(name[name.len - ext.len ..], ext)) return true;
+    }
+    return false;
+}
+
+fn collectFonts(gpa: Allocator, io: std.Io, dir_path: []const u8, out: *std.ArrayListUnmanaged([]u8)) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!hasFontExt(entry.path)) continue;
+        const full = try std.fs.path.join(gpa, &.{ dir_path, entry.path });
+        errdefer gpa.free(full);
+        try out.append(gpa, full);
+    }
+}
+
+fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    }
+    return true;
+}
+
+/// Style strings that mean "the plain one".
+///
+/// A query naming a family and no style must resolve to that family's Regular
+/// face. Five DejaVu files share the family name, and `DejaVuSans-Bold.ttf` is
+/// a different face -- picking it because it sorted first is a substitution
+/// nobody asked for, and it renders perfectly, so nobody would notice.
+fn isRegular(style: []const u8) bool {
+    if (style.len == 0) return true;
+    inline for ([_][]const u8{ "Regular", "Book", "Normal" }) |r| {
+        if (eqlIgnoreCase(style, r)) return true;
+    }
+    return false;
+}
+
+const no_match: u8 = 0xff;
+
+/// How well a face answers to `name`, lower being better.
+///
+/// 0 = this family, plain style; 1 = this family, some other style; 2 = the
+/// `"Family Style"` form; `no_match` otherwise. A RANK rather than a yes/no
+/// because "the family matches" is not enough to identify a face.
+fn faceRank(face: *const Face, name: []const u8) u8 {
+    var fam_buf: [128]u8 = undefined;
+    var sty_buf: [128]u8 = undefined;
+    const fam = face.family(&fam_buf) orelse return no_match;
+    if (eqlIgnoreCase(fam, name)) {
+        const sty = face.style(&sty_buf) orelse return 1;
+        return if (isRegular(sty)) 0 else 1;
+    }
+    // Split at the LAST space, so a family with spaces of its own still works.
+    const cut = std.mem.lastIndexOfScalar(u8, name, ' ') orelse return no_match;
+    if (!eqlIgnoreCase(fam, name[0..cut])) return no_match;
+    const sty = face.style(&sty_buf) orelse return no_match;
+    return if (eqlIgnoreCase(sty, name[cut + 1 ..])) 2 else no_match;
+}
+
+/// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`.
+fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []const u8) ![]u8 {
+    var paths: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (paths.items) |p| gpa.free(p);
+        paths.deinit(gpa);
+    }
+    for (dirs) |d| collectFonts(gpa, io, d, &paths) catch {};
+    if (paths.items.len == 0) return error.FontNotFound;
+
+    // A walk's order is undefined, so two machines could otherwise pick
+    // different faces for one name. Sorting makes the tie-break mean something;
+    // rank decides which of the candidates wins.
+    std.mem.sort([]u8, paths.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+
+    var best: ?[]u8 = null;
+    var best_rank: u8 = no_match;
+    for (paths.items) |path| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        // No cache attached on purpose: `family` reads the name table and
+        // nothing else, so a search never pays for a glyph cache per candidate.
+        const face = Face.init(bytes);
+        const rank = faceRank(&face, name);
+        if (rank == no_match or rank >= best_rank) {
+            gpa.free(bytes);
+            continue;
+        }
+        if (best) |b| gpa.free(b);
+        best = bytes;
+        best_rank = rank;
+        if (rank == 0) break;
+    }
+    return best orelse error.FontNotFound;
+}
+
+/// Resolve a FONT NAME to file bytes.
+///
+/// Matching happens against the face's own `name` table, never the filename: a
+/// theme naming "Inter" must find `Inter-Regular.otf`, and must NOT find some
+/// other face that merely happens to be called Inter.ttf. That distinction is
+/// the entire reason this is not a filename join.
+///
+/// A name containing a path separator, or ending in `.ttf`/`.otf`/`.ttc`, is
+/// taken as a PATH and handed to `loadFont` -- the escape hatch for an app that
+/// ships one private face and would rather name the file than the family.
+///
+/// Returns the bytes of the first match; the caller owns them. Nothing found is
+/// `error.FontNotFound`, which the runner bands rather than papering over with a
+/// substitute face nobody could see was wrong.
+pub fn loadFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8) ![]u8 {
+    if (looksLikePath(name)) return loadFont(gpa, io, name);
+
+    // Caller-provided directories win outright, the way PATH order works: an app
+    // that ships a face gets it even when the system has the same family.
+    if (searchDirs(gpa, io, extra_dirs, name)) |bytes| {
+        return bytes;
+    } else |e| switch (e) {
+        // The only failure a search can report: an unreadable file is skipped,
+        // not fatal, because one broken font in a directory must not hide the
+        // good ones next to it.
+        error.FontNotFound => {},
+    }
+    return searchDirs(gpa, io, &font_dirs, name);
+}
+
+/// An ABSOLUTE fixture directory.
+///
+/// `std.testing.tmpDir` hands back a path relative to the process's cwd, and
+/// re-resolving it from a different cwd is exactly how a test passes for the
+/// wrong reason: the first version of this test "found" the system's own
+/// DejaVu after the fixture directory failed to open, and the two files are
+/// byte-identical, so nothing distinguished a working search from a broken one.
+fn fontFixture(io: std.Io, dir_path: []const u8) !std.Io.Dir {
+    std.Io.Dir.deleteDirAbsolute(io, dir_path) catch {};
+    try std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir);
+    return std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+}
+
+fn fontFixtureCleanup(io: std.Io, dir_path: []const u8) void {
+    var d = std.Io.Dir.openDirAbsolute(io, dir_path, .{}) catch return;
+    d.deleteFile(io, "zzz-not-the-family.ttf") catch {};
+    d.deleteFile(io, "present.ttf") catch {};
+    d.close(io);
+    std.Io.Dir.deleteDirAbsolute(io, dir_path) catch {};
+}
+
+test "a font name resolves through the face's own name table" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const dir_path = "/tmp/elm-font-resolver-test";
+    var d = try fontFixture(io, dir_path);
+    defer fontFixtureCleanup(io, dir_path);
+    // The FILENAME says nothing the face says. Matching the filename instead of
+    // the `name` table would pass a test where both agreed, and this one does
+    // not: the file is called something the family is not.
+    try d.writeFile(io, .{ .sub_path = "zzz-not-the-family.ttf", .data = @embedFile("font.ttf") });
+    d.close(io);
+
+    const bytes = try loadFontByName(gpa, io, "DejaVu Sans", &.{dir_path});
+    defer gpa.free(bytes);
+    try std.testing.expectEqual(@embedFile("font.ttf").len, bytes.len);
+}
+
+test "a family with no style resolves to its Regular face, not the first file" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // Several faces share this family on a stock install and the Bold sorts
+    // ahead of the Regular, so a family-only match returns Bold -- which renders
+    // perfectly and is not the font anyone asked for. Skipped when the system
+    // has no such family: nothing to prove either way.
+    const bytes = loadFontByName(gpa, io, "DejaVu Sans", &.{}) catch return;
+    defer gpa.free(bytes);
+    const face = Face.init(bytes);
+    var sty_buf: [128]u8 = undefined;
+    const sty = face.style(&sty_buf) orelse return;
+    try std.testing.expect(isRegular(sty));
+}
+
+test "a name no file carries is an error, never a substitute" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const dir_path = "/tmp/elm-font-resolver-miss";
+    var d = try fontFixture(io, dir_path);
+    defer fontFixtureCleanup(io, dir_path);
+    try d.writeFile(io, .{ .sub_path = "zzz-not-the-family.ttf", .data = @embedFile("font.ttf") });
+    d.close(io);
+
+    // A face IS there, just not this one. Returning the one that happened to be
+    // lying around is the failure this rule exists to prevent: it renders, and
+    // nothing about it looks wrong.
+    try std.testing.expectError(error.FontNotFound, loadFontByName(gpa, io, "No Such Family 9000", &.{dir_path}));
+}
+
+test "a name that is a path is treated as a path, not a family" {
+    // The escape hatch is a naming decision, and that is the part worth pinning:
+    // what the resolver does with the string. Reading the file afterwards is
+    // `loadFont`, which already has a failure test through `attachFont`.
+    try std.testing.expect(looksLikePath("src/font.ttf"));
+    try std.testing.expect(looksLikePath("/usr/share/fonts/x/Inter.otf"));
+    try std.testing.expect(looksLikePath("Face.TTF"));
+    try std.testing.expect(looksLikePath("collection.ttc"));
+    // A family name is not a path, even when it ends in letters that look like
+    // an extension by accident.
+    try std.testing.expect(!looksLikePath("DejaVu Sans"));
+    try std.testing.expect(!looksLikePath("Inter"));
+    try std.testing.expect(!looksLikePath("Sans Book"));
+}
+
 pub const testing_font = struct {
     var mem: [Face.cache_bytes]u8 align(8) = undefined;
     var lmem: [Face.lookup_bytes]u8 align(8) = undefined;

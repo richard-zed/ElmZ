@@ -292,10 +292,21 @@ pub const Gradients = struct {
     }
 };
 
+/// Longest font name a theme file may carry. A name is a name, not a
+/// description: a hundred bytes means the author pasted a path.
+pub const font_name_max = 96;
+
 /// One theme section as written: two nested tables, both optional.
 pub const ThemeSpec = struct {
     colors: ColorsSpec = .{},
     gradients: GradientsSpec = .{},
+
+    /// The typeface, BY NAME: `.font = "DejaVu Sans"`. Never a path -- the
+    /// library resolves the name to a file, so the file can move and the theme
+    /// does not have to know where fonts live. A name that resolves to nothing
+    /// keeps the last good face and bands; substituting a different typeface
+    /// would be the one outcome nobody could see.
+    font: ?[]const u8 = null,
 
     /// Solid colours over `base`. Gradients resolve separately because they are
     /// a different type and a different question.
@@ -336,7 +347,20 @@ pub fn ThemeFileType(comptime App: type) type {
 
 /// What a load produced: the palette, its gradients, and the app tier.
 pub fn Loaded(comptime App: type) type {
-    return struct { theme: Theme, gradients: Gradients = .{}, app: App = .{} };
+    return struct {
+        theme: Theme,
+        gradients: Gradients = .{},
+        app: App = .{},
+        /// The font name is COPIED, not borrowed: the parse result owns its
+        /// strings and is freed before this is returned, so a slice into it
+        /// would dangle. Fixed capacity keeps that free of an owner.
+        font_buf: [font_name_max]u8 = undefined,
+        font_len: usize = 0,
+
+        pub fn fontName(self: *const @This()) ?[]const u8 {
+            return if (self.font_len == 0) null else self.font_buf[0..self.font_len];
+        }
+    };
 }
 
 /// One line, fixed capacity. The failure path is the last place that may
@@ -406,13 +430,18 @@ pub fn loadTheme(
 
     var d: std.zon.parse.Diagnostics = .{};
     defer d.deinit(gpa);
-    const file = std.zon.parse.fromSlice(ThemeFileType(App), gpa, src, &d, .{}) catch |e| switch (e) {
+    // `fromSlice` refuses any type containing a pointer at comptime, and the
+    // font name IS one. The allocating form returns owned strings, which is why
+    // the name is copied into `font_buf` before the parse is freed.
+    var file = std.zon.parse.fromSliceAlloc(ThemeFileType(App), gpa, src, &d, .{}) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ParseZon => {
             diagFrom(diag, name, &d, "bad theme file");
             return error.Parse;
         },
     };
+
+    defer std.zon.parse.free(gpa, file);
 
     const theme = file.theme.overlay(base);
 
@@ -424,7 +453,16 @@ pub fn loadTheme(
         return error.Palette;
     };
 
-    return .{ .theme = theme, .gradients = file.theme.resolveGradients(theme), .app = file.app };
+    var out: Loaded(App) = .{ .theme = theme, .gradients = file.theme.resolveGradients(theme), .app = file.app };
+    if (file.theme.font) |f| {
+        if (f.len > font_name_max) {
+            diag.set("{s}: font name {d} bytes, not a name -- is that a path?", .{ name, f.len });
+            return error.Parse;
+        }
+        @memcpy(out.font_buf[0..f.len], f);
+        out.font_len = f.len;
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +545,30 @@ test "an override replaces exactly one role" {
     const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
     try std.testing.expect(std.meta.eql(Color.rgbHex(0xff0000), loaded.theme.accent));
     try std.testing.expect(std.meta.eql((Theme{}).bg, loaded.theme.bg));
+}
+
+test "a theme names a font, and the name survives the parse being freed" {
+    var diag: ThemeDiag = .{};
+    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .font = \"DejaVu Sans\" } }", Theme{}, &diag);
+    // A slice into the parse result would dangle the moment it was freed, so
+    // this asserts the COPY, and the allocator would report a use-after-free
+    // rather than a wrong string if it were borrowed.
+    try std.testing.expectEqualStrings("DejaVu Sans", loaded.fontName().?);
+    // No font named is not a fault: it means keep whatever is attached.
+    var diag2: ThemeDiag = .{};
+    const bare = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag2);
+    try std.testing.expect(bare.fontName() == null);
+}
+
+test "a font name long enough to be a path is refused by name" {
+    var diag: ThemeDiag = .{};
+    const long = "x" ** (font_name_max + 1);
+    const src = try std.fmt.allocPrint(std.testing.allocator, ".{{ .version = 2, .theme = .{{ .font = \"{s}\" }} }}", .{long});
+    defer std.testing.allocator.free(src);
+    const srcz = try std.testing.allocator.dupeZ(u8, src);
+    defer std.testing.allocator.free(srcz);
+    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", srcz, Theme{}, &diag));
+    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "is that a path") != null);
 }
 
 test "a gradient resolves to the fill a theme could never express before" {

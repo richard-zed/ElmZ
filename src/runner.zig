@@ -181,8 +181,15 @@ pub fn ThemeWatchOf(comptime App: type) type {
         user_stamp: ?Stamp = null,
         base_seen: bool = false,
         user_seen: bool = false,
+        font_buf: [elmz.font_name_max]u8 = undefined,
+        font_len: usize = 0,
 
         pub const Stamp = struct { mtime: i128 = 0, size: u64 = 0 };
+
+        /// The typeface the chain last named, or null when no file names one.
+        pub fn fontName(self: *const Self) ?[]const u8 {
+            return if (self.font_len == 0) null else self.font_buf[0..self.font_len];
+        }
 
         pub fn init(floor: elmz.Theme, base_path: ?[:0]const u8, user_path: ?[:0]const u8) Self {
             return .{ .floor = floor, .base_path = base_path, .user_path = user_path };
@@ -242,6 +249,13 @@ pub fn ThemeWatchOf(comptime App: type) type {
             const chain = resolveChain(App, gpa, io, self.floor, self.base_path, self.user_path);
             ui.theme = chain.theme;
             ui.gradients = chain.gradients;
+            // Kept, not applied: the watch has no canvas. The loop reads this
+            // and swaps the face, so resolution still happens in exactly one
+            // place (here) and attachment in exactly one place (the caller).
+            if (chain.fontName()) |f| {
+                @memcpy(self.font_buf[0..f.len], f);
+                self.font_len = f.len;
+            } else self.font_len = 0;
             if (chain.message()) |m| ui.failExternal(.theme, "{s}", .{m}) else ui.clearExternal();
         }
     };
@@ -264,6 +278,11 @@ pub fn ChainOf(comptime App: type) type {
         /// The app tier, if the app declared one. Otherwise `.{}` -- and a file
         /// that writes `.app` keys is rejected rather than waved through.
         app: App = .{},
+        /// The typeface the chain names, COPIED: the files were read into
+        /// buffers that die before this is returned. Empty means no file named
+        /// one, which is not a fault -- it means keep whatever is attached.
+        font_buf: [elmz.font_name_max]u8 = undefined,
+        font_len: usize = 0,
         /// A `theme.defaults.zon` supplied the base rather than the compiled floor.
         base_from_file: bool = false,
         /// The defaults file was there and would not load; `diag` says why.
@@ -273,6 +292,11 @@ pub fn ChainOf(comptime App: type) type {
         /// The override was there and would not load; `diag` says why.
         user_rejected: bool = false,
         diag: elmz.ThemeDiag = .{},
+
+        /// The typeface the chain names, or null when no file names one.
+        pub fn fontName(self: *const @This()) ?[]const u8 {
+            return if (self.font_len == 0) null else self.font_buf[0..self.font_len];
+        }
 
         /// The one line the band should show, or null when nothing went wrong.
         pub fn message(self: *const @This()) ?[]const u8 {
@@ -320,6 +344,10 @@ pub fn resolveChain(
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
                 out.app = loaded.app;
+                if (loaded.fontName()) |f| {
+                    @memcpy(out.font_buf[0..f.len], f);
+                    out.font_len = f.len;
+                }
                 out.base_from_file = true;
             } else |_| out.base_rejected = true;
         } else |e| switch (e) {
@@ -340,6 +368,13 @@ pub fn resolveChain(
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
                 out.app = loaded.app;
+                // The end user's name wins outright, and an override that omits
+                // `.font` inherits the developer's -- the same rule the colours
+                // follow, so one file cannot mean two things.
+                if (loaded.fontName()) |f| {
+                    @memcpy(out.font_buf[0..f.len], f);
+                    out.font_len = f.len;
+                }
                 out.user_from_file = true;
             } else |_| out.user_rejected = true;
         } else |e| switch (e) {
@@ -415,6 +450,69 @@ pub const Stats = struct {
     events: u32 = 0,
     messages: u32 = 0,
 };
+
+/// The face the chain asked for, and the bytes it was made from.
+///
+/// Bytes have an owner and the owner is here: a swapped face free's the previous
+/// buffer rather than leaking it, and the whole slot frees on the way out. The
+/// applied NAME is kept beside them so the loop can tell "same font, new frame"
+/// from "the file changed its mind".
+pub const FontSlot = struct {
+    bytes: ?[]u8 = null,
+    applied: [elmz.font_name_max]u8 = undefined,
+    applied_len: usize = 0,
+    canvas: ?*software.Canvas = null,
+
+    pub fn deinit(self: *FontSlot, gpa: std.mem.Allocator) void {
+        if (self.bytes) |b| gpa.free(b);
+        self.bytes = null;
+    }
+
+    fn appliedName(self: *const FontSlot) []const u8 {
+        return self.applied[0..self.applied_len];
+    }
+};
+
+/// Attach the typeface the chain NAMED, if it names a different one than the
+/// face already there. Returns whether anything changed, so the loop can mark
+/// the frame dirty -- a font swap that does not repaint is a swap nobody sees.
+///
+/// Failure leaves the previous face attached and bands the name. That is the
+/// entire rule: a font that cannot be found must never quietly become a
+/// different font, because the render still looks deliberate.
+pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]const u8, slot: *FontSlot) bool {
+    const name = want orelse return false;
+    if (std.mem.eql(u8, name, slot.appliedName())) return false;
+
+    const bytes = software.loadFontByName(gpa, io, name, &.{}) catch {
+        ui.failExternal(.font, "no font named {s}", .{name});
+        return false;
+    };
+    slot.deinit(gpa);
+    slot.bytes = bytes;
+    @memcpy(slot.applied[0..name.len], name);
+    slot.applied_len = name.len;
+    if (slot.canvas) |cv| cv.setFont(bytes);
+    return true;
+}
+
+/// Attach the typeface the theme chain NAMED, resolving the name to a file.
+///
+/// The name is the documented path: a `.zon` says "DejaVu Sans" and the library
+/// finds the file, so the file may move without the theme knowing where fonts
+/// live. Failure keeps whatever face is attached (nothing, at startup) and bands
+/// with the NAME -- naming the file would be advice the author never wrote.
+///
+/// Substituting a different typeface on failure is the one outcome ruled out:
+/// it renders, it looks deliberate, and nobody can tell it happened.
+fn attachFontByName(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io: std.Io, name: []const u8) ?[]u8 {
+    const bytes = software.loadFontByName(gpa, io, name, &.{}) catch {
+        ui.failExternal(.font, "no font named {s}", .{name});
+        return null;
+    };
+    canvas.setFont(bytes);
+    return bytes;
+}
 
 /// Attach the app's declared typeface, or say why it is not there.
 ///
@@ -622,9 +720,13 @@ pub fn run(
     var base_owned: ?[:0]u8 = null;
     var user_owned: ?[:0]u8 = null;
     var theme_watch: ?ThemeWatchOf(App) = null;
+    // The face the chain names, and the bytes behind it. Owned here so a swap
+    // frees the previous buffer instead of leaking it.
+    var font_slot: FontSlot = .{ .canvas = canvas };
     defer if (opts.gpa) |g| {
         if (base_owned) |p| g.free(p);
         if (user_owned) |p| g.free(p);
+        font_slot.deinit(g);
     };
     if (opts.io) |io_arg| {
         if (opts.gpa) |g| {
@@ -642,7 +744,12 @@ pub fn run(
                 theme_watch = ThemeWatchOf(App).init(rt.ui.theme, base_owned, user_owned);
                 // Resolve before the first frame, through the same call the
                 // loop makes on a change.
-                if (theme_watch) |*w| w.poll(&rt.ui, io_arg, g);
+                if (theme_watch) |*w| {
+                    w.poll(&rt.ui, io_arg, g);
+                    // Attached after the first resolve, so a theme naming a face
+                    // gets it on frame one rather than after the first edit.
+                    _ = applyChainFont(&rt.ui, g, io_arg, w.fontName(), &font_slot);
+                }
             }
         }
     }
@@ -659,6 +766,10 @@ pub fn run(
                     const before = rt.ui.theme;
                     w.poll(&rt.ui, io_arg, gpa_arg);
                     if (!std.meta.eql(before, rt.ui.theme)) dirty = true;
+                    // Same trigger as the palette: either file changing
+                    // re-resolves the whole chain, and the font rides that. A
+                    // swap must repaint or nobody sees it.
+                    if (applyChainFont(&rt.ui, gpa_arg, io_arg, w.fontName(), &font_slot)) dirty = true;
                 }
             }
         }
@@ -2423,6 +2534,31 @@ test "a relative theme path resolves beside the executable, not the cwd" {
 /// A `tmpDir` path in the cwd-relative form the binary under test runs in.
 fn tmpPath(buf: []u8, dir: std.testing.TmpDir, name: []const u8) ![:0]u8 {
     return std.fmt.bufPrintZ(buf, ".zig-cache/tmp/{s}/{s}", .{ dir.sub_path, name });
+}
+
+test "the font name rides the chain: user wins, an omitting override inherits" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [64]u8 = undefined;
+    var ub: [64]u8 = undefined;
+    try tmp.dir.writeFile(io, .{ .sub_path = "theme.defaults.zon", .data = ".{ .version = 2, .theme = .{ .font = \"Base Face\" } }" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }" });
+
+    // An override that omits `.font` inherits the developer's, the same rule the
+    // colours follow -- otherwise one file would mean two things.
+    {
+        const chain = resolveChain(struct {}, gpa, io, .{}, tmpPath(&bb, tmp, "theme.defaults.zon") catch unreachable, tmpPath(&ub, tmp, "theme.zon") catch unreachable);
+        try std.testing.expectEqualStrings("Base Face", chain.fontName().?);
+    }
+
+    // And the end user naming one wins outright.
+    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 2, .theme = .{ .font = \"User Face\" } }" });
+    {
+        const chain = resolveChain(struct {}, gpa, io, .{}, tmpPath(&bb, tmp, "theme.defaults.zon") catch unreachable, tmpPath(&ub, tmp, "theme.zon") catch unreachable);
+        try std.testing.expectEqualStrings("User Face", chain.fontName().?);
+    }
 }
 
 test "the chain layers the override over the developer's base" {
