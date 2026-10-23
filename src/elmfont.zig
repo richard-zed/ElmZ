@@ -50,7 +50,7 @@ pub const glyphs = [_][glyph_h]u8{
     .{ 0b00000, 0b00010, 0b00000, 0b00100, 0b00100, 0b00100 }, // i
     .{ 0b00010, 0b00000, 0b00010, 0b00010, 0b00010, 0b01100 }, // j
     .{ 0b01000, 0b01000, 0b01010, 0b01100, 0b01010, 0b10010 }, // k
-    .{ 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100 }, // l
+    .{ 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01100 }, // l
     .{ 0b00000, 0b00000, 0b00000, 0b11010, 0b10101, 0b10101 }, // m
     .{ 0b00000, 0b00000, 0b00000, 0b01100, 0b01010, 0b01010 }, // n
     .{ 0b00000, 0b00000, 0b00110, 0b01001, 0b01001, 0b00110 }, // o
@@ -255,6 +255,26 @@ test "the table is the charset it claims" {
     for (order, 0..) |ch, idx| {
         try testing.expectEqual(idx, slot(ch).?);
         try testing.expect(spells(ch));
+    }
+}
+
+test "no two glyphs collide, and every one but space has ink" {
+    // A hand-drawn table has exactly one failure mode that survives every other
+    // check: a row copied or left as a placeholder. `l` was a bare full-height
+    // stem -- `1` minus its flag -- for as long as nothing compared rows.
+    for (glyphs, 0..) |g, i| {
+        var ink: u16 = 0;
+        for (g) |row| ink += row;
+        if (order[i] == ' ') {
+            try testing.expectEqual(@as(u16, 0), ink);
+            continue;
+        }
+        try testing.expect(ink != 0);
+        for (glyphs[i + 1 ..], i + 1..) |other, j| {
+            if (std.mem.eql(u8, &g, &other))
+                std.debug.print("glyphs {c} and {c} are identical\n", .{ order[i], order[j] });
+            try testing.expect(!std.mem.eql(u8, &g, &other));
+        }
     }
 }
 
