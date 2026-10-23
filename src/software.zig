@@ -687,6 +687,7 @@ pub const Canvas = struct {
                                     self.px[off + 0] = c.r;
                                     self.px[off + 1] = c.g;
                                     self.px[off + 2] = c.b;
+                                    self.px[off + 3] = 255;
                                 } else {
                                     self.blendPixel(xs + @as(i64, @intCast(j)), yy, c);
                                 }
@@ -733,6 +734,7 @@ pub const Canvas = struct {
                             self.px[off + 0] = c.r;
                             self.px[off + 1] = c.g;
                             self.px[off + 2] = c.b;
+                            self.px[off + 3] = 255;
                         } else {
                             self.blendPixel(x, y, c);
                         }
@@ -807,6 +809,7 @@ pub const Canvas = struct {
                             self.px[off + 0] = c.r;
                             self.px[off + 1] = c.g;
                             self.px[off + 2] = c.b;
+                            self.px[off + 3] = 255;
                             off += 4;
                         }
                     }
@@ -825,6 +828,7 @@ pub const Canvas = struct {
                             self.px[off + 0] = c.r;
                             self.px[off + 1] = c.g;
                             self.px[off + 2] = c.b;
+                            self.px[off + 3] = 255;
                         } else {
                             self.blendPixel(x, y, c);
                         }
@@ -905,6 +909,7 @@ pub const Canvas = struct {
             self.px[off + 0] = @intFromFloat(@round(std.math.clamp(cv[0], 0.0, 255.0)));
             self.px[off + 1] = @intFromFloat(@round(std.math.clamp(cv[1], 0.0, 255.0)));
             self.px[off + 2] = @intFromFloat(@round(std.math.clamp(cv[2], 0.0, 255.0)));
+            self.px[off + 3] = 255;
             cv[0] += dv[0];
             cv[1] += dv[1];
             cv[2] += dv[2];
@@ -2434,6 +2439,44 @@ test "a horizontal gradient varies by column and not by row" {
     try std.testing.expectApproxEqAbs(@as(f32, 128), @as(f32, @floatFromInt(chanAt(c.px, c.w, 50, 5))), 5);
     try std.testing.expectApproxEqAbs(@as(f32, 255), @as(f32, @floatFromInt(chanAt(c.px, c.w, 99, 5))), 3);
     try std.testing.expectEqual(chanAt(c.px, c.w, 50, 1), chanAt(c.px, c.w, 50, 8));
+}
+
+test "every fill kind packs alpha, so an opaque gradient cannot export as a hole" {
+    // `blendPixel` writes alpha for an opaque source and its comment says why:
+    // src-over onto a cleared canvas leaves the destination at 0, so an opaque
+    // frame would export as a fully TRANSPARENT png. The gradient writers each
+    // carried their own copy of that opaque branch and three of them dropped
+    // the fourth byte, while `encodePng` emits colour type 6 -- so an opaque
+    // gradient stored correct RGB at alpha 0 and the picture went out with a
+    // hole in it. Invisible on screen (src-over never reads the destination's
+    // alpha) and invisible to a pinned png (a pin records what was written).
+    const a = elmz.Color{ .r = 255, .g = 0, .b = 0 };
+    const b = elmz.Color{ .r = 0, .g = 128, .b = 255 };
+    const c = elmz.Color{ .r = 12, .g = 200, .b = 40 };
+    // Three opaque stops is the case that bypasses `rampRow` (which is only for
+    // two) and lands in the general per-pixel loop, so both paths are covered.
+    const three: elmz.Stops = .{ .colors = .{ a, b, c, c }, .n = 3 };
+    const fills = [_]elmz.Fill{
+        .{ .solid = a },
+        elmz.Fill.vgrad(a, b),
+        elmz.Fill.hgrad(a, b),
+        elmz.Fill.diag(a, b),
+        .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 1 }, .stops = three } },
+        .{ .radial = .{ .stops = elmz.Stops.two(a, b) } },
+    };
+    for (fills, 0..) |f, fi| {
+        var cv = try testCanvas(std.testing.allocator, 16, 16);
+        defer cv.deinit();
+        cv.fillRect(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, f);
+        var k: usize = 0;
+        while (k < 16 * 16) : (k += 1) {
+            const al = cv.px[k * 4 + 3];
+            if (al != 255) {
+                std.debug.print("fill {d}, pixel {d}: alpha {d}\n", .{ fi, k, al });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
 }
 
 test "a radial fill is brightest at the centre and falls off outward" {
