@@ -552,6 +552,13 @@ pub const Canvas = struct {
         self.px[i + 0] = gamma.blend(self.px[i + 0], color.r, a);
         self.px[i + 1] = gamma.blend(self.px[i + 1], color.g, a);
         self.px[i + 2] = gamma.blend(self.px[i + 2], color.b, a);
+        // Same rule as `blendCoverage`: src-over on the alpha channel, skipped
+        // when the destination is already opaque.
+        if (self.px[i + 3] != 255) {
+            const da = @as(f32, @floatFromInt(self.px[i + 3])) / 255.0;
+            const out = a + da * (1.0 - a);
+            self.px[i + 3] = @intFromFloat(@round(out * 255.0));
+        }
     }
 
     /// One scanline in one colour. The blend coefficients are hoisted out of
@@ -1006,6 +1013,19 @@ pub const Canvas = struct {
         self.px[i + 0] = gamma.blend(self.px[i + 0], color.r, a);
         self.px[i + 1] = gamma.blend(self.px[i + 1], color.g, a);
         self.px[i + 2] = gamma.blend(self.px[i + 2], color.b, a);
+        // Alpha is COMPOSITED here, not stamped. Stamping 255 the way the
+        // opaque writers do would be wrong twice over: coverage is fractional by
+        // definition, and a canvas may legitimately start transparent (the blit
+        // tests build one). Left alone, the destination alpha was simply never
+        // updated -- so a rounded rect or a glyph painted onto a cleared canvas
+        // carried correct colour at alpha 0, and `encodePng` (colour type 6)
+        // wrote it out as a hole. An opaque destination is the common case and
+        // needs no arithmetic: 255 over anything is 255.
+        if (self.px[i + 3] != 255) {
+            const da = @as(f32, @floatFromInt(self.px[i + 3])) / 255.0;
+            const out = a + da * (1.0 - a);
+            self.px[i + 3] = @intFromFloat(@round(out * 255.0));
+        }
     }
 
     /// Rounded rect by signed distance: the coverage of a pixel is derived
@@ -2477,6 +2497,47 @@ test "every fill kind packs alpha, so an opaque gradient cannot export as a hole
             }
         }
     }
+}
+
+test "coverage and glyphs composite alpha, so text is not a hole in the png" {
+    // The fill writers above are not the only paths that produce colour. A
+    // rounded rect, a glyph and a translucent quad all go through a COVERAGE
+    // blend, and two of those blends left the destination alpha untouched --
+    // one of them with a doc comment blessing the choice ("the destination
+    // alpha is left alone"). On a cleared canvas that is correct colour at
+    // alpha 0, which `encodePng` writes out as a hole; and the two text paths
+    // (real face, built-in face) did not even agree with each other.
+    const gpa = std.testing.allocator;
+    const white = elmz.Color{ .r = 255, .g = 255, .b = 255 };
+
+    // Rounded rect: every pixel of it is coverage-blended, so this is the
+    // whole-element case rather than an edge case.
+    var c = try testCanvas(gpa, 16, 16);
+    defer c.deinit();
+    c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = white }, false);
+    try std.testing.expectEqual(@as(u8, 255), c.px[(8 * 16 + 8) * 4 + 3]);
+
+    // Text: the real-face path blends inside cedar, the built-in path inside
+    // this file. Both must leave every painted pixel with alpha.
+    var t = try testCanvas(gpa, 64, 32);
+    defer t.deinit();
+    t.drawText(1, 2, 20, .{ .solid = white }, "H");
+    var painted: usize = 0;
+    var max_a: u8 = 0;
+    for (0..64 * 32) |k| {
+        if (t.px[k * 4] == 0 and t.px[k * 4 + 1] == 0 and t.px[k * 4 + 2] == 0) continue;
+        painted += 1;
+        max_a = @max(max_a, t.px[k * 4 + 3]);
+        try std.testing.expect(t.px[k * 4 + 3] != 0);
+    }
+    try std.testing.expect(painted > 20);
+    try std.testing.expectEqual(@as(u8, 255), max_a);
+
+    // And the common case is untouched: over an opaque backdrop, 255 stays 255
+    // even for a half-transparent source.
+    c.fillRect(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, .{ .solid = elmz.Color.rgbHex(0x102030) });
+    c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 128 } }, false);
+    try std.testing.expectEqual(@as(u8, 255), c.px[(8 * 16 + 8) * 4 + 3]);
 }
 
 test "a radial fill is brightest at the centre and falls off outward" {

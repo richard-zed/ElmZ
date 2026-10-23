@@ -517,9 +517,11 @@ pub fn decode(bytes: []const u8, i: *usize) u32 {
     return cp;
 }
 
-/// Blend one glyph pixel. Coverage is scaled by the colour's own alpha and the
-/// destination alpha is left alone -- both matter, and getting either wrong
-/// shows up hardest on muted text.
+/// Blend one glyph pixel. Coverage is scaled by the colour's own alpha, and the
+/// destination alpha is composited the way `Canvas.blendCoverage` does it --
+/// leaving it alone wrote correct colour at alpha 0 onto a cleared canvas,
+/// which `encodePng` (colour type 6) then exported as a hole. Two text paths
+/// disagreeing about alpha is worse than either choice made consistently.
 fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8) void {
     if (x < 0 or y < 0) return;
     const ux: u32 = @intCast(x);
@@ -532,4 +534,11 @@ fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8)
     px[i + 0] = gamma.blend(px[i + 0], color.r, a);
     px[i + 1] = gamma.blend(px[i + 1], color.g, a);
     px[i + 2] = gamma.blend(px[i + 2], color.b, a);
+    // Skipped when the destination is already opaque, which is every glyph in
+    // a normally-painted frame -- so this costs one byte compare per pixel.
+    if (px[i + 3] != 255) {
+        const da = @as(f32, @floatFromInt(px[i + 3])) / 255.0;
+        const out = a + da * (1.0 - a);
+        px[i + 3] = @intFromFloat(@round(out * 255.0));
+    }
 }
