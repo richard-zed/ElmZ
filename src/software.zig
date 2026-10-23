@@ -592,6 +592,17 @@ pub const Canvas = struct {
     /// left. Both bounds are resolved before the loop, so the per-pixel path
     /// is exactly what it was when nothing clips.
     fn clipSpan(self: *Self, rect: elmz.Rect, clip: elmz.Rect) ?Span {
+        // Non-finite geometry is refused here, BEFORE the max/min below. Those
+        // follow fmax/fmin and silently DROP a NaN, so a NaN coordinate became
+        // the clip's own edge and the span covered every pixel the clip allowed
+        // -- a broken element painting the whole screen instead of vanishing.
+        // Infinity is refused for a second reason: `@intFromFloat` traps on it,
+        // and the clamp below runs after the conversion, so it cannot save it.
+        if (!std.math.isFinite(rect.x) or !std.math.isFinite(rect.y) or
+            !std.math.isFinite(rect.w) or !std.math.isFinite(rect.h) or
+            !std.math.isFinite(clip.x) or !std.math.isFinite(clip.y) or
+            !std.math.isFinite(clip.w) or !std.math.isFinite(clip.h))
+            return null;
         // Edges are taken straight from the two rects rather than from
         // `intersect`, whose width is `x1 - x0`. That subtraction is not
         // always exact in f32, and re-deriving `x1` from it could move an
@@ -925,6 +936,13 @@ pub const Canvas = struct {
             .solid => |c| c,
             else => null,
         };
+        // Same refusal as `clipSpan`, which this path bypasses: it converts the
+        // clip itself instead of asking for a span, so a non-finite pen or clip
+        // would trap in `@intFromFloat` rather than being skipped.
+        if (!std.math.isFinite(x) or !std.math.isFinite(y) or
+            !std.math.isFinite(clip.x) or !std.math.isFinite(clip.y) or
+            !std.math.isFinite(clip.w) or !std.math.isFinite(clip.h))
+            return;
         var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
         if (solid == null) {
             const tm = elmfont.measure(bytes, size);
@@ -1983,11 +2001,6 @@ pub const Canvas = struct {
         );
     }
 
-    /// Measured at the DEVICE size and divided back, never "measure logical and
-    /// hope". Advances are not exactly linear in point size -- hinting and
-    /// grid-fitting move stems by whole pixels -- so at 1.25x the width of a
-    /// string is not 1.25x the width measured at 1x, and a layout built on the
-    /// scaled-down number would disagree with the glyphs actually drawn.
     /// Font metrics for one string, cached. `dev` is the DEVICE size; the
     /// divide-back for HiDPI happens at the call site, so what is stored is the
     /// number the glyphs were actually fitted at.
@@ -2071,6 +2084,11 @@ pub const Canvas = struct {
         return n;
     }
 
+    /// Measured at the DEVICE size and divided back, never "measure logical and
+    /// hope". Advances are not exactly linear in point size -- hinting and
+    /// grid-fitting move stems by whole pixels -- so at 1.25x the width of a
+    /// string is not 1.25x the width measured at 1x, and a layout built on the
+    /// scaled-down number would disagree with the glyphs actually drawn.
     fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const m = self.cachedMeasure(bytes, size * self.scale);
@@ -3816,4 +3834,47 @@ test "a curved path bulges past the chord its controls imply" {
     try std.testing.expect(pxAt(&c, 10, 12) > 200); // under the apex: inside
     try std.testing.expect(pxAt(&c, 10, 5) == 0); // above the apex: outside
     try std.testing.expect(pxAt(&c, 10, 17) > 200); // the body below it
+}
+
+test "a non-finite rect paints nothing, not the whole clip" {
+    // `@min`/`@max` follow fmax/fmin and silently DROP a NaN, so `clipSpan`'s
+    // `!(x1 > x0)` guard -- which does catch an inverted rect -- turned a NaN
+    // coordinate into the clip's own edge and painted every pixel the clip
+    // allowed. Measured before this guard: a 4x4 rect at (NaN,NaN) on a 64x64
+    // canvas painted 4096 pixels instead of 0. The damage is inverted from the
+    // usual defect: a broken element claims the whole screen instead of
+    // vanishing, and no gate notices, because every render that exists has
+    // finite coordinates.
+    //
+    // Infinity is refused for a different reason: `@intFromFloat` traps on it,
+    // and the clamp below it happens AFTER the conversion, so it cannot save it.
+    var c = try testCanvas(std.testing.allocator, 16, 16);
+    defer c.deinit();
+    const red = elmz.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
+    const nan = std.math.nan(f32);
+    const inf = std.math.inf(f32);
+    const bad = [_]elmz.Rect{
+        .{ .x = nan, .y = nan, .w = 4, .h = 4 },
+        .{ .x = 4, .y = 4, .w = nan, .h = nan },
+        .{ .x = nan, .y = 4, .w = 4, .h = 4 },
+        .{ .x = 4, .y = nan, .w = 4, .h = 4 },
+        .{ .x = 4, .y = 4, .w = inf, .h = inf },
+        .{ .x = -inf, .y = -inf, .w = 4, .h = 4 },
+    };
+    for (bad) |r| {
+        @memset(c.px, 0);
+        c.fillRect(r, .{ .solid = red });
+        var painted: usize = 0;
+        var i: usize = 0;
+        while (i < 16 * 16) : (i += 1) {
+            if (c.px[i * 4] != 0) painted += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 0), painted);
+    }
+
+    // The guard must refuse ONLY the nonsense: a finite rect beside them still
+    // paints, or this test would pass for the wrong reason.
+    @memset(c.px, 0);
+    c.fillRect(.{ .x = 2, .y = 2, .w = 4, .h = 4 }, .{ .solid = red });
+    try std.testing.expectEqual(@as(u8, 255), testRgb(&c, 3, 3)[0]);
 }

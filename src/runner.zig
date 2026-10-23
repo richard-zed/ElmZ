@@ -389,8 +389,6 @@ fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, 
     return @min(opts.poll_timeout_ms, opts.theme_poll_ms);
 }
 
-/// Monotonic nanoseconds: the injected source when there is one, else the io
-/// clock, else zero (no io, no clock, no dt -- and no animation without io).
 /// A logical size as a pixel count. Ceiling rather than truncation, because a
 /// fractional box that rounds DOWN loses its last partial pixel column, and the
 /// backend rounds the same value for its texture -- if the two disagree by one
@@ -401,6 +399,8 @@ fn pixelDim(v: f32) u32 {
     return @intFromFloat(@ceil(v));
 }
 
+/// Monotonic nanoseconds: the injected source when there is one, else the io
+/// clock, else zero (no io, no clock, no dt -- and no animation without io).
 fn clockNs(opts: Options, io: ?std.Io) u64 {
     if (opts.now_ns) |f| return f();
     if (io) |i| {

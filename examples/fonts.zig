@@ -3,10 +3,10 @@
 //!
 //! Writes two PNGs from the same view:
 //!   fonts.png       -- the face loaded from disk
-//!   fonts-none.png  -- `Font.none`: the same view, measured at zero width,
-//!                      drawing nothing. Not a crash and not a silent
-//!                      substitution: invisible text is the honest answer to
-//!                      "there is no face".
+//!   fonts-none.png  -- no face: the built-in 5x6 diagnostic face draws the
+//!                      same view. A missing typeface has to read as obviously
+//!                      wrong legible text, never as a blank window -- a blank
+//!                      window is the one answer that could pass for a bug.
 //!
 //!   zig build run-fonts
 
@@ -109,8 +109,9 @@ pub fn main(init: std.process.Init) !void {
         try canvas.writePng(io, gpa, "fonts.png");
     }
 
-    // Same view, no face. Zero-width metrics, nothing drawn -- the tree still
-    // builds, so layout does not explode and the app keeps running.
+    // Same view, no face. The built-in 5x6 face takes over, so the tree still
+    // builds, layout does not explode and the app keeps running -- and the text
+    // is legible but visibly not the app's typeface.
     canvas.setFont(&.{});
     {
         var frame = try runner.paintInto(Model, Msg, &rt, &canvas);

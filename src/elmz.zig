@@ -1398,14 +1398,6 @@ pub fn Element(comptime M: type) type {
             rect: void,
         };
 
-        /// Height (and resolved width) at `avail_w` — the width the parent is
-        /// about to give this element.
-        ///
-        /// `avail_w` exists so wrapping does not have to be told its width by
-        /// the call site, where the number is a guess that layout has not
-        /// computed yet. It is the same number paint lays the element out
-        /// with, which is what keeps measure and paint breaking lines in the
-        /// same place.
         /// This element's appearance, read out as one value.
         pub fn style(self: *const Self) Style {
             return .{
@@ -1551,10 +1543,18 @@ pub fn Element(comptime M: type) type {
                     }
                     return null;
                 },
-                else => return null,
+                .bar, .rect, .stack, .scroll => return null,
             }
         }
 
+        /// Height (and resolved width) at `avail_w` — the width the parent is
+        /// about to give this element.
+        ///
+        /// `avail_w` exists so wrapping does not have to be told its width by
+        /// the call site, where the number is a guess that layout has not
+        /// computed yet. It is the same number paint lays the element out
+        /// with, which is what keeps measure and paint breaking lines in the
+        /// same place.
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
             var s: Extent = switch (self.geometry) {
                 .text => |t| blk: {
@@ -3898,7 +3898,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 // an overlay never receives its offset -- it renders as if it
                 // could not scroll, with a thumb that is there and inert.
                 .stack => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
-                else => {},
+                .text, .button, .bar, .rect => {},
             }
         }
 
