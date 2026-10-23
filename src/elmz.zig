@@ -1017,7 +1017,10 @@ pub fn popupLayout(
 
     const x = switch (mode) {
         .centred => std.math.clamp(anchor.x + anchor.w / 2 - w / 2, 0, @max(0, view.w - w)),
-        .below => if (anchor.x + w > view.w) @max(0, view.w - w) else anchor.x,
+        // Clamped at BOTH ends. Only shifting on right overflow left an
+        // anchor at a negative x hanging its menu off the left edge -- the
+        // centred branch clamped, and this one quietly did not.
+        .below => std.math.clamp(anchor.x, 0, @max(0, view.w - w)),
     };
     const y = switch (mode) {
         .centred => std.math.clamp(anchor.y + anchor.h / 2 - h / 2, 0, @max(0, view.h - h)),
@@ -3889,23 +3892,22 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             // against. That rectangle is the whole reason this cannot live in
             // `view`, which runs before layout.
             {
-                var open_at: [8]usize = undefined;
-                var n_open: usize = 0;
-                for (hits.items, 0..) |h, i| {
-                    const wp = h.widget orelse continue;
+                // The tree's own regions are a stable prefix: appends below
+                // only ever land after `tree_len`, so indexing from here is
+                // immune to the list reallocating mid-loop. A fixed slot array
+                // would have silently dropped the ninth open popup, which is
+                // the "never red" failure -- something ignored with no report.
+                const tree_len = hits.items.len;
+                var idx: usize = 0;
+                while (idx < tree_len) : (idx += 1) {
+                    const wp = hits.items[idx].widget orelse continue;
                     const is_open = switch (wp.*) {
                         .select => |sel| sel.open,
                         .menu => |mn| mn.open,
                         else => false,
                     };
-                    if (is_open and n_open < open_at.len) {
-                        open_at[n_open] = i;
-                        n_open += 1;
-                    }
-                }
-                for (open_at[0..n_open]) |idx| {
+                    if (!is_open) continue;
                     const anchor_hit = hits.items[idx];
-                    const wp = anchor_hit.widget.?;
                     const items: []const Choice(M) = switch (wp.*) {
                         .select => |sel| sel.options,
                         .menu => |mn| mn.items,
@@ -6126,4 +6128,12 @@ test "a menu drops below and flips above when there is no room" {
     const flip = popupLayout(low, 90, 3, null, view, .below, popup_row_h);
     // 284 + 78 would leave the screen, so it opens upward instead.
     try std.testing.expectApproxEqAbs(260.0 - 78.0, flip.rect.y, 0.01);
+}
+
+test "a menu anchored off the left edge is pulled back on screen" {
+    const view = Size{ .w = 400, .h = 300 };
+    const anchor = Rect{ .x = -50, .y = 40, .w = 100, .h = 24 };
+    const lay = popupLayout(anchor, 100, 3, null, view, .below, popup_row_h);
+    try std.testing.expectApproxEqAbs(0.0, lay.rect.x, 0.01);
+    try std.testing.expectApproxEqAbs(64.0, lay.rect.y, 0.01);
 }
