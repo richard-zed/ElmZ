@@ -844,6 +844,73 @@ pub const ScrollDrag = struct {
 /// value to go that is not a second boolean.
 pub const Orientation = enum { horizontal, vertical };
 
+/// A slider that has taken the pointer. It carries its own geometry because the
+/// pointer-to-value mapping needs it, and the frame that produced the region is
+/// gone by the time the pointer moves. It carries NO grab offset on purpose: a
+/// slider's value is where the pointer is, so remembering how far from the knob
+/// the press landed would shift the whole range by that distance.
+pub const SliderDrag = struct {
+    key: u64,
+    /// The track as laid out in the frame the press happened in. A resize
+    /// mid-drag re-maps against the old rect, which is the right failure: the
+    /// value follows the pointer it was given, not a rect that moved under it.
+    rect: Rect,
+    /// Into the Model, never the arena: a drag outlives the frame that began it.
+    value: *f32,
+    min: f32,
+    max: f32,
+    /// null = continuous.
+    step: ?f32,
+    orientation: Orientation,
+};
+
+/// What has taken the pointer for continuous motion. A union rather than a
+/// second optional field beside `ScrollDrag`, so "held" has exactly one
+/// representation: two nullables would let both be set and leave every reader
+/// to work out which one wins.
+pub const Drag = union(enum) {
+    thumb: ScrollDrag,
+    slider: SliderDrag,
+};
+
+/// Where a pointer sits across a slider's range, 0..1. Vertical is INVERTED: a
+/// fader is loudest at the top, so a control that grew upward but increased
+/// downward would be the surprising one.
+fn sliderFraction(rect: Rect, orientation: Orientation, p: [2]f32) f32 {
+    const t = switch (orientation) {
+        .horizontal => if (rect.w > 0) (p[0] - rect.x) / rect.w else 0,
+        .vertical => if (rect.h > 0) (rect.y + rect.h - p[1]) / rect.h else 0,
+    };
+    return std.math.clamp(t, 0, 1);
+}
+
+/// The value under the pointer, quantised to the grid when there is one. The
+/// grid is computed from `min` on every call instead of being accumulated, so a
+/// long drag cannot drift off it the way `v + step` does.
+pub fn sliderValueAt(d: SliderDrag, p: [2]f32) f32 {
+    return quantise(d, d.min + sliderFraction(d.rect, d.orientation, p) * (d.max - d.min));
+}
+
+/// One step TOWARD the pointer, never to it. Clicking far along a stepped track
+/// walks the value there a click at a time rather than jumping as far as you
+/// happened to click. A DRAG is the opposite and uses `sliderValueAt`: the two
+/// entry points differ on purpose, and they share `sliderFraction` so they can
+/// never disagree about where the pointer is.
+pub fn sliderStepToward(d: SliderDrag, current: f32, p: [2]f32) f32 {
+    const target = sliderValueAt(d, p);
+    const step = d.step orelse return target;
+    if (target > current) return @min(current + step, target);
+    if (target < current) return @max(current - step, target);
+    return current;
+}
+
+fn quantise(d: SliderDrag, raw: f32) f32 {
+    const clamped = std.math.clamp(raw, d.min, d.max);
+    const step = d.step orelse return clamped;
+    if (step <= 0) return clamped;
+    return std.math.clamp(d.min + @round((clamped - d.min) / step) * step, d.min, d.max);
+}
+
 /// What a toast is telling the app. Four values rather than two because the
 /// alternative -- folding warning into error -- is how a palette decision
 /// becomes something a widget can no longer express. Each one must have a
@@ -949,7 +1016,7 @@ pub fn Hit(comptime M: type) type {
         /// than as a press. Recorded with no `key` and no `msg`: it dispatches
         /// nothing, and its identity is the viewport's, so the duplicate-key
         /// scan stays meaningful.
-        drag: ?ScrollDrag = null,
+        drag: ?Drag = null,
         /// Identity of the element that produced this region, if it declared
         /// one. A keyed press re-binds to the element carrying the same key
         /// instead of to a rectangle, so it survives the content reordering
@@ -1634,7 +1701,11 @@ pub fn Element(comptime M: type) type {
             // key, and the frame-global duplicate-key guard would then report
             // an app for using the feature as documented.
             const viewport_claims_this = std.meta.activeTag(self.geometry) == .scroll and self.key != null;
-            if (!viewport_claims_this and (self.on_press != null or (self.focusable and self.key != null))) {
+            // A widget-bearing element records a region even with no message
+            // and no focus: the runtime has to FIND it to open a popup, move a
+            // highlight or start a drag, and a slider produces no message of
+            // its own until one of those happens.
+            if (!viewport_claims_this and (self.on_press != null or (self.focusable and self.key != null) or self.widget != null)) {
                 try hitAppend(M, hits, gpa, .{
                     .rect = rect,
                     .clip = clip,
@@ -1644,6 +1715,22 @@ pub fn Element(comptime M: type) type {
                     .radius = self.radius,
                     .focusable = self.focusable and self.key != null,
                     .widget = self.widget,
+                    // Only a slider takes the pointer as a drag. Everything else
+                    // with a widget is a press or a popup anchor, and a region
+                    // that claimed a drag without a mapping would swallow motion
+                    // it has no way to use.
+                    .drag = if (self.widget) |w| switch (w.*) {
+                        .slider => |sl| Drag{ .slider = .{
+                            .key = self.key orelse 0,
+                            .rect = rect,
+                            .value = sl.value,
+                            .min = sl.min,
+                            .max = sl.max,
+                            .step = sl.step,
+                            .orientation = sl.orientation,
+                        } },
+                        else => null,
+                    } else null,
                 });
             }
 
@@ -1901,7 +1988,7 @@ pub fn Element(comptime M: type) type {
                                 },
                                 .clip = vp,
                                 .active = !self.disabled,
-                                .drag = .{ .key = k, .view = .{ .content_h = cs.h, .view_h = inner.h } },
+                                .drag = .{ .thumb = .{ .key = k, .view = .{ .content_h = cs.h, .view_h = inner.h } } },
                             });
                         }
                     }
@@ -5342,7 +5429,7 @@ test "a thumb exists only when there is overflow, and claims where it paints" {
         // `key`: a second region with key 7 would trip the duplicate-key guard
         // and would let `Press.rebind` hand the claim to the content region.
         try std.testing.expectEqual(@as(?u64, null), t.key);
-        try std.testing.expectEqual(@as(u64, 7), t.drag.?.key);
+        try std.testing.expectEqual(@as(u64, 7), t.drag.?.thumb.key);
         // No message: a thumb produces an offset, not an event.
         try std.testing.expectEqual(@as(?ThMsg, null), t.msg);
     }
@@ -5490,4 +5577,79 @@ test "a label wider than its element is elided and stays inside it" {
         else => {},
     };
     try std.testing.expectEqual(@as(usize, 1), wide_prims);
+}
+
+test "a stepped click nudges one step toward the pointer, it does not snap" {
+    var v: f32 = 50;
+    const d = SliderDrag{
+        .key = 1,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 10 },
+        .value = &v,
+        .min = 0,
+        .max = 100,
+        .step = 5,
+        .orientation = .horizontal,
+    };
+    // Click far along the track: one step, not eighty percent of the range.
+    try std.testing.expectEqual(@as(f32, 55), sliderStepToward(d, 50, .{ 80, 5 }));
+    try std.testing.expectEqual(@as(f32, 45), sliderStepToward(d, 50, .{ 20, 5 }));
+    // A DRAG is not a click: it tracks the pointer, quantised as it goes.
+    try std.testing.expectEqual(@as(f32, 80), sliderValueAt(d, .{ 80, 5 }));
+    // Already nearest the pointer: a click changes nothing.
+    try std.testing.expectEqual(@as(f32, 55), sliderStepToward(d, 55, .{ 55, 5 }));
+}
+
+test "a stepped slider lands on the grid, never between steps" {
+    var v: f32 = 50;
+    const d = SliderDrag{
+        .key = 1,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 10 },
+        .value = &v,
+        .min = 0,
+        .max = 100,
+        .step = 40,
+        .orientation = .horizontal,
+    };
+    // The pointer is at 60 and the grid is {0, 40, 80}: 60 is halfway, so the
+    // target is 80 and the step from 50 is capped there. The value must land ON
+    // a step, so "stop exactly where I clicked" is not available to a stepped
+    // control -- that is what `step = null` is for.
+    try std.testing.expectEqual(@as(f32, 80), sliderStepToward(d, 50, .{ 60, 5 }));
+    // An off-grid current value still moves onto the grid rather than staying
+    // between steps, which is the one visible consequence of allowing `step`
+    // without enforcing it.
+    try std.testing.expectEqual(@as(f32, 40), sliderStepToward(d, 50, .{ 45, 5 }));
+}
+
+test "a continuous slider goes exactly where it was clicked" {
+    var v: f32 = 0;
+    const d = SliderDrag{
+        .key = 1,
+        .rect = .{ .x = 10, .y = 0, .w = 100, .h = 10 },
+        .value = &v,
+        .min = 0,
+        .max = 1,
+        .step = null,
+        .orientation = .horizontal,
+    };
+    try std.testing.expectEqual(@as(f32, 0.5), sliderValueAt(d, .{ 60, 5 }));
+    // And a click is the same mapping, since there is no grid to nudge along.
+    try std.testing.expectEqual(@as(f32, 0.5), sliderStepToward(d, 0, .{ 60, 5 }));
+}
+
+test "a vertical slider is loudest at the top" {
+    var v: f32 = 0;
+    const d = SliderDrag{
+        .key = 1,
+        .rect = .{ .x = 0, .y = 0, .w = 10, .h = 100 },
+        .value = &v,
+        .min = 0,
+        .max = 100,
+        .step = null,
+        .orientation = .vertical,
+    };
+    try std.testing.expectEqual(@as(f32, 100), sliderValueAt(d, .{ 5, 0 }));
+    try std.testing.expectEqual(@as(f32, 0), sliderValueAt(d, .{ 5, 100 }));
+    // Outside the track clamps instead of running off the end.
+    try std.testing.expectEqual(@as(f32, 100), sliderValueAt(d, .{ 5, -50 }));
 }

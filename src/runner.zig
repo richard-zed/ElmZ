@@ -531,15 +531,27 @@ pub fn paintOnce(
     defer frame.deinit();
 }
 
-/// What a thumb drag needs to turn pointer motion into an offset: the grab
-/// point, the offset at grab time, and the viewport's proportions (so moving
-/// the thumb one unit moves the content by `content_h / view_h`).
-const ThumbDrag = struct {
-    key: u64,
-    view: elmz.ScrollView,
-    from_y: f32,
-    from_off: f32,
-};
+/// What the runner keeps for as long as a gesture lasts. Kept here rather than
+/// on `elmz.Drag`, which says what the ELEMENT is: a thumb needs the grab
+/// offset and the offset at grab time, and a slider must never have either
+/// (its value is where the pointer is). Generic over M only because a slider
+/// has to dispatch its own message when the value moves.
+fn ActiveDrag(comptime M: type) type {
+    return union(enum) {
+        /// A scroll thumb: tracked by grab offset, so the content does not jump
+        /// to put the pointer in the middle of the thumb.
+        thumb: struct {
+            d: elmz.ScrollDrag,
+            from_y: f32,
+            from_off: f32,
+        },
+        /// A value control: tracked by ABSOLUTE position.
+        slider: struct {
+            d: elmz.SliderDrag,
+            msg: M,
+        },
+    };
+}
 
 pub fn run(
     comptime App: type,
@@ -575,7 +587,7 @@ pub fn run(
     // so moving the pointer can be read as a delta. Kept here rather than on
     // `Press` because a click never needs an origin, and the thumb is the only
     // control whose geometry moves out from under the pointer mid-gesture.
-    var drag: ?ThumbDrag = null;
+    var drag: ?ActiveDrag(M) = null;
 
     // messages produced by commands land here between polls
     var async_msgs: std.ArrayList(M) = .empty;
@@ -769,11 +781,39 @@ pub fn run(
                     // read NOW, not tracked across frames: the grab is relative
                     // to where the thumb was when it was grabbed.
                     if (rt.press.captured) |h| {
-                        if (h.drag) |d| drag = .{
-                            .key = d.key,
-                            .view = d.view,
-                            .from_y = p[1],
-                            .from_off = rt.scrollOffset(d.key),
+                        if (h.drag) |d| switch (d) {
+                            .thumb => |t| drag = .{ .thumb = .{
+                                .d = t,
+                                .from_y = p[1],
+                                .from_off = rt.scrollOffset(t.key),
+                            } },
+                            .slider => |sl| {
+                                // The message comes off the widget payload, not
+                                // off the drag: the drag is geometry, and the
+                                // payload is the only thing that knows what to
+                                // dispatch. A slider with no payload could not
+                                // report a change at all.
+                                const msg: M = if (h.widget) |w| switch (w.*) {
+                                    .slider => |pl| pl.msg,
+                                    else => break,
+                                } else break;
+                                drag = .{ .slider = .{ .d = sl, .msg = msg } };
+                                // A press moves the value NOW, so a click that
+                                // never becomes a drag still does something: one
+                                // step toward the pointer when stepped, exactly
+                                // the pointer when continuous.
+                                const next = if (sl.step == null)
+                                    elmz.sliderValueAt(sl, p)
+                                else
+                                    elmz.sliderStepToward(sl, sl.value.*, p);
+                                if (next != sl.value.*) {
+                                    sl.value.* = next;
+                                    const action = rt.dispatch(msg);
+                                    stats.messages += 1;
+                                    if (action.quit) running = false;
+                                    dirty = dirty or action.repaint;
+                                }
+                            },
                         };
                     }
                     // Nothing under the pointer. Every claiming element is
@@ -826,17 +866,32 @@ pub fn run(
                 // not hovering anything: the thumb follows the cursor, so the
                 // region under it is the region being dragged and re-running
                 // hover would only mark a frame dirty that is already dirty.
-                if (drag) |d| {
-                    if (d.view.view_h > 0) {
-                        // One unit of thumb travel is worth this much content.
-                        const ratio = d.view.content_h / d.view.view_h;
-                        const max_off = @max(0, d.view.content_h - d.view.view_h);
-                        const next = std.math.clamp(d.from_off + (p[1] - d.from_y) * ratio, 0, max_off);
-                        if (next != rt.scrollOffset(d.key)) {
-                            rt.scrollTo(d.key, next);
-                            dirty = true;
+                if (drag) |*held| switch (held.*) {
+                    .thumb => |t| {
+                        if (t.d.view.view_h > 0) {
+                            // One unit of thumb travel is worth this much content.
+                            const ratio = t.d.view.content_h / t.d.view.view_h;
+                            const max_off = @max(0, t.d.view.content_h - t.d.view.view_h);
+                            const next = std.math.clamp(t.from_off + (p[1] - t.from_y) * ratio, 0, max_off);
+                            if (next != rt.scrollOffset(t.d.key)) {
+                                rt.scrollTo(t.d.key, next);
+                                dirty = true;
+                            }
                         }
-                    }
+                    },
+                    // A drag tracks the pointer and quantises as it goes: one
+                    // step per motion event would lag a fast drag badly, which
+                    // is why the click rule above is the only one-step path.
+                    .slider => |*sl| {
+                        const next = elmz.sliderValueAt(sl.d, p);
+                        if (next != sl.d.value.*) {
+                            sl.d.value.* = next;
+                            const action = rt.dispatch(sl.msg);
+                            stats.messages += 1;
+                            if (action.quit) running = false;
+                            dirty = dirty or action.repaint;
+                        }
+                    },
                 } else if (frame) |*f| {
                     const now: ?elmz.Rect = if (f.hit(p)) |h| h.rect else null;
                     if (!sameRect(now, hovered)) {
