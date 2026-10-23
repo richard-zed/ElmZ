@@ -244,6 +244,9 @@ pub fn build(b: *std.Build) void {
     const path_exe_install = b.addInstallArtifact(path_exe, .{});
     b.getInstallStep().dependOn(&path_exe_install.step);
     b.step("path", "build the outline fill render").dependOn(&path_exe_install.step);
+    b.step("run-path", "render outline fills to path.png (headless)").dependOn(
+        &runExample(b, path_exe).step,
+    );
     const overlay_exe = b.addExecutable(.{
         .name = "overlay",
         .root_module = b.createModule(.{
