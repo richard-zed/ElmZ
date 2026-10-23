@@ -1736,7 +1736,15 @@ pub fn Element(comptime M: type) type {
             const scope_start = hits.items.len;
             defer if (self.focus_scope) {
                 if (self.key) |k| {
-                    for (hits.items[scope_start..]) |*h| h.scope = k;
+                    // Only claim hits nothing closer has claimed. A nested
+                    // scope stamps its own range first (its defer runs at the
+                    // inner return), and an unconditional write here would
+                    // flatten every scope in the subtree onto the outermost
+                    // one -- so a panel inside a dialog would trap focus for
+                    // the dialog instead of for itself.
+                    for (hits.items[scope_start..]) |*h| {
+                        if (h.scope == null) h.scope = k;
+                    }
                 }
             };
 
@@ -2756,10 +2764,32 @@ pub fn Frame(comptime M: type) type {
             const k = from_key orelse return null;
             for (self.hits) |h| {
                 if (h.key != k) continue;
-                const owner = h.roving orelse return null;
-                return self.rovingStep(owner, h.roving_index, delta);
+                if (h.roving) |owner| return self.rovingStep(owner, h.roving_index, delta);
+                // The focused element is the CONTROL, not one of its rows.
+                // That is the state `focusStep` always produces, because it
+                // skips every row of a roving control -- so if an arrow could
+                // not step in from here the rows would be unreachable by
+                // keyboard entirely. Enter at the end the direction comes
+                // from, so Down and Up both read as "into the list".
+                return self.rovingEdge(k, delta);
             }
             return null;
+        }
+
+        /// The first row (for a downward step) or the last one (for an upward
+        /// step) of the roving control `owner`.
+        fn rovingEdge(self: *const Self, owner: u64, delta: i32) ?Roamer {
+            var first: ?Roamer = null;
+            var last: ?Roamer = null;
+            for (self.hits) |h| {
+                const o = h.roving orelse continue;
+                if (o != owner) continue;
+                const k = h.key orelse continue;
+                const r = Roamer{ .index = h.roving_index, .key = k, .rect = h.rect };
+                if (first == null or r.index < first.?.index) first = r;
+                if (last == null or r.index > last.?.index) last = r;
+            }
+            return if (delta > 0) first else last;
         }
 
         /// The open popup that should take the keyboard, preferring one
@@ -6091,6 +6121,119 @@ test "focus does not leave an open scope" {
     }
 }
 
+/// A dialog (scope 99) holding a panel that declares a scope of its own (88).
+fn nestedScopeView(s: *ScopeState, ui: *Ui(ScopeMsg)) *Element(ScopeMsg) {
+    const inner = ui.button(.{ .label = "inner", .msg = .c, .key = 12 });
+    inner.focusable = true;
+    const panel = ui.column(.{ .children = &.{inner} });
+    panel.key = 88;
+    panel.focus_scope = true;
+
+    const outer = ui.button(.{ .label = "outer", .msg = .b, .key = 10 });
+    outer.focusable = true;
+    const dlg = ui.column(.{ .children = &.{ outer, panel } });
+    dlg.key = 99;
+    dlg.focus_scope = s.open;
+    return dlg;
+}
+
+test "a nested scope wins over the one around it" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(ScopeState, ScopeMsg).init(gpa, .{}, scopeUpdate, nestedScopeView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+    defer f.deinit();
+    // `scopeOf` promises "the innermost element that declared focus_scope".
+    // Stamping happens on the way OUT, so the outer element's defer runs last
+    // and -- without a guard -- rewrites every hit its subtree produced,
+    // including the ones an inner scope had already claimed.
+    try std.testing.expectEqual(@as(?u64, 99), f.scopeOf(10));
+    try std.testing.expectEqual(@as(?u64, 88), f.scopeOf(12));
+}
+
+const DisMsg = enum { moved, toggled };
+const DisState = struct {
+    v: f32 = 0.5,
+    v_active: ?u16 = null,
+    enabled: bool = true,
+    opened: bool = false,
+    hits: u32 = 0,
+};
+
+fn disUpdate(s: *DisState, m: DisMsg) Action(DisMsg) {
+    switch (m) {
+        .moved, .toggled => s.hits += 1,
+    }
+    return .{};
+}
+
+var dis_opts = [_]Choice(DisMsg){
+    .{ .label = "a", .msg = .toggled },
+    .{ .label = "b", .msg = .toggled },
+};
+
+/// A disabled slider and a disabled select: both must stay inert, which for a
+/// widget means "cannot be dragged and cannot be opened" -- not merely "has no
+/// message", since a slider dispatches on a DRAG and a select on the popup.
+fn disView(s: *DisState, ui: *Ui(DisMsg)) *Element(DisMsg) {
+    const track = ui.rect(.{ .width = 100, .height = 20 });
+    track.key = 70;
+    track.focusable = true;
+    track.disabled = !s.enabled;
+    track.widget = ui.payload(.{ .slider = .{
+        .value = &s.v,
+        .min = 0,
+        .max = 1,
+        .step = null,
+        .orientation = .horizontal,
+        .msg = .moved,
+    } });
+
+    const field = ui.button(.{ .label = "pick", .msg = .toggled, .key = 71 });
+    field.focusable = true;
+    field.disabled = !s.enabled;
+    field.widget = ui.payload(.{ .select = .{
+        .open = s.opened,
+        .selected = 0,
+        .active = &s.v_active,
+        .options = &dis_opts,
+        .msg = .toggled,
+    } });
+
+    return ui.column(.{ .children = &.{ track, field } });
+}
+
+test "a disabled widget is inert, not merely quiet" {
+    const gpa = std.testing.allocator;
+    var st = DisState{};
+    st.v_active = null;
+    var rt = Runtime(DisState, DisMsg).init(gpa, .{}, disUpdate, disView);
+    defer rt.deinit();
+    rt.state = st;
+    rt.state.enabled = false;
+
+    var f = try rt.frame(.{ .w = 200, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+
+    // The region is still RECORDED -- vanishing would let a click fall through
+    // to whatever sits behind it -- but `hit` refuses to claim it, which is
+    // what stops the runtime starting a slider drag on it.
+    const mid: [2]f32 = .{ 50, 10 };
+    try std.testing.expect(f.hit(mid) == null);
+    const field_mid: [2]f32 = .{ 20, 32 };
+    try std.testing.expect(f.hit(field_mid) == null);
+
+    // Enabled, the same points DO claim, and the slider's claim carries a
+    // drag. Without this half a view that recorded nothing at all would pass.
+    rt.state.enabled = true;
+    var f2 = try rt.frame(.{ .w = 200, .h = 200 }, nominalRenderer());
+    defer f2.deinit();
+    const hit = f2.hit(mid) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(hit.drag != null);
+    try std.testing.expect(f2.hit(field_mid) != null);
+}
+
 const RoveMsg = enum { pick };
 const RoveState = struct {};
 
@@ -6228,8 +6371,15 @@ test "an arrow asks the frame where a roving cursor goes" {
     // Row 0 back one row stays on row 0 rather than wrapping.
     try std.testing.expectEqual(@as(u64, 40), f.rovingMove(40, -1).?.key);
 
-    // Not a row of anything: the key must reach the app instead.
-    try std.testing.expect(f.rovingMove(30, 1) == null);
+    // The control ITSELF: an arrow steps into its rows. This is the state
+    // Tab always produces, since `focusStep` skips every row -- asserting
+    // null here (as this test used to) made the rows unreachable by keyboard.
+    try std.testing.expectEqual(@as(u64, 40), f.rovingMove(30, 1).?.key);
+    try std.testing.expectEqual(@as(u64, 42), f.rovingMove(30, -1).?.key);
+
+    // A control that owns no rows, and no focus at all: the key must reach
+    // the app instead. This is the assertion that stops every arrow press in
+    // the window being swallowed.
     try std.testing.expect(f.rovingMove(50, 1) == null);
     try std.testing.expect(f.rovingMove(null, 1) == null);
 }

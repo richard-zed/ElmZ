@@ -3380,6 +3380,58 @@ test "an arrow key moves the roving cursor, not just the frame" {
     try std.testing.expectEqual(@as(?u64, 41), rt.focus);
 }
 
+/// A roving control that actually HAS an owner element (key 30), the way a
+/// builder produces one: Tab lands on the owner, never on a row.
+fn roveOwnerView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
+    const owner = ui.button(.{ .label = "list", .msg = .inc, .key = 30 });
+    owner.focusable = true;
+    var kids: [4]*elmz.Element(TMsg) = undefined;
+    kids[0] = owner;
+    var i: u16 = 0;
+    while (i < 3) : (i += 1) {
+        const r = ui.button(.{ .label = "r", .msg = .inc, .key = 40 + i });
+        r.focusable = true;
+        r.roving = 30;
+        r.roving_index = i;
+        kids[i + 1] = r;
+    }
+    return ui.column(.{ .children = &kids });
+}
+
+test "an arrow steps into a roving set from the control that owns it" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 200);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, roveOwnerView);
+    defer rt.deinit();
+
+    // Where focus ACTUALLY lands: `focusStep` skips every row of a roving
+    // control, so Tab stops on the owner. From there an arrow has to be able
+    // to step in, or the rows are unreachable by keyboard at all -- the
+    // earlier wiring test set focus straight onto a row, a state the runtime
+    // never produces on its own.
+    rt.focus = 30;
+
+    const down = [_]elmz.Event{ .{ .key = .{ .named = .down } }, .quit };
+    var fake: Fake = .{ .events = &down };
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    try std.testing.expectEqual(@as(?u64, 40), rt.focus);
+
+    // And from inside, the next one moves along the set as before.
+    const again = [_]elmz.Event{ .{ .key = .{ .named = .down } }, .quit };
+    var fake2: Fake = .{ .events = &again };
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
+    try std.testing.expectEqual(@as(?u64, 41), rt.focus);
+
+    // Up from the owner enters at the far end, not the near one.
+    rt.focus = 30;
+    const up = [_]elmz.Event{ .{ .key = .{ .named = .up } }, .quit };
+    var fake3: Fake = .{ .events = &up };
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake3.window(), .{ .poll_timeout_ms = 0 });
+    try std.testing.expectEqual(@as(?u64, 42), rt.focus);
+}
+
 var toast_clock: u64 = 0;
 fn toastNow() u64 {
     toast_clock += 400 * std.time.ns_per_ms;
