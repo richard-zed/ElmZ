@@ -287,6 +287,18 @@ const FontMem = struct {
     kern_mem: [Face.kern_bytes]u8 align(8),
 };
 
+/// One edge crossing a scanline. `dir` carries the edge's direction so a
+/// nonzero fill can accumulate winding; an even-odd fill ignores it and pairs
+/// the crossings off in order.
+const Cross = struct {
+    x: f32,
+    dir: i8,
+
+    fn lessThan(_: void, a: Cross, b: Cross) bool {
+        return a.x < b.x;
+    }
+};
+
 pub const Canvas = struct {
     const Self = @This();
 
@@ -300,6 +312,17 @@ pub const Canvas = struct {
     /// invalidates it -- which is the entire reason to bake rather than ramp
     /// the distance field every frame.
     masks: std.ArrayListUnmanaged(Mask) = .empty,
+
+    /// Flattened outline for the current path call, and the crossings for one
+    /// scanline. Reused rather than allocated per call: a path is a paint-time
+    /// shape and the paint path is not allowed to grow the heap every frame.
+    poly: std.ArrayListUnmanaged([2]f32) = .empty,
+    xs: std.ArrayListUnmanaged(Cross) = .empty,
+
+    /// Per-pixel coverage for one row, so overlapping spans of the same
+    /// outline accumulate into ONE blend instead of compositing over each
+    /// other. Without it a self-overlapping path is darker where it folds.
+    cover: []f32 = &.{},
 
     /// How many stencils have been BAKED, as opposed to found in the cache.
     /// Nothing in the renderer reads this -- it exists so a benchmark can tell
@@ -469,6 +492,9 @@ pub const Canvas = struct {
     pub fn deinit(self: *Self) void {
         for (self.masks.items) |m| self.gpa.free(m.px);
         self.masks.deinit(self.gpa);
+        self.poly.deinit(self.gpa);
+        self.xs.deinit(self.gpa);
+        if (self.cover.len > 0) self.gpa.free(self.cover);
         self.clearMeasureCache();
         self.measure_cache.deinit(self.gpa);
         self.clearWrapCache();
@@ -964,6 +990,222 @@ pub const Canvas = struct {
     /// and, with `stroke`, gives a 1px outline that follows it for free.
     pub fn roundRect(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool) void {
         self.roundRectClip(rect, radius, fill, stroke, elmz.Rect.unbounded);
+    }
+
+    fn vtPath(ptr: *anyopaque, x: f32, y: f32, p: elmz.Path, fill: elmz.Fill, clip: elmz.Rect) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.pathClip(x * self.scale, y * self.scale, p, fill, self.scaledRect(clip));
+    }
+
+    /// Flatten, then fill. The subdivision step is here and nowhere else: a
+    /// curve is cut to roughly one DEVICE pixel, so the tolerance is right at
+    /// every scale without the caller knowing what the scale is.
+    pub fn pathClip(self: *Self, ox: f32, oy: f32, p: elmz.Path, fill: elmz.Fill, clip: elmz.Rect) void {
+        self.poly.clearRetainingCapacity();
+        var cur: [2]f32 = .{ ox, oy };
+        var start: [2]f32 = cur;
+        var pi: usize = 0;
+        for (p.ops) |op| {
+            switch (op) {
+                .move => {
+                    if (pi >= p.points.len) return;
+                    cur = .{ ox + p.points[pi][0] * self.scale, oy + p.points[pi][1] * self.scale };
+                    start = cur;
+                    pi += 1;
+                },
+                .line => {
+                    if (pi >= p.points.len) return;
+                    const e = [2]f32{ ox + p.points[pi][0] * self.scale, oy + p.points[pi][1] * self.scale };
+                    if (!self.polyAppend(cur)) return;
+                    if (!self.polyAppend(e)) return;
+                    cur = e;
+                    pi += 1;
+                },
+                .quad => {
+                    if (pi + 1 >= p.points.len) return;
+                    const c = [2]f32{ ox + p.points[pi][0] * self.scale, oy + p.points[pi][1] * self.scale };
+                    const e = [2]f32{ ox + p.points[pi + 1][0] * self.scale, oy + p.points[pi + 1][1] * self.scale };
+                    if (!self.flattenQuad(cur, c, e)) return;
+                    cur = e;
+                    pi += 2;
+                },
+                .cubic => {
+                    if (pi + 2 >= p.points.len) return;
+                    const c1 = [2]f32{ ox + p.points[pi][0] * self.scale, oy + p.points[pi][1] * self.scale };
+                    const c2 = [2]f32{ ox + p.points[pi + 1][0] * self.scale, oy + p.points[pi + 1][1] * self.scale };
+                    const e = [2]f32{ ox + p.points[pi + 2][0] * self.scale, oy + p.points[pi + 2][1] * self.scale };
+                    if (!self.flattenCubic(cur, c1, c2, e)) return;
+                    cur = e;
+                    pi += 3;
+                },
+                .close => {
+                    if (!self.polyAppend(cur)) return;
+                    if (!self.polyAppend(start)) return;
+                    cur = start;
+                },
+            }
+        }
+        self.fillPolygonClip(self.poly.items, p.rule, fill, clip);
+    }
+
+    /// A tuple allocator failure mid-outline would otherwise paint a shape with
+    /// a vertex missing -- wrong in a way that looks like a path bug. Bailing
+    /// out of the whole fill is the honest failure.
+    fn polyAppend(self: *Self, pt: [2]f32) bool {
+        self.poly.append(self.gpa, pt) catch return false;
+        return true;
+    }
+
+    fn dist(a: [2]f32, b: [2]f32) f32 {
+        const dx = a[0] - b[0];
+        const dy = a[1] - b[1];
+        return @sqrt(dx * dx + dy * dy);
+    }
+
+    /// Segments for a control polygon of length `d`, at about one device pixel
+    /// per segment. Bounded at both ends: two segments for a nearly straight
+    /// curve (a quad with collinear controls still curves), and a hard ceiling
+    /// so one pathological control point cannot flatten into thousands.
+    fn segsFor(d: f32) usize {
+        if (!(d > 0)) return 2;
+        const n = std.math.clamp(@ceil(d), 2, 64);
+        return @intFromFloat(n);
+    }
+
+    fn flattenQuad(self: *Self, p0: [2]f32, c: [2]f32, p1: [2]f32) bool {
+        const n = segsFor(dist(p0, c) + dist(c, p1));
+        var i: usize = 1;
+        while (i <= n) : (i += 1) {
+            const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
+            const u = 1 - t;
+            const x = u * u * p0[0] + 2 * u * t * c[0] + t * t * p1[0];
+            const y = u * u * p0[1] + 2 * u * t * c[1] + t * t * p1[1];
+            if (!self.polyAppend(.{ x, y })) return false;
+        }
+        return true;
+    }
+
+    fn flattenCubic(self: *Self, p0: [2]f32, c1: [2]f32, c2: [2]f32, p1: [2]f32) bool {
+        const n = segsFor(dist(p0, c1) + dist(c1, c2) + dist(c2, p1));
+        var i: usize = 1;
+        while (i <= n) : (i += 1) {
+            const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
+            const u = 1 - t;
+            const a = u * u * u;
+            const b = 3 * u * u * t;
+            const cc = 3 * u * t * t;
+            const dd = t * t * t;
+            const x = a * p0[0] + b * c1[0] + cc * c2[0] + dd * p1[0];
+            const y = a * p0[1] + b * c1[1] + cc * c2[1] + dd * p1[1];
+            if (!self.polyAppend(.{ x, y })) return false;
+        }
+        return true;
+    }
+
+    /// Each pixel row is sampled four times vertically, and horizontally each
+    /// span contributes its exact overlap, so the edge is antialiased in both
+    /// axes without supersampling the interior.
+    pub fn fillPolygonClip(self: *Self, pts: []const [2]f32, rule: elmz.FillRule, fill: elmz.Fill, clip: elmz.Rect) void {
+        if (pts.len < 3) return;
+        var minx = pts[0][0];
+        var maxx = pts[0][0];
+        var miny = pts[0][1];
+        var maxy = pts[0][1];
+        for (pts[1..]) |p| {
+            minx = @min(minx, p[0]);
+            maxx = @max(maxx, p[0]);
+            miny = @min(miny, p[1]);
+            maxy = @max(maxy, p[1]);
+        }
+        const box = elmz.Rect{ .x = minx, .y = miny, .w = maxx - minx, .h = maxy - miny };
+        const sp = self.clipSpan(box, clip) orelse return;
+        const x0i: i64 = @max(sp.x0, @as(i64, @intFromFloat(@floor(minx))));
+        const x1i: i64 = @min(sp.x1, @as(i64, @intFromFloat(@ceil(maxx))));
+        if (x1i <= x0i) return;
+
+        const n: usize = @intCast(x1i - x0i);
+        if (self.cover.len < n) {
+            const fresh = self.gpa.alloc(f32, n) catch return;
+            if (self.cover.len > 0) self.gpa.free(self.cover);
+            self.cover = fresh;
+        }
+        const row = self.cover[0..n];
+
+        const sub: u32 = 4;
+        const w = 1.0 / @as(f32, @floatFromInt(sub));
+
+        var y = sp.y0;
+        while (y < sp.y1) : (y += 1) {
+            @memset(row, 0);
+            var s: u32 = 0;
+            while (s < sub) : (s += 1) {
+                const sy = @as(f32, @floatFromInt(y)) + (@as(f32, @floatFromInt(s)) + 0.5) * w;
+                self.xs.clearRetainingCapacity();
+                var i: usize = 0;
+                while (i < pts.len) : (i += 1) {
+                    const a = pts[i];
+                    const b = pts[(i + 1) % pts.len];
+                    const da = a[1] <= sy;
+                    const db = b[1] <= sy;
+                    if (da == db) continue;
+                    const t = (sy - a[1]) / (b[1] - a[1]);
+                    const cxx = a[0] + t * (b[0] - a[0]);
+                    self.xs.append(self.gpa, .{ .x = cxx, .dir = if (b[1] > a[1]) 1 else -1 }) catch return;
+                }
+                const crossings = self.xs.items;
+                if (crossings.len < 2) continue;
+                std.mem.sort(Cross, crossings, {}, Cross.lessThan);
+
+                if (rule == .evenodd) {
+                    var k: usize = 0;
+                    while (k + 1 < crossings.len) : (k += 2) {
+                        addSpan(row, x0i, crossings[k].x, crossings[k + 1].x, w);
+                    }
+                } else {
+                    var wind: i32 = 0;
+                    var from: f32 = 0;
+                    for (crossings) |c| {
+                        const was = wind;
+                        wind += c.dir;
+                        if (was == 0 and wind != 0) {
+                            from = c.x;
+                        } else if (was != 0 and wind == 0) {
+                            addSpan(row, x0i, from, c.x, w);
+                        }
+                    }
+                }
+            }
+
+            var px = x0i;
+            while (px < x1i) : (px += 1) {
+                const cov = row[@intCast(px - x0i)];
+                if (cov <= 0) continue;
+                self.blendCoverage(px, y, fill.colorAt(
+                    box,
+                    @as(f32, @floatFromInt(px)) + 0.5,
+                    @as(f32, @floatFromInt(y)) + 0.5,
+                ), @min(cov, 1));
+            }
+        }
+    }
+
+    /// Add one horizontal span's exact overlap to the coverage row.
+    fn addSpan(row: []f32, x0i: i64, x0_in: f32, x1_in: f32, w: f32) void {
+        const base: f32 = @floatFromInt(x0i);
+        const end: f32 = base + @as(f32, @floatFromInt(row.len));
+        const xa = @max(x0_in, base);
+        const xb = @min(x1_in, end);
+        if (xb <= xa) return;
+        var pxi: i64 = @intFromFloat(@floor(xa));
+        const last: i64 = @as(i64, @intFromFloat(@ceil(xb))) - 1;
+        while (pxi <= last) : (pxi += 1) {
+            const l = @max(xa, @as(f32, @floatFromInt(pxi)));
+            const r = @min(xb, @as(f32, @floatFromInt(pxi + 1)));
+            if (r > l) {
+                const idx: usize = @intCast(pxi - x0i);
+                if (idx < row.len) row[idx] += (r - l) * w;
+            }
+        }
     }
 
     pub fn roundRectClip(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool, clip: elmz.Rect) void {
@@ -1681,6 +1923,7 @@ pub const Canvas = struct {
 
     const vtable = elmz.Renderer.VTable{
         .quad = vtQuad,
+        .path = vtPath,
         .rrect = vtRrect,
         .text = vtText,
         .halo = vtHalo,
@@ -3506,4 +3749,71 @@ test "the built-in face draws exactly the rows its table holds" {
             }
         }
     }
+}
+
+fn pxAt(c: *const Canvas, x: u32, y: u32) u8 {
+    return c.px[(y * c.w + x) * 4];
+}
+
+const RED: elmz.Fill = .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 255 } };
+
+test "a path fills its interior and nothing past its edges" {
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 20, 20);
+    defer c.deinit();
+    c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+
+    const ops = [_]elmz.PathOp{ .move, .line, .line, .close };
+    const pts = [_][2]f32{ .{ 2, 2 }, .{ 18, 2 }, .{ 2, 18 }, .{ 2, 2 } };
+    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts }, RED, elmz.Rect.unbounded);
+
+    try std.testing.expect(pxAt(&c, 4, 4) > 200); // inside
+    try std.testing.expect(pxAt(&c, 18, 18) == 0); // beyond the hypotenuse
+    try std.testing.expect(pxAt(&c, 0, 0) == 0); // outside the bounding box
+}
+
+test "even-odd punches the hole that non-zero fills in" {
+    const gpa = std.testing.allocator;
+    const ops = [_]elmz.PathOp{
+        .move, .line, .line, .line, .close,
+        .move, .line, .line, .line, .close,
+    };
+    // Two squares wound the SAME way: under non-zero the inner one adds
+    // winding and the middle stays solid; under even-odd it is a hole. That
+    // difference is the whole reason the rule is carried on the path.
+    const pts = [_][2]f32{
+        .{ 2, 2 }, .{ 18, 2 }, .{ 18, 18 }, .{ 2, 18 },
+        .{ 6, 6 }, .{ 14, 6 }, .{ 14, 14 }, .{ 6, 14 },
+    };
+
+    var solid = try testCanvas(gpa, 20, 20);
+    defer solid.deinit();
+    solid.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+    solid.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .nonzero }, RED, elmz.Rect.unbounded);
+    try std.testing.expect(pxAt(&solid, 10, 10) > 200);
+
+    var holed = try testCanvas(gpa, 20, 20);
+    defer holed.deinit();
+    holed.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+    holed.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .evenodd }, RED, elmz.Rect.unbounded);
+    try std.testing.expect(pxAt(&holed, 10, 10) == 0); // the hole
+    try std.testing.expect(pxAt(&holed, 4, 10) > 200); // the ring around it
+}
+
+test "a curved path bulges past the chord its controls imply" {
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 20, 20);
+    defer c.deinit();
+    c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+
+    // A quad from (2,18) through control (10,2) to (18,18) reaches its apex at
+    // y = 10, well ABOVE the straight chord at y = 18. A backend that treated
+    // the control point as a corner would fill almost nothing here.
+    const ops = [_]elmz.PathOp{ .move, .quad, .close };
+    const pts = [_][2]f32{ .{ 2, 18 }, .{ 10, 2 }, .{ 18, 18 } };
+    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts }, RED, elmz.Rect.unbounded);
+
+    try std.testing.expect(pxAt(&c, 10, 12) > 200); // under the apex: inside
+    try std.testing.expect(pxAt(&c, 10, 5) == 0); // above the apex: outside
+    try std.testing.expect(pxAt(&c, 10, 17) > 200); // the body below it
 }

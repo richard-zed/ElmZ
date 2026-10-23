@@ -599,6 +599,13 @@ pub const Renderer = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
+    /// Fill an outline. The path's curves are flattened by the backend, so a
+    /// backend that cannot do curves has to say so rather than draw a polygon
+    /// that pretends the controls were corners.
+    pub fn path(self: Renderer, x: f32, y: f32, p: Path, fill: Fill, clip: Rect) void {
+        self.vtable.path(self.ptr, x, y, p, fill, clip);
+    }
+
     pub const VTable = struct {
         quad: *const fn (ptr: *anyopaque, rect: Rect, fill: Fill, clip: Rect) void,
         /// draws a rounded rect, or its 1px outline when `stroke` is set
@@ -628,6 +635,10 @@ pub const Renderer = struct {
         advance_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32,
         /// The byte boundary nearest `x`: what a click selects.
         hit_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, x: f32) usize,
+        /// Fills a closed outline at (x, y). Curves arrive UNFLATTENED:
+        /// subdividing them belongs to the backend, because the tolerance is a
+        /// device-pixel quantity and only the backend knows its scale.
+        path: *const fn (ptr: *anyopaque, x: f32, y: f32, p: Path, fill: Fill, clip: Rect) void,
     };
 
     /// `clip` is required, not defaulted: every draw call names the rect it is
@@ -916,6 +927,109 @@ fn quantise(d: SliderDrag, raw: f32) f32 {
 /// becomes something a widget can no longer express. Each one must have a
 /// role in `Theme` and a filing in `familyOf`.
 pub const Severity = enum { info, success, warning, @"error" };
+
+/// How a self-intersecting outline decides what is inside it. Both rules are
+/// needed: an icon's magnifier glass is a ring under either, but a hole in a
+/// gear is only a hole if you say which rule you meant.
+pub const FillRule = enum { nonzero, evenodd };
+
+pub const PathOp = enum { move, line, quad, cubic, close };
+
+/// An outline in the caller's own coordinates.
+///
+/// Curves stay curves. The BACKEND flattens them, in DEVICE space, because a
+/// flattening tolerance is measured in pixels -- subdivide before the scale is
+/// applied and you are guessing how much each curve will be magnified.
+///
+/// `ops` and `points` are borrowed and read only for the duration of the call.
+pub const Path = struct {
+    ops: []const PathOp,
+    /// One point per `move`/`line`, two per `quad` (control then end), three
+    /// per `cubic` (two controls then end), none for `close`. Deliberately the
+    /// same shape as the SVG `d` grammar, so a parsed icon maps across without
+    /// a translation step in between.
+    points: []const [2]f32,
+    rule: FillRule = .nonzero,
+};
+
+/// Where a popup sits relative to the anchor it belongs to. Same box either
+/// way; the difference is which edge stays put.
+pub const PopupAnchor = enum {
+    /// A control that expanded: grow evenly above and below, centred on the
+    /// field, so the field looks like it opened rather than like a list
+    /// appeared beside it. There is no above/below flip here -- centring
+    /// makes it unnecessary, which is why the flip exists only for menus.
+    centred,
+    /// A command that drops out of its trigger. Left edges aligned, and it
+    /// flips above when there is no room below: a menu centred on its button
+    /// would read as a rendering fault.
+    below,
+};
+
+/// Rows past this scroll inside a fixed-height box. ODD ON PURPOSE: the box is
+/// centred on its anchor, so an even count splits unevenly around the middle
+/// row, and the list would look off by half a row.
+pub const popup_max_rows: usize = 5;
+
+/// One row's height. A constant because the box height has to be knowable
+/// before any row is measured -- and it is what keeps the box from resizing
+/// as the active row moves.
+pub const popup_row_h: f32 = 26;
+
+pub const PopupLayout = struct {
+    rect: Rect,
+    /// Index of the first row painted. The box height does NOT change with
+    /// it: the window slides inside a fixed frame, which is what stops the
+    /// whole popup jumping on every arrow press.
+    first: usize,
+    count: usize,
+};
+
+/// The box a popup occupies, and which rows of a long list it shows.
+///
+/// Pure, and free of the frame: the arithmetic is where the mistakes live --
+/// a box that resizes per keypress, a menu that opens off-screen -- so it is
+/// worth testing without rasterising anything.
+pub fn popupLayout(
+    anchor: Rect,
+    widest: f32,
+    rows: usize,
+    active: ?usize,
+    view: Size,
+    mode: PopupAnchor,
+    row_h: f32,
+) PopupLayout {
+    if (rows == 0) {
+        return .{ .rect = .{ .x = anchor.x, .y = anchor.y, .w = 0, .h = 0 }, .first = 0, .count = 0 };
+    }
+    const count = @min(rows, popup_max_rows);
+    // Wide enough that the closed control never reflows when the list opens,
+    // and capped to the viewport so one absurd option cannot push it off.
+    const w = @min(@max(anchor.w, widest), view.w);
+    const h = @as(f32, @floatFromInt(count)) * row_h;
+
+    var first: usize = 0;
+    if (active) |a| {
+        const half = (count - 1) / 2;
+        first = if (a > half) a - half else 0;
+        if (first + count > rows) first = rows - count;
+    }
+
+    const x = switch (mode) {
+        .centred => std.math.clamp(anchor.x + anchor.w / 2 - w / 2, 0, @max(0, view.w - w)),
+        .below => if (anchor.x + w > view.w) @max(0, view.w - w) else anchor.x,
+    };
+    const y = switch (mode) {
+        .centred => std.math.clamp(anchor.y + anchor.h / 2 - h / 2, 0, @max(0, view.h - h)),
+        .below => blk: {
+            const under = anchor.y + anchor.h;
+            if (under + h <= view.h) break :blk under;
+            break :blk @max(0, anchor.y - h);
+        },
+    };
+
+    return .{ .rect = .{ .x = x, .y = y, .w = w, .h = h }, .first = first, .count = count };
+}
 
 /// One row of a select, menu or list. `msg` is optional because a menu
 /// separator is an item that claims space and does nothing; `disabled` is kept
@@ -2744,6 +2858,7 @@ pub fn Collector(comptime M: type) type {
 
         const vtable = Renderer.VTable{
             .quad = vtQuad,
+            .path = vtPath,
             .rrect = vtRrect,
             .text = vtText,
             .halo = vtHalo,
@@ -2767,6 +2882,11 @@ pub fn Collector(comptime M: type) type {
                 self.failed = true;
             };
         }
+
+        /// A path has no layout consequence, so the collector records nothing:
+        /// it exists to account for the boxes layout produced, and a filled
+        /// outline produces none. Pixel tests go through the software backend.
+        fn vtPath(_: *anyopaque, _: f32, _: f32, _: Path, _: Fill, _: Rect) void {}
 
         fn vtQuad(ptr: *anyopaque, rect: Rect, fill: Fill, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
@@ -2910,6 +3030,7 @@ pub fn nominalTextMetrics(bytes: []const u8, size: f32) TextMetrics {
 pub fn nominalRenderer() Renderer {
     return .{ .ptr = undefined, .vtable = &.{
         .quad = nominalQuad,
+        .path = nominalPath,
         .rrect = nominalRrect,
         .text = nominalText,
         .halo = nominalHalo,
@@ -2964,6 +3085,8 @@ fn nominalWrap(_: *anyopaque, bytes: []const u8, size: f32, max_width: f32, out:
 fn nominalMeasure(_: *anyopaque, bytes: []const u8, size: f32) TextMetrics {
     return nominalTextMetrics(bytes, size);
 }
+
+fn nominalPath(_: *anyopaque, _: f32, _: f32, _: Path, _: Fill, _: Rect) void {}
 
 fn nominalQuad(_: *anyopaque, _: Rect, _: Fill, _: Rect) void {}
 fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: bool, _: Rect) void {}
@@ -3757,6 +3880,96 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             // first. So it is a bug -- but not one worth taking the app down
             // for. It is reported the same way a failed allocation is, through
             // the band, which keeps the frame usable and names the fault.
+            // ---- popup layer ----
+            // Painted last and hit-tested first, and both fall out of the
+            // order these lists are appended in: the prim list paints front to
+            // back, and `hit` walks the region list from the END. So a popup
+            // needs no layer machinery of its own -- only to be appended after
+            // the tree, once layout has given its anchor a rectangle to sit
+            // against. That rectangle is the whole reason this cannot live in
+            // `view`, which runs before layout.
+            {
+                var open_at: [8]usize = undefined;
+                var n_open: usize = 0;
+                for (hits.items, 0..) |h, i| {
+                    const wp = h.widget orelse continue;
+                    const is_open = switch (wp.*) {
+                        .select => |sel| sel.open,
+                        .menu => |mn| mn.open,
+                        else => false,
+                    };
+                    if (is_open and n_open < open_at.len) {
+                        open_at[n_open] = i;
+                        n_open += 1;
+                    }
+                }
+                for (open_at[0..n_open]) |idx| {
+                    const anchor_hit = hits.items[idx];
+                    const wp = anchor_hit.widget.?;
+                    const items: []const Choice(M) = switch (wp.*) {
+                        .select => |sel| sel.options,
+                        .menu => |mn| mn.items,
+                        else => continue,
+                    };
+                    const active_idx: ?usize = switch (wp.*) {
+                        .select => |sel| if (sel.active.*) |v| @as(usize, v) else null,
+                        .menu => |mn| if (mn.active.*) |v| @as(usize, v) else null,
+                        else => null,
+                    };
+                    const toggle: M = switch (wp.*) {
+                        .select => |sel| sel.msg,
+                        .menu => |mn| mn.toggle,
+                        else => continue,
+                    };
+                    const mode: PopupAnchor = switch (wp.*) {
+                        .menu => .below,
+                        else => .centred,
+                    };
+
+                    var widest: f32 = anchor_hit.rect.w;
+                    for (items) |it| {
+                        if (it.label.len == 0) continue;
+                        const mw = metrics.measureText(it.label, 14).width + 24;
+                        if (mw > widest) widest = mw;
+                    }
+
+                    const lay = popupLayout(anchor_hit.rect, widest, items.len, active_idx, size, mode, popup_row_h);
+                    if (lay.count == 0) continue;
+
+                    // The scrim is appended BEFORE the rows, so the rows are
+                    // tested first: a click on an option must not also be a
+                    // click outside it. It carries the toggle, which is what
+                    // makes a click anywhere else dismiss. `on_outside` cannot
+                    // do this -- a click on another control claims that
+                    // control, so nothing would ever reach the app.
+                    try hits.append(a, .{ .rect = root_rect, .clip = root_rect, .msg = toggle });
+
+                    r.quad(lay.rect, .{ .solid = self.ui.theme.panel }, root_rect);
+                    r.quad(.{ .x = lay.rect.x, .y = lay.rect.y, .w = lay.rect.w, .h = 1 }, .{ .solid = self.ui.theme.border }, root_rect);
+                    r.quad(.{ .x = lay.rect.x, .y = lay.rect.y + lay.rect.h - 1, .w = lay.rect.w, .h = 1 }, .{ .solid = self.ui.theme.border }, root_rect);
+
+                    for (lay.first..lay.first + lay.count) |row| {
+                        const ry = lay.rect.y + @as(f32, @floatFromInt(row - lay.first)) * popup_row_h;
+                        const row_rect = Rect{ .x = lay.rect.x, .y = ry, .w = lay.rect.w, .h = popup_row_h };
+                        const item = items[row];
+                        const is_active = if (active_idx) |ai| ai == row else false;
+                        if (is_active) r.quad(row_rect, .{ .solid = self.ui.theme.hover }, lay.rect);
+                        if (item.label.len != 0) {
+                            const fg = if (item.disabled) self.ui.theme.text_muted else self.ui.theme.text;
+                            r.text(row_rect.x + 8, ry + 6, 14, .{ .solid = fg }, item.label, lay.rect);
+                        }
+                        if (item.msg) |m| {
+                            try hits.append(a, .{
+                                .rect = row_rect,
+                                .clip = root_rect,
+                                .msg = m,
+                                .active = !item.disabled,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Checked over the hit list rather than per sibling list, so the
             // rule is the simpler one: unique within a frame.
             for (hits.items, 0..) |h, i| {
@@ -5864,4 +6077,53 @@ test "a roving cursor moves between rows and stops at the ends" {
     try std.testing.expectEqual(@as(u16, 0), f.rovingStep(30, 0, -1).?.index);
     // A control with no rows has nothing to step through.
     try std.testing.expectEqual(@as(?Frame(RoveMsg).Roamer, null), f.rovingStep(50, 0, 1));
+}
+
+test "a centred popup straddles its anchor instead of hanging off it" {
+    const anchor = Rect{ .x = 100, .y = 100, .w = 120, .h = 24 };
+    const view = Size{ .w = 400, .h = 300 };
+    const lay = popupLayout(anchor, 120, 4, null, view, .centred, popup_row_h);
+    try std.testing.expectEqual(@as(usize, 4), lay.count);
+    // Centred on the anchor's middle row: half the box above, half below.
+    const want_y = 100 + 12 - (4 * popup_row_h) / 2;
+    try std.testing.expectApproxEqAbs(want_y, lay.rect.y, 0.01);
+    try std.testing.expectApproxEqAbs(100.0, lay.rect.x, 0.01);
+}
+
+test "a popup box keeps its height while the active row moves" {
+    const anchor = Rect{ .x = 10, .y = 200, .w = 100, .h = 20 };
+    const view = Size{ .w = 400, .h = 400 };
+    var prev: ?Rect = null;
+    var row: usize = 0;
+    while (row < 20) : (row += 1) {
+        const lay = popupLayout(anchor, 100, 20, row, view, .centred, popup_row_h);
+        // A LITERAL, not the constant: asserting `count == popup_max_rows`
+        // passes for any cap at all, including an even one, so it proves
+        // nothing. The cap has to be stated here for the check to bite.
+        try std.testing.expectEqual(@as(usize, 5), lay.count);
+        try std.testing.expect(popup_max_rows % 2 == 1);
+        if (prev) |p| {
+            // The box does not move with the highlight. Re-centring it per row
+            // is the bug this asserts against: the whole popup would jump on
+            // every arrow press.
+            try std.testing.expectApproxEqAbs(p.y, lay.rect.y, 0.01);
+            try std.testing.expectApproxEqAbs(p.h, lay.rect.h, 0.01);
+        }
+        // Only the window slides, and it always holds the active row.
+        try std.testing.expect(lay.first <= row and row < lay.first + lay.count);
+        prev = lay.rect;
+    }
+}
+
+test "a menu drops below and flips above when there is no room" {
+    const view = Size{ .w = 400, .h = 300 };
+    const high = Rect{ .x = 50, .y = 60, .w = 90, .h = 24 };
+    const lay = popupLayout(high, 90, 3, null, view, .below, popup_row_h);
+    try std.testing.expectApproxEqAbs(84.0, lay.rect.y, 0.01); // below the trigger
+    try std.testing.expectApproxEqAbs(50.0, lay.rect.x, 0.01); // left edges aligned
+
+    const low = Rect{ .x = 50, .y = 260, .w = 90, .h = 24 };
+    const flip = popupLayout(low, 90, 3, null, view, .below, popup_row_h);
+    // 284 + 78 would leave the screen, so it opens upward instead.
+    try std.testing.expectApproxEqAbs(260.0 - 78.0, flip.rect.y, 0.01);
 }
