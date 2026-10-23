@@ -169,6 +169,39 @@ pub fn measure(bytes: []const u8, size: f32) elmz.TextMetrics {
     };
 }
 
+/// Width of `bytes[0..index]`, on the same whole-cell grid `measure` uses.
+/// Uniform advances make this arithmetic, and the trailing gap is not ink.
+pub fn advanceTo(bytes: []const u8, size: f32, index: usize) f32 {
+    const s = scaleFor(size);
+    var i: usize = 0;
+    var n: u32 = 0;
+    const target = @min(index, bytes.len);
+    while (i < target) {
+        const cp = cedar.decode(bytes, &i);
+        if (cp == '\n') continue;
+        n += advance;
+    }
+    return if (n == 0) 0 else @floatFromInt((n - 1) * s);
+}
+
+/// The cell boundary nearest `x`, measured in cells rather than glyphs.
+pub fn hitText(bytes: []const u8, size: f32, x: f32) usize {
+    if (bytes.len == 0 or x <= 0) return 0;
+    const s = scaleFor(size);
+    var i: usize = 0;
+    var n: u32 = 0;
+    while (i < bytes.len) {
+        const before = i;
+        const cp = cedar.decode(bytes, &i);
+        if (cp == '\n') continue;
+        const b: f32 = if (n == 0) 0 else @floatFromInt((n - 1) * s);
+        const e: f32 = @floatFromInt(((n + advance) - 1) * s);
+        if (x <= (b + e) * 0.5) return before;
+        n += advance;
+    }
+    return bytes.len;
+}
+
 /// Greedy wrap, and the advances are uniform, so "how many fit" is arithmetic
 /// rather than a walk: k glyphs are `(k * advance - 1) * scale` wide.
 /// A single glyph wider than the box still gets its own line, because a loop

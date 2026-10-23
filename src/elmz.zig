@@ -621,6 +621,13 @@ pub const Renderer = struct {
             max_width: f32,
             out: [][]const u8,
         ) usize,
+        /// Width of `bytes[0..index]`: where a caret before that byte sits.
+        /// On the renderer for the same reason measure_text is -- only the
+        /// backend knows the advances, and a caret must not disagree with the
+        /// glyph it sits beside.
+        advance_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32,
+        /// The byte boundary nearest `x`: what a click selects.
+        hit_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, x: f32) usize,
     };
 
     /// `clip` is required, not defaulted: every draw call names the rect it is
@@ -666,6 +673,21 @@ pub const Renderer = struct {
 
     pub fn wrapText(self: Renderer, bytes: []const u8, size: f32, max_width: f32, out: [][]const u8) usize {
         return self.vtable.wrap_text(self.ptr, bytes, size, max_width, out);
+    }
+
+    /// Width of the first `index` bytes. The inverse of `hitText`, and the two
+    /// are meant to round-trip: a caret placed at a boundary, then hit-tested
+    /// back, must land on the same byte.
+    pub fn advanceText(self: Renderer, bytes: []const u8, size: f32, index: usize) f32 {
+        if (bytes.len == 0) return 0;
+        return self.vtable.advance_text(self.ptr, bytes, size, @min(index, bytes.len));
+    }
+
+    /// The byte boundary under `x`. Single line only: resolving y to a line is
+    /// the caller's, because only it knows how the text was wrapped.
+    pub fn hitText(self: Renderer, bytes: []const u8, size: f32, x: f32) usize {
+        if (bytes.len == 0) return 0;
+        return self.vtable.hit_text(self.ptr, bytes, size, x);
     }
 };
 
@@ -817,6 +839,100 @@ pub const ScrollDrag = struct {
     view: ScrollView,
 };
 
+/// Which way a control runs. A separate name rather than a `vertical: bool`,
+/// so the call site reads as what it is and there is somewhere for a third
+/// value to go that is not a second boolean.
+pub const Orientation = enum { horizontal, vertical };
+
+/// What a toast is telling the app. Four values rather than two because the
+/// alternative -- folding warning into error -- is how a palette decision
+/// becomes something a widget can no longer express. Each one must have a
+/// role in `Theme` and a filing in `familyOf`.
+pub const Severity = enum { info, success, warning, @"error" };
+
+/// One row of a select, menu or list. `msg` is optional because a menu
+/// separator is an item that claims space and does nothing; `disabled` is kept
+/// because `Element.disabled` already records a region inert, so a greyed row
+/// blocks the click instead of letting it fall through.
+pub fn Choice(comptime M: type) type {
+    return struct {
+        label: []const u8 = "",
+        msg: ?M = null,
+        disabled: bool = false,
+    };
+}
+
+/// What a control must tell the runtime that the app cannot.
+///
+/// This is the SIBLING of `Geometry`, not a variant of it. `Geometry` answers
+/// "how do I measure, paint, clip and descend a scroll offset" and it must
+/// never learn that widgets exist -- five switches walk it, and the file has
+/// nineteen `else => {}` arms, so a new variant there is a silent subtree-skip
+/// waiting to happen. This union answers the one different question the
+/// runtime asks AFTER layout: is this a control, and what does it need?
+///
+/// It carries messages, so it is generic over `M` exactly as `Hit` is.
+///
+/// The value is reached through a pointer into the frame arena. That pointer
+/// is valid for the frame that built it and not one moment longer: a widget
+/// payload must never be cached across frames, unlike a `*f32` into the app's
+/// own Model, which lives as long as the app does. `Frame.hit` strips it from
+/// the copy it hands out for precisely this reason.
+pub fn Widget(comptime M: type) type {
+    return union(enum) {
+        /// A value control. The runtime maps the pointer to a number and
+        /// writes it through `value`, because only the runtime sees motion
+        /// between frames. A Msg says that it changed; it carries nothing,
+        /// since raw pointer data is consumed at the edge.
+        slider: struct {
+            /// Into the Model, not the arena: a drag outlives the frame that
+            /// started it, and app state is the one thing that does.
+            value: *f32,
+            min: f32 = 0,
+            max: f32 = 1,
+            /// null = continuous. `step` is allowed, never enforced: a
+            /// stepped drag quantises as it goes, and the click rule is a
+            /// nudge of one step toward the pointer.
+            step: ?f32 = null,
+            orientation: Orientation = .horizontal,
+            msg: M,
+        },
+        /// A collapsed list of options. Geometry, dismissal and typeahead all
+        /// belong to the runtime popup layer, which needs the anchor's real
+        /// laid-out rect -- something `view` cannot know, because layout runs
+        /// after `view` returns.
+        select: struct {
+            open: bool,
+            selected: u16,
+            /// A pointer into the Model so hover, arrows and typeahead write
+            /// one number. Two copies would let the highlight disagree with
+            /// what Enter activates.
+            active: *?u16,
+            options: []const Choice(M),
+            /// Emitted by the closed field, to toggle.
+            msg: M,
+        },
+        /// Commands rather than a value. Same popup layer, different geometry:
+        /// a menu drops below its trigger and flips, where a select grows
+        /// centred on its field.
+        menu: struct {
+            open: bool,
+            active: *?u16,
+            items: []const Choice(M),
+            toggle: M,
+        },
+        /// A notification. The Model owns whether it exists; the runtime owns
+        /// the clock, because a toast that expires needs the poll timeout
+        /// shortened or it simply never fires.
+        toast: struct {
+            severity: Severity = .info,
+            ttl_ms: u32 = 4000,
+            /// Emitted on expiry or on click.
+            msg: M,
+        },
+    };
+}
+
 pub fn Hit(comptime M: type) type {
     return struct {
         rect: Rect,
@@ -852,7 +968,27 @@ pub fn Hit(comptime M: type) type {
         /// reimplementing layout. A `key` is required too: focus is named, so
         /// an unkeyed element has nothing for it to hold on to.
         focusable: bool = false,
+        /// The control payload, if this element is a widget. Borrowed from the
+        /// frame arena and valid only for the frame that recorded it;
+        /// `Frame.hit` strips it before the app sees a Hit so no caller can
+        /// hold one past its life, and only the runtime's own walks ever read
+        /// it.
+        widget: ?*const Widget(M) = null,
     };
+}
+
+/// A Hit with the borrowed widget payload removed.
+///
+/// Everything an app can hold has to come through here. The payload points into
+/// the frame arena, which is reset at the START of the next frame, while a
+/// `Press` deliberately survives across frames -- so a captured Hit carrying
+/// one would be a live dangling pointer sitting in a struct. Nothing
+/// dereferences it today, which is exactly the kind of safety that is one
+/// refactor away from being gone.
+fn published(comptime M: type, h: Hit(M)) Hit(M) {
+    var c = h;
+    c.widget = null;
+    return c;
 }
 
 /// Enqueues a hit region clipped to what is actually visible. A fully clipped
@@ -862,22 +998,16 @@ fn hitAppend(
     comptime M: type,
     hits: *std.ArrayList(Hit(M)),
     gpa: Allocator,
-    rect: Rect,
-    clip: Rect,
-    msg: ?M,
-    key: ?u64,
-    active: bool,
-    radius: f32,
-    focusable: bool,
+    h: Hit(M),
 ) Allocator.Error!void {
-    if (rect.intersect(clip).isEmpty()) return;
+    if (h.rect.intersect(h.clip).isEmpty()) return;
     // A disabled element DOES enter the list, inert (`active = false`). Dropping
     // it would let a click fall through to whatever it covers, which is the one
     // thing a disabled control must never do: occlusion without claiming.
     // `Frame.hit` therefore stays a plain contains loop, and the topmost
     // containing region decides -- returning null when that region is inert
     // rather than continuing down the stack.
-    try hits.append(gpa, .{ .rect = rect, .clip = clip, .msg = msg, .key = key, .active = active, .radius = radius, .focusable = focusable });
+    try hits.append(gpa, h);
 }
 
 /// Appearance for one element, as a single value.
@@ -923,7 +1053,7 @@ pub const Style = struct {
 };
 
 /// The one rule for a slot: the gradient wins over the flat colour, because a
-/// caller who set a gradient meant it. `fallback` is what the kind or the theme
+/// caller who set a gradient meant it. `fallback` is what the geometry or the theme
 /// defaults to when the caller set neither.
 fn resolveFill(solid: ?Color, grad: ?Fill, fallback: ?Fill) ?Fill {
     if (grad) |g| return g;
@@ -935,7 +1065,7 @@ pub fn Element(comptime M: type) type {
     return struct {
         const Self = @This();
 
-        kind: Kind,
+        geometry: Geometry,
         /// inner padding for containers
         pad: f32 = 0,
         /// gap between children, uniform by definition
@@ -956,7 +1086,7 @@ pub fn Element(comptime M: type) type {
         bg_grad: ?Fill = null,
         /// what this element draws with on top of `bg`: text colour, control
         /// label, bar fill. Appearance lives on the element rather than inside
-        /// `Kind` so a kind describes structure only — which is what lets a
+        /// `Geometry`, so the geometry describes structure only — which is what lets a
         /// widget take its colours from the theme instead of needing a variant
         /// per look.
         fg: ?Color = null,
@@ -983,11 +1113,16 @@ pub fn Element(comptime M: type) type {
         radius: f32 = 0,
         /// makes any element pressable, not just buttons
         on_press: ?M = null,
+        /// What the runtime needs to ask this node after layout, if it is a
+        /// control. Declared by a widget builder and owned by the frame arena;
+        /// an app never writes it, and the builder owns the pairing with
+        /// `geometry` so the two cannot disagree.
+        widget: ?*const Widget(M) = null,
         /// confine every descendant to this element's rect (rect clip only;
         /// rounded corners are not cut yet). Off by default, so nothing that
         /// does not ask for it changes.
         clips: bool = false,
-        /// Vertical scroll offset for a `scroll` kind, in logical units.
+        /// Vertical scroll offset for a `scroll` geometry, in logical units.
         /// INJECTED BY THE RUNTIME from its keyed store, between `view` and
         /// layout -- writing it in `view` is meaningless, because the next
         /// frame overwrites it. Ask for a change with `Action.scroll`.
@@ -1023,12 +1158,20 @@ pub fn Element(comptime M: type) type {
         /// siblings; unset means the old rect-based behaviour.
         key: ?u64 = null,
         /// Displacement from a stack's content origin, in logical units.
-        /// IGNORED by every other kind: flow containers decide where children
+        /// IGNORED by every other geometry: flow containers decide where children
         /// go, a stack asks each child where it wants to be. Negative values
         /// are legal and are how a tooltip sits above its anchor.
         offset: [2]f32 = .{ 0, 0 },
 
-        pub const Kind = union(enum) {
+        /// What this element IS structurally: how it measures, how it paints,
+        /// what it clips, and how a scroll offset descends through it.
+        ///
+        /// `Geometric` rather than "widget" on purpose. `text` and `button`
+        /// carry their bytes and label because that content is what the
+        /// geometry applies to, not an interaction model — which is why a
+        /// widget must never add a variant here. Appearance lives on the
+        /// element instead (see `fg`), so a geometry cannot imply a look.
+        pub const Geometry = union(enum) {
             column: struct { children: []const *Self },
             row: struct { children: []const *Self },
             /// A viewport over ONE child: the child is laid out at its full
@@ -1048,7 +1191,7 @@ pub fn Element(comptime M: type) type {
             /// in the hit list, where `hit` walks from the end. Overlap and
             /// z-order therefore agree without either one being declared.
             stack: struct { children: []const *Self },
-            /// a plain sized box; the only kind with no intrinsic size
+            /// a plain sized box; the only geometry with no intrinsic size
             rect: void,
         };
 
@@ -1171,14 +1314,14 @@ pub fn Element(comptime M: type) type {
         /// `w` and `h` are the box it will ACTUALLY paint in, not what it asked
         /// for. A button centres its label in whatever height it is handed, so
         /// its baseline moves when a row stretches it and cannot be answered
-        /// from the kind alone.
+        /// from the geometry alone.
         ///
         /// A container borrows the first baseline it contains -- its first line
         /// box, the same rule CSS uses. A nested row would strictly want the
         /// deepest child, but a label column and a stacked label+detail are the
         /// cases that actually occur, and both are answered by the first.
         fn textBaseline(self: *const Self, r: Renderer, w: f32, h: f32) ?f32 {
-            switch (self.kind) {
+            switch (self.geometry) {
                 .text => |t| return self.pad + r.measureText(t.bytes, t.size).ascent,
                 .button => |b| {
                     const ts = r.measureText(b.label, b.size);
@@ -1210,7 +1353,7 @@ pub fn Element(comptime M: type) type {
         }
 
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
-            var s: Extent = switch (self.kind) {
+            var s: Extent = switch (self.geometry) {
                 .text => |t| blk: {
                     const ts = r.measureText(t.bytes, t.size);
                     // An explicit width still wins; otherwise wrapping text
@@ -1226,7 +1369,7 @@ pub fn Element(comptime M: type) type {
                             .min_w = longestWord(r, t.bytes, t.size) + 2 * self.pad,
                         };
                     }
-                    // `pad` grows the box on every kind, so a filled text
+                    // `pad` grows the box on every geometry, so a filled text
                     // element is a chip and not a label with its edges shaved.
                     const tw = ts.width + 2 * self.pad;
                     break :blk .{ .w = tw, .h = ts.height + 2 * self.pad, .min_w = tw };
@@ -1413,12 +1556,12 @@ pub fn Element(comptime M: type) type {
                 if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = self.key, .active = !self.disabled, .radius = self.radius });
             }
             // A button or bar always fills, even with no `bg` set, so the
-            // kind default belongs here rather than in the kind's paint arm.
-            // It has to be resolved in exactly one place: when the kind arm
+            // geometry default belongs here rather than in the geometry's paint arm.
+            // It has to be resolved in exactly one place: when the geometry arm
             // drew its own fill as well, a button with `bg` set emitted two
             // quads over the same rect (invisible, but wrong -- and it made
             // prim counts a lie).
-            // One foreground decision for every kind: a disabled control keeps
+            // One foreground decision for every geometry: a disabled control keeps
             // its geometry and drops to the muted role, which is the only
             // signal it gets, since the theme has no disabled colour and
             // cannot get one without duplicating a Mocha step.
@@ -1434,7 +1577,7 @@ pub fn Element(comptime M: type) type {
             const focused = self.focusable and !self.disabled and
                 self.key != null and hov.focus != null and hov.focus.? == self.key.?;
             const border_now: ?Fill = if (focused and !self.disabled) .{ .solid = th.accent } else self.style().borderFill(null);
-            const fill_now: ?Fill = bg_now orelse switch (self.kind) {
+            const fill_now: ?Fill = bg_now orelse switch (self.geometry) {
                 .button, .bar => .{ .solid = th.control },
                 else => null,
             };
@@ -1490,12 +1633,21 @@ pub fn Element(comptime M: type) type {
             // Emitting the generic region as well would put two hits under one
             // key, and the frame-global duplicate-key guard would then report
             // an app for using the feature as documented.
-            const viewport_claims_this = std.meta.activeTag(self.kind) == .scroll and self.key != null;
+            const viewport_claims_this = std.meta.activeTag(self.geometry) == .scroll and self.key != null;
             if (!viewport_claims_this and (self.on_press != null or (self.focusable and self.key != null))) {
-                try hitAppend(M, hits, gpa, rect, clip, self.on_press, self.key, !self.disabled, self.radius, self.focusable and self.key != null);
+                try hitAppend(M, hits, gpa, .{
+                    .rect = rect,
+                    .clip = clip,
+                    .msg = self.on_press,
+                    .key = self.key,
+                    .active = !self.disabled,
+                    .radius = self.radius,
+                    .focusable = self.focusable and self.key != null,
+                    .widget = self.widget,
+                });
             }
 
-            switch (self.kind) {
+            switch (self.geometry) {
                 .text => |t| {
                     // Glyphs start inside the padding, matching `measure`.
                     const ix = rect.x + self.pad;
@@ -1819,7 +1971,7 @@ pub fn Ui(comptime M: type) type {
         pub fn init(gpa: Allocator) Self {
             return .{
                 .arena = .init(gpa),
-                .dead = .{ .kind = .{ .rect = {} } },
+                .dead = .{ .geometry = .{ .rect = {} } },
             };
         }
 
@@ -1882,12 +2034,12 @@ pub fn Ui(comptime M: type) type {
             return self.arena.allocator();
         }
 
-        fn mk(self: *Self, kind: Elem.Kind) *Elem {
+        fn mk(self: *Self, geometry: Elem.Geometry) *Elem {
             const e = self.alloc().create(Elem) catch {
                 self.failWith(.layout_allocation);
                 return &self.dead;
             };
-            e.* = .{ .kind = kind };
+            e.* = .{ .geometry = geometry };
             return e;
         }
 
@@ -2058,7 +2210,7 @@ pub fn Ui(comptime M: type) type {
         /// option landing in every container at once.
         pub const StackOpts = ColumnOpts;
 
-        /// Children share an origin and may overlap. See `Kind.stack`.
+        /// Children share an origin and may overlap. See `Geometry.stack`.
         pub fn stack(self: *Self, o: StackOpts) *Elem {
             const e = self.mk(.{ .stack = .{ .children = self.dupeKids(o.children) } });
             if (o.width) |v| e.width = v;
@@ -2134,14 +2286,14 @@ pub fn Ui(comptime M: type) type {
         pub fn button(self: *Self, o: ButtonOpts) *Elem {
             const e = self.mk(.{ .button = .{ .label = o.label, .size = o.size } });
             // The click is an element fact, not a button fact: the generic
-            // `on_press` hit path already registers it, so the button kind
+            // `on_press` hit path already registers it, so the button geometry
             // does not need to carry the message as well.
             e.on_press = o.msg;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
             e.hover_bg = .{ .solid = self.theme.hover };
             e.press_bg = .{ .solid = self.theme.pressed };
-            // The kind's own look, then the caller's overlay.
+            // The geometry's own look, then the caller's overlay.
             e.applyStyle(.{ .bg = self.theme.control, .fg = self.theme.text });
             return self.finish(e, o);
         }
@@ -2246,7 +2398,39 @@ pub fn Frame(comptime M: type) type {
             while (i > 0) {
                 i -= 1;
                 const h = self.hits[i];
-                if (h.rect.containsRounded(h.radius, p) and h.clip.contains(p)) return if (h.active) h else null;
+                if (h.rect.containsRounded(h.radius, p) and h.clip.contains(p)) return if (h.active) published(M, h) else null;
+            }
+            return null;
+        }
+
+        /// The control payload recorded for a keyed region, valid until this
+        /// frame ends. The runtime's own door: an app gets `Hit`, which never
+        /// carries one. Copied out at the start of a gesture, never cached.
+        pub fn widgetAt(self: *const Self, key: u64) ?*const Widget(M) {
+            for (self.hits) |h| {
+                if (h.key) |k| {
+                    if (k == key) return h.widget;
+                }
+            }
+            return null;
+        }
+
+        /// Activated by the focused control, if it has one.
+        ///
+        /// DERIVED, not declared: a region activates exactly when it can also
+        /// be clicked and named -- a message, `focusable`, and a key. That is
+        /// why a text field needs no special case to refuse Enter: it carries
+        /// no message, so it is not activatable, and the key falls through to
+        /// the app's `on_key`, which is the only code that knows what Enter
+        /// means inside a text value. Adding a field for this would make it
+        /// possible to declare a control that activates yet cannot be clicked.
+        pub fn activate(self: *const Self, key: ?u64) ?M {
+            const k = key orelse return null;
+            for (self.hits) |h| {
+                if (!h.active or !h.focusable) continue;
+                if (h.key) |hk| {
+                    if (hk == k) return h.msg;
+                }
             }
             return null;
         }
@@ -2320,7 +2504,7 @@ pub fn Press(comptime M: type) type {
                                 self.captured = null;
                                 return;
                             }
-                            self.captured = nh;
+                            self.captured = published(M, nh);
                             return;
                         }
                     }
@@ -2374,6 +2558,8 @@ pub fn Collector(comptime M: type) type {
             .frost = vtFrost,
             .measure_text = vtMeasure,
             .wrap_text = vtWrap,
+            .advance_text = vtAdvanceText,
+            .hit_text = vtHitText,
         };
 
         fn vtFrost(ptr: *anyopaque, rect: Rect, radius: f32, blur: f32, clip: Rect) void {
@@ -2458,6 +2644,19 @@ pub fn Collector(comptime M: type) type {
             const self: *Self = @ptrCast(@alignCast(ptr));
             return self.metrics.wrapText(bytes, size, max_width, out);
         }
+
+        /// Delegate, do not reimplement: the collector records primitives but
+        /// has no glyphs, and a caret placed from anything but the renderer
+        /// that measures the frame would sit beside the wrong byte.
+        fn vtAdvanceText(ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32 {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            return self.metrics.advanceText(bytes, size, index);
+        }
+
+        fn vtHitText(ptr: *anyopaque, bytes: []const u8, size: f32, x: f32) usize {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            return self.metrics.hitText(bytes, size, x);
+        }
     };
 }
 
@@ -2525,11 +2724,26 @@ pub fn nominalRenderer() Renderer {
         .frost = nominalFrost,
         .measure_text = nominalMeasure,
         .wrap_text = nominalWrap,
+        .advance_text = nominalAdvance,
+        .hit_text = nominalHit,
     } };
 }
 
 /// Metrics-only: a frost has no shape and no metrics, so it draws nothing.
 fn nominalFrost(_: *anyopaque, _: Rect, _: f32, _: f32, _: Rect) void {}
+
+/// Metrics-only advance: 0.58em per byte, matching `nominalTextMetrics`.
+fn nominalAdvance(_: *anyopaque, bytes: []const u8, size: f32, index: usize) f32 {
+    return @as(f32, @floatFromInt(@min(index, bytes.len))) * size * 0.58;
+}
+
+/// Metrics-only hit test: the nearest whole byte at 0.58em each.
+fn nominalHit(_: *anyopaque, bytes: []const u8, size: f32, x: f32) usize {
+    const per = size * 0.58;
+    if (per <= 0 or x <= 0) return 0;
+    const n: usize = @intFromFloat(@max(0, @round(x / per)));
+    return @min(n, bytes.len);
+}
 
 /// Byte-ish wrap for the metrics-only renderer: same greedy rule, 0.58em/char.
 fn nominalWrap(_: *anyopaque, bytes: []const u8, size: f32, max_width: f32, out: [][]const u8) usize {
@@ -3094,8 +3308,8 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// cannot be written in `view` -- an app that set it there would be
         /// overwritten every frame. Same shape as `disabled` inheritance.
         fn injectScrollOffsets(self: *Self, e: *Elem) void {
-            if (e.kind == .scroll) e.scroll_offset = self.scrollAtKey(e.key);
-            switch (e.kind) {
+            if (e.geometry == .scroll) e.scroll_offset = self.scrollAtKey(e.key);
+            switch (e.geometry) {
                 .column => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
                 .row => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
                 .scroll => |c| self.injectScrollOffsets(c.child),
@@ -4090,7 +4304,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     }
 
     // applyStyle: a wholesale set
-    var a: Element(void) = .{ .kind = .{ .rect = {} } };
+    var a: Element(void) = .{ .geometry = .{ .rect = {} } };
     a.applyStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
         if (@typeInfo(f.type).optional.child == f32) {
@@ -4102,7 +4316,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     }
 
     // mergeStyle: only the fields the caller set, all of which are set here
-    var m: Element(void) = .{ .kind = .{ .rect = {} } };
+    var m: Element(void) = .{ .geometry = .{ .rect = {} } };
     m.mergeStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
         if (@typeInfo(f.type).optional.child == f32) {
@@ -4213,6 +4427,69 @@ fn anonymousView(m: *FocusState, ui: *Ui(FocusMsg)) *Element(FocusMsg) {
 }
 
 const focus_key: u64 = 7;
+
+// ---------------------------------------------------------------------------
+// activation: derived from the message, never declared
+// ---------------------------------------------------------------------------
+
+const ActState = struct {};
+const ActMsg = enum { fire };
+
+fn actUpdate(m: *ActState, msg: ActMsg) Action(ActMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+const act_key_ok: u64 = 1;
+const act_key_field: u64 = 2;
+const act_key_off: u64 = 3;
+
+fn actView(m: *ActState, ui: *Ui(ActMsg)) *Element(ActMsg) {
+    _ = m;
+    const ok = ui.button(.{ .label = "ok", .msg = .fire });
+    ok.focusable = true;
+    ok.key = act_key_ok;
+
+    // The text-field shape: focusable and keyed, but carrying NO message.
+    // Activation is derived from the message, so Enter has nothing to fire
+    // here and falls through to `on_key`, which is the only code that knows
+    // what Enter means inside a value.
+    const field = ui.text(.{ .label = "abc", .size = 12 });
+    field.focusable = true;
+    field.key = act_key_field;
+
+    // Focusable, keyed, messaged -- and inert.
+    const off = ui.button(.{ .label = "off", .msg = .fire });
+    off.focusable = true;
+    off.key = act_key_off;
+    off.disabled = true;
+
+    return ui.column(.{ .children = &.{ ok, field, off } });
+}
+
+test "activation is derived from the message, so a value control falls through" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(ActState, ActMsg).init(gpa, .{}, actUpdate, actView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+
+    // Focusable, named, messaged: Enter and Space reach it.
+    try std.testing.expectEqual(ActMsg.fire, f.activate(act_key_ok).?);
+
+    // No message, so nothing to activate. This is how a text field refuses
+    // Enter with no special case anywhere in the tree or the runtime.
+    try std.testing.expect(f.activate(act_key_field) == null);
+
+    // Inert: it is focused and named, but a disabled control must not fire.
+    try std.testing.expect(f.activate(act_key_off) == null);
+
+    // Nothing focused, and a key no region carries.
+    try std.testing.expect(f.activate(null) == null);
+    try std.testing.expect(f.activate(9999) == null);
+}
 
 fn countAccentPrims(prims: anytype, th: Theme) usize {
     var n: usize = 0;
@@ -4406,8 +4683,8 @@ test "a viewport records its content height and translates its content" {
 
 /// The same viewport, nested inside a stack.
 ///
-/// A container kind added after the scroll work has to be walked by
-/// `injectScrollOffsets` too. The switch ends in an else-branch, so a kind
+/// A container geometry added after the scroll work has to be walked by
+/// `injectScrollOffsets` too. The switch ends in an else-branch, so a geometry
 /// nobody listed is not an error -- it is a subtree that silently never
 /// receives its offset, and a viewport that renders with a thumb that is
 /// there, correctly sized, and inert.
@@ -4449,7 +4726,7 @@ test "a font failure names the path in the band" {
     // a second prong, not just `.theme`.
     rt.ui.failExternal(.font, "font not found: {s}", .{"src/font.ttf"});
     // Staged, not raised: nothing has failed IN this frame yet, and a stale
-    // kind must not be visible before frame() folds the condition in.
+    // geometry must not be visible before frame() folds the condition in.
     try std.testing.expect(!rt.ui.failed);
 
     var f = try rt.frame(.{ .w = 400, .h = 120 }, nominalRenderer());

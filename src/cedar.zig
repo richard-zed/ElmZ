@@ -240,6 +240,109 @@ pub const Font = struct {
         };
     }
 
+    /// Sum a run's advances, which is how every caller converts font units.
+    fn advanceSum(advs: []const i32, s: f32) f32 {
+        var w: f32 = 0;
+        for (advs) |a| w += @as(f32, @floatFromInt(a)) * s;
+        return w;
+    }
+
+    /// Codepoints in `bytes[start..end]`, NOT counting a trailing newline:
+    /// `layoutRun` consumes one but never produces a glyph for it, so counting
+    /// it would make every line that ends in a break look like a collapsed run.
+    fn cpsIn(bytes: []const u8, start: usize, end: usize) usize {
+        var i = start;
+        var n: usize = 0;
+        const stop = if (end > start and bytes[end - 1] == '\n') end - 1 else end;
+        while (i < stop) : (n += 1) _ = decode(bytes, &i);
+        return n;
+    }
+
+    /// Where a caret sitting before byte `index` belongs, as a width from the
+    /// start of `bytes`. `index` is clamped, and 0 answers 0.
+    ///
+    /// Deliberately the same advance sum `measure` walks, so a caret and the
+    /// glyph beside it cannot disagree. Substitution can collapse a cluster
+    /// ("fi" into one glyph) and `shape` reports no codepoint-to-glyph mapping,
+    /// so a boundary INSIDE a collapsed run has no exact answer; that run falls
+    /// back to measuring its prefix, which is the definition of the position
+    /// even though it re-shapes. The ordinary case is one pass, no allocation.
+    pub fn advanceTo(self: *const Font, bytes: []const u8, size: f32, index: usize) f32 {
+        const target = @min(index, bytes.len);
+        if (target == 0 or !self.ok) return 0;
+        const s = self.scaleFor(size);
+        var w: f32 = 0;
+        var run: Run = .{};
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const run_start = at;
+            at = self.layoutRun(bytes, at, &run);
+            if (target >= at) {
+                w += advanceSum(run.advs[0..run.len], s);
+                continue;
+            }
+            // The boundary falls inside this run.
+            if (cpsIn(bytes, run_start, at) != run.len) {
+                return w + self.measure(bytes[run_start..target], size).width;
+            }
+            var i = run_start;
+            var g: usize = 0;
+            while (i < target and g < run.len) {
+                _ = decode(bytes, &i);
+                w += @as(f32, @floatFromInt(run.advs[g])) * s;
+                g += 1;
+            }
+            return w;
+        }
+        return w;
+    }
+
+    /// The byte boundary nearest `x` — what a click at `x` puts the caret
+    /// before. Snaps to the CLOSER boundary, so clicking the right half of a
+    /// glyph puts the caret after it. Clamps outside the text instead of
+    /// indexing past either end.
+    pub fn hitText(self: *const Font, bytes: []const u8, size: f32, x: f32) usize {
+        if (bytes.len == 0 or !self.ok or x <= 0) return 0;
+        const s = self.scaleFor(size);
+        var w: f32 = 0;
+        var run: Run = .{};
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const run_start = at;
+            at = self.layoutRun(bytes, at, &run);
+            const run_w = advanceSum(run.advs[0..run.len], s);
+            if (w + run_w < x) {
+                w += run_w;
+                continue;
+            }
+            if (cpsIn(bytes, run_start, at) != run.len) {
+                // Collapsed cluster: resolve at the nearest codepoint boundary
+                // by prefix width. Inside a ligature no boundary is real, so
+                // this is only ever asked at an edge.
+                var i = run_start;
+                while (i < at) {
+                    const before = i;
+                    _ = decode(bytes, &i);
+                    const b = w + self.measure(bytes[run_start..before], size).width;
+                    const e = w + self.measure(bytes[run_start..i], size).width;
+                    if (x <= (b + e) * 0.5) return before;
+                }
+                w += run_w;
+                continue;
+            }
+            var i = run_start;
+            var g: usize = 0;
+            while (i < at and g < run.len) {
+                const nb = w + @as(f32, @floatFromInt(run.advs[g])) * s;
+                if (x <= (w + nb) * 0.5) return i;
+                w = nb;
+                _ = decode(bytes, &i);
+                g += 1;
+            }
+        }
+        return bytes.len;
+    }
+
     /// Greedy line breaking -- the same loop the stb path ran, because a line
     /// count that disagrees by one moves every border and shadow below it. The
     /// quirks are deliberate: the advance is added BEFORE the overflow test,

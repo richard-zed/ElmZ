@@ -1687,6 +1687,8 @@ pub const Canvas = struct {
         .frost = vtFrost,
         .measure_text = vtMeasure,
         .wrap_text = vtWrap,
+        .advance_text = vtAdvanceText,
+        .hit_text = vtHitText,
     };
 
     fn vtFrost(ptr: *anyopaque, rect: elmz.Rect, radius: f32, blur: f32, clip: elmz.Rect) void {
@@ -1853,6 +1855,23 @@ pub const Canvas = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.scale == 1.0) return self.cachedWrap(bytes, size, max_width, out);
         return self.cachedWrap(bytes, size * self.scale, max_width * self.scale, out);
+    }
+
+    /// Advances are font units, so this is device space for the same reason
+    /// measurement is: a caret placed from a logical-space sum drifts from the
+    /// glyphs actually rasterised.
+    fn vtAdvanceText(ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!self.font.available()) return elmfont.advanceTo(bytes, size, index);
+        const d = self.font.advanceTo(bytes, size * self.scale, index);
+        return if (self.scale == 1.0) d else d / self.scale;
+    }
+
+    fn vtHitText(ptr: *anyopaque, bytes: []const u8, size: f32, x: f32) usize {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!self.font.available()) return elmfont.hitText(bytes, size, x);
+        if (self.scale == 1.0) return self.font.hitText(bytes, size, x);
+        return self.font.hitText(bytes, size * self.scale, x * self.scale);
     }
 
     // -- PNG ----------------------------------------------------------------
@@ -3365,6 +3384,86 @@ test "a canvas with no face still paints text, because the band is text too" {
     const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
     c.drawText(2, 2, 12, .{ .solid = white }, "font is missing");
     try testing.expect(inkPixels(c.px) > 60);
+}
+
+test "a caret placed at a byte boundary hit-tests back to that byte" {
+    var c = try testCanvas(testing.allocator, 240, 40);
+    defer c.deinit();
+    const r = c.renderer();
+    const text = "Hamburgefonstiv";
+    const size: f32 = 16;
+
+    try testing.expectEqual(@as(f32, 0), r.advanceText(text, size, 0));
+    // The end of the text IS its measured width. If these disagree, a caret at
+    // the end of a field sits off the last glyph.
+    try testing.expectApproxEqAbs(
+        r.measureText(text, size).width,
+        r.advanceText(text, size, text.len),
+        0.001,
+    );
+
+    // Every boundary round-trips. This is the only statement that catches a
+    // caret PLACED by one rule and hit-tested by another, which is what a
+    // prefix-measure shortcut against a walked run would do.
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        try testing.expectEqual(i, r.hitText(text, size, r.advanceText(text, size, i)));
+    }
+
+    // Outside the text it clamps rather than indexing past either end.
+    try testing.expectEqual(text.len, r.hitText(text, size, 10_000));
+    try testing.expectEqual(@as(usize, 0), r.hitText(text, size, -10));
+
+    // Advances are monotonic: no boundary sits left of the one before it, which
+    // a desynced glyph-codepoint walk would break silently.
+    var prev = r.advanceText(text, size, 0);
+    i = 1;
+    while (i <= text.len) : (i += 1) {
+        const x = r.advanceText(text, size, i);
+        try testing.expect(x >= prev);
+        prev = x;
+    }
+}
+
+test "the caret round-trips at 1.5x, so the density divide is not forgotten" {
+    var c = try testCanvas(testing.allocator, 240, 40);
+    defer c.deinit();
+    const r = c.renderer();
+    const text = "Hamburgefonstiv";
+    const size: f32 = 16;
+    const at_one = r.advanceText(text, size, text.len);
+
+    c.scale = 1.5;
+    // Advances are grid-fitted, so a logical width at 1.5x is not EXACTLY the
+    // 1x one -- but it has to be close. Without the divide back it would be
+    // half again as wide, which is the failure this is watching for.
+    try testing.expectApproxEqAbs(at_one, r.advanceText(text, size, text.len), 1.0);
+
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        try testing.expectEqual(i, r.hitText(text, size, r.advanceText(text, size, i)));
+    }
+}
+
+test "a faceless canvas still places a caret, on whole cells" {
+    var c = try testCanvas(testing.allocator, 140, 24);
+    defer c.deinit();
+    c.setFont("");
+    try testing.expect(!c.font.available());
+
+    const r = c.renderer();
+    const text = "caret";
+    try testing.expectEqual(@as(f32, 0), r.advanceText(text, 12, 0));
+    // Uniform cells, so the same two invariants hold without any glyph data.
+    try testing.expectApproxEqAbs(
+        r.measureText(text, 12).width,
+        r.advanceText(text, 12, text.len),
+        0.001,
+    );
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        try testing.expectEqual(i, r.hitText(text, 12, r.advanceText(text, 12, i)));
+    }
 }
 
 test "the built-in face stays out of the way when a real one is attached" {

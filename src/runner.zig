@@ -851,6 +851,27 @@ pub fn run(
                         }
                     }
                 }
+                // Activation, before the app's hook: Enter, or Space, on a
+                // focused control that carries a message. Which controls those
+                // are is derived, not declared -- see `Frame.activate`. The
+                // consequence worth knowing is that a text field carries no
+                // message, so it never activates and Enter falls through to
+                // `on_key`, which is the only code that knows what Enter means
+                // inside a text value.
+                //
+                // Repeats are ignored: a held Enter must not fire the focused
+                // button once per tick.
+                if (!k.repeat and (k.named == .enter or k.code == ' ')) {
+                    if (frame) |*f| {
+                        if (f.activate(rt.focus)) |msg| {
+                            const action = rt.dispatch(msg);
+                            stats.messages += 1;
+                            if (action.quit) running = false;
+                            dirty = dirty or action.repaint;
+                            break :tab;
+                        }
+                    }
+                }
                 const hook = rt.on_key orelse break :tab;
                 if (hook(&rt.state, k, .down)) |msg| {
                     const action = rt.dispatch(msg);
