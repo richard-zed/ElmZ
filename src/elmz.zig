@@ -3301,6 +3301,7 @@ pub fn Executor(comptime M: type) type {
         done: std.ArrayList(M) = .empty,
         threads: std.ArrayList(std.Thread) = .empty,
         outstanding: usize = 0, // guarded by mutex
+        lost: usize = 0, // guarded by mutex
 
         pub fn submit(self: *Self, cmd: Cmd(M)) void {
             self.mutex.lock();
@@ -3310,10 +3311,18 @@ pub fn Executor(comptime M: type) type {
             const t = std.Thread.spawn(.{}, worker, .{ self, cmd }) catch {
                 self.mutex.lock();
                 self.outstanding -= 1;
+                self.lost += 1;
                 self.mutex.unlock();
                 return;
             };
-            self.threads.append(self.gpa, t) catch {};
+            self.threads.append(self.gpa, t) catch {
+                // The handle is gone, so nothing can join this worker, and
+                // dropping a joinable thread is how a shutdown race gets
+                // written. Detaching is safe here: its only contact with
+                // `self` is inside the mutex, and `deinit` waits for
+                // `outstanding` to reach zero before freeing anything.
+                t.detach();
+            };
         }
 
         fn worker(self: *Self, cmd: Cmd(M)) void {
@@ -3322,6 +3331,29 @@ pub fn Executor(comptime M: type) type {
             defer self.mutex.unlock();
             if (out) |m| self.done.append(self.gpa, m) catch {};
             self.outstanding -= 1;
+        }
+
+        /// Commands that could not be started. A command that never runs is a
+        /// message that never arrives, so the app waits for a result it cannot
+        /// distinguish from slow work -- this count is the only way to see it.
+        pub fn lostCommands(self: *Self) usize {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.lost;
+        }
+
+        /// Join workers that have finished, so `threads` stays bounded by the
+        /// commands IN FLIGHT rather than growing for the life of the app.
+        /// Every handle used to be kept until `deinit`, which for a long
+        /// session is an unbounded list plus a pile of finished-but-unjoined
+        /// threads still holding their stacks.
+        pub fn reap(self: *Self) void {
+            self.mutex.lock();
+            const idle = self.outstanding == 0;
+            self.mutex.unlock();
+            if (!idle or self.threads.items.len == 0) return;
+            for (self.threads.items) |t| t.join();
+            self.threads.clearRetainingCapacity();
         }
 
         /// True while workers are still running (cheap hint for the loop: it
@@ -3342,6 +3374,24 @@ pub fn Executor(comptime M: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            // `threads` need not hold every handle (an append that failed
+            // detached its worker), so wait for the work itself to finish
+            // before freeing what the workers reach.
+            //
+            // The wait is a yield loop, not a sleep, because 0.16 has no
+            // io-free sleep left: `std.time.sleep` is gone, `std.posix` has no
+            // nanosleep, and every remaining form (`std.Io.sleep`,
+            // `Clock.sleep`, `Timeout.sleep`) takes an `io`. This type
+            // deliberately has none -- the runtime it belongs to is io-free so
+            // it stays headlessly testable -- and normally the loop does not
+            // iterate at all, since `reap` has already joined everything.
+            while (true) {
+                self.mutex.lock();
+                const n = self.outstanding;
+                self.mutex.unlock();
+                if (n == 0) break;
+                std.Thread.yield() catch {};
+            }
             for (self.threads.items) |t| t.join();
             self.threads.deinit(self.gpa);
             self.done.deinit(self.gpa);
@@ -3813,7 +3863,13 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// Messages produced by commands since the last call. Dispatch them
         /// from the UI thread; they are ordinary messages.
         pub fn takeAsync(self: *Self, list: *std.ArrayList(M)) !void {
-            if (self.exec) |*e| try e.drainInto(list);
+            if (self.exec) |*e| {
+                try e.drainInto(list);
+                // Reap on the drain path, which the loop already walks every
+                // iteration: one lock and a compare while commands are in
+                // flight, and it stops finished workers piling up.
+                e.reap();
+            }
         }
 
         /// True while a command is still running.
@@ -6382,4 +6438,35 @@ test "an arrow asks the frame where a roving cursor goes" {
     // the window being swallowed.
     try std.testing.expect(f.rovingMove(50, 1) == null);
     try std.testing.expect(f.rovingMove(null, 1) == null);
+}
+
+test "finished workers are reaped instead of accumulating for the session" {
+    const H = struct {
+        fn seven(ctx: *const anyopaque) ?u32 {
+            _ = ctx;
+            return 7;
+        }
+    };
+    const box = [_]u8{0};
+    const cmd = Cmd(u32){ .ctx = @ptrCast(&box), .run = H.seven };
+
+    var ex = Executor(u32){ .gpa = std.testing.allocator };
+    defer ex.deinit();
+
+    for (0..8) |_| ex.submit(cmd);
+
+    var guard: usize = 0;
+    while (ex.busy() and guard < 20_000) : (guard += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!ex.busy());
+    try std.testing.expectEqual(@as(usize, 0), ex.lostCommands());
+
+    ex.reap();
+    // Without the reap this is 8 -- one handle per command, kept until deinit,
+    // which for a long session is an unbounded list of finished threads.
+    try std.testing.expectEqual(@as(usize, 0), ex.threads.items.len);
+
+    var got: std.ArrayList(u32) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try ex.drainInto(&got);
+    try std.testing.expectEqual(@as(usize, 8), got.items.len);
 }
