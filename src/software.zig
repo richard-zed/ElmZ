@@ -2817,7 +2817,7 @@ test "every fill kind packs alpha, so an opaque gradient cannot export as a hole
         .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 1 }, .stops = three } },
         .{ .radial = .{ .stops = elmz.Stops.two(a, b) } },
     };
-    for (fills, 0..) |f, fi| {
+    for (fills) |f| {
         var cv = try testCanvas(std.testing.allocator, 16, 16);
         defer cv.deinit();
         cv.fillRect(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, f);
@@ -2825,8 +2825,9 @@ test "every fill kind packs alpha, so an opaque gradient cannot export as a hole
         while (k < 16 * 16) : (k += 1) {
             const al = cv.px[k * 4 + 3];
             if (al != 255) {
-                std.debug.print("fill {d}, pixel {d}: alpha {d}\n", .{ fi, k, al });
-                return error.TestUnexpectedResult;
+                // No print: see the note in the blend test -- stderr fails the
+                // build step, and the assertion reports the value it found.
+                try std.testing.expectEqual(@as(u8, 255), al);
             }
         }
     }
@@ -3858,9 +3859,12 @@ test "the fixed-point blend agrees with the float one everywhere" {
             }
         }
     }
-    if (mismatches != 0) {
-        std.debug.print("\n[blend] {d} mismatches, worst {d}/255\n", .{ mismatches, worst });
-    }
+    // Nothing is printed here even though the numbers are interesting: `zig
+    // build test` runs this binary with `--listen=-` and treats stderr as a
+    // protocol violation, so a diagnostic on a PASSING run fails the step it was
+    // meant to help debug. The count varies with codegen (0 here, 56 in another
+    // build), which is exactly what made that failure look intermittent. The two
+    // expectations below report both numbers when they break.
     // NOT zero, and the residue is understood: 56 combinations out of 4.26M,
     // every one off by a single code value, all where the exact value lands on
     // an f32 tie. Demanding zero here would be asserting that integer

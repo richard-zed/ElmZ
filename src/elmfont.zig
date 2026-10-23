@@ -270,9 +270,9 @@ test "no two glyphs collide, and every one but space has ink" {
             continue;
         }
         try testing.expect(ink != 0);
-        for (glyphs[i + 1 ..], i + 1..) |other, j| {
-            if (std.mem.eql(u8, &g, &other))
-                std.debug.print("glyphs {c} and {c} are identical\n", .{ order[i], order[j] });
+        for (glyphs[i + 1 ..]) |other| {
+            // No print on the failure path either: stderr is the build runner's
+            // protocol channel under `zig build test`.
             try testing.expect(!std.mem.eql(u8, &g, &other));
         }
     }
