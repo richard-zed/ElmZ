@@ -122,6 +122,11 @@ pub const Options = struct {
     /// measures real elapsed time, so this bounds how stale a frame can get;
     /// it is not a frame rate.
     anim_poll_ms: i32 = 8,
+
+    /// How long the loop may block while a toast is on screen. Same trap as the
+    /// animation clock and the theme watcher: `poll_timeout_ms` defaults to -1,
+    /// so without this a toast would sit there until the pointer moved.
+    toast_poll_ms: i32 = 100,
     /// Draw the frame readout over the painted frame. OFF by default here and
     /// turned on by `runApp` when the binary is built in Debug, because the
     /// overlay costs a timestamp pair per repaint and a text render -- fine
@@ -371,11 +376,14 @@ pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8)
 /// Never unbounded while a file is being watched, and a command in flight keeps
 /// its 5ms budget -- blocking for a theme would starve the async result, which
 /// is the same bug in a different costume.
-fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool) i32 {
+fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, toasting: bool) i32 {
     if (busy) return 5;
     // An animation produces frames with no input at all, so blocking here is
     // exactly the bug: it would freeze until the pointer moved.
     if (animating) return opts.anim_poll_ms;
+    // A toast expires on a wall clock with no input to wake the loop, so the
+    // wait is bounded whether or not anything else is moving.
+    if (toasting) return if (opts.poll_timeout_ms < 0) opts.toast_poll_ms else @min(opts.poll_timeout_ms, opts.toast_poll_ms);
     if (!watching) return opts.poll_timeout_ms;
     if (opts.poll_timeout_ms < 0) return opts.theme_poll_ms;
     return @min(opts.poll_timeout_ms, opts.theme_poll_ms);
@@ -589,6 +597,21 @@ pub fn run(
     // control whose geometry moves out from under the pointer mid-gesture.
     var drag: ?ActiveDrag(M) = null;
 
+    // A toast that is on screen, and how long it has been there. Runtime
+    // transient like `hovered` and `drag`: the Model decides whether a toast
+    // exists, this decides when it stops. A fixed-size array would silently
+    // ignore the overflow, which is the failure this project keeps finding.
+    const ToastSlot = struct {
+        key: u64,
+        t: f32,
+        ttl: f32,
+        msg: M,
+        rect: elmz.Rect,
+        seen: bool = true,
+    };
+    var toasts: std.ArrayListUnmanaged(ToastSlot) = .empty;
+    defer toasts.deinit(rt.gpa);
+
     // messages produced by commands land here between polls
     var async_msgs: std.ArrayList(M) = .empty;
     defer async_msgs.deinit(rt.gpa);
@@ -720,12 +743,72 @@ pub fn run(
         // pathological stall cannot overflow f32 precision in one step; the
         // clamp `on_tick` gets is deliberately NOT reused, because a blink
         // frozen by a stall is worse than one that jumped.
-        {
+        const dt_secs: f32 = blk: {
             const raw: f32 = @floatFromInt(@min(dt_ns, std.time.ns_per_s));
             const secs = raw / std.time.ns_per_s;
             rt.elapsed += secs;
             rt.since_input += secs;
             rt.hover_since += secs;
+            break :blk secs;
+        };
+
+        // Toast lifetimes. The Model owns whether a toast exists; the runtime
+        // owns when it stops, because the clock it needs is the one thing
+        // `view` cannot see and a per-app expiry timer is a timer everyone
+        // rewrites.
+        if (frame) |*f| {
+            for (toasts.items) |*s| s.seen = false;
+            for (f.hits) |h| {
+                const key = h.key orelse continue;
+                const w = h.widget orelse continue;
+                const tst = switch (w.*) {
+                    .toast => |t| t,
+                    else => continue,
+                };
+                var slot: ?*ToastSlot = null;
+                for (toasts.items) |*s| {
+                    if (s.key == key) {
+                        slot = s;
+                        break;
+                    }
+                }
+                if (slot) |sl| {
+                    sl.rect = h.rect;
+                    sl.seen = true;
+                } else {
+                    toasts.append(rt.gpa, .{
+                        .key = key,
+                        .t = 0,
+                        .ttl = @as(f32, @floatFromInt(tst.ttl_ms)) / 1000,
+                        .msg = tst.msg,
+                        .rect = h.rect,
+                    }) catch continue;
+                    slot = &toasts.items[toasts.items.len - 1];
+                }
+                // Hover pauses the countdown: a toast that vanishes while you
+                // are reading it is worse than one that lingers.
+                const inside = if (rt.pointer.pos) |pt| slot.?.rect.containsRounded(0, pt) else false;
+                if (!inside) slot.?.t += dt_secs;
+            }
+            // Absent from the frame means the app took it away; forget the slot
+            // so the same key appearing later starts a fresh timer.
+            var ti: usize = 0;
+            while (ti < toasts.items.len) {
+                const sl = toasts.items[ti];
+                if (!sl.seen) {
+                    _ = toasts.swapRemove(ti);
+                    continue;
+                }
+                if (sl.t >= sl.ttl) {
+                    const action = rt.dispatch(sl.msg);
+                    stats.messages += 1;
+                    if (action.quit) running = false;
+                    dirty = dirty or action.repaint;
+                    _ = toasts.swapRemove(ti);
+                    continue;
+                }
+                ti += 1;
+            }
         }
         // Outbound clipboard writes are applied by `dispatch`, which has no
         // other route to the platform. Assigned each iteration because a
@@ -744,7 +827,7 @@ pub fn run(
             }
         }
 
-        const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null, rt.animate);
+        const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null, rt.animate, toasts.items.len > 0);
         const ev = window.poll(timeout) orelse continue;
         stats.events += 1;
 
@@ -953,6 +1036,78 @@ pub fn run(
                                 stats.messages += 1;
                                 if (action.quit) running = false;
                                 dirty = dirty or action.repaint;
+                            }
+                            break :tab;
+                        }
+                    }
+                }
+                // A popup owns the keyboard while it is open. This has to run
+                // BEFORE activation: the field under an open list carries the
+                // toggle, so Enter would otherwise shut the list instead of
+                // choosing from it, and the arrows would fall through to the
+                // app while a menu was sitting on screen.
+                //
+                // Escape is deliberately NOT handled here. Closing without
+                // committing is the app's decision -- it owns `open` -- so that
+                // key falls through to `on_key` like any other.
+                if (frame) |*f| {
+                    if (f.openPopup(rt.focus)) |popup| {
+                        if (elmz.Frame(M).popupRows(popup)) |rows| {
+                            if (rows.items.len > 0) {
+                                const named = k.named orelse break :tab;
+                                const down = switch (named) {
+                                    .up, .left => @as(i32, -1),
+                                    .down, .right => @as(i32, 1),
+                                    else => @as(i32, 0),
+                                };
+                                if (down != 0) {
+                                    if (!k.repeat) {
+                                        // No wrap: the ends of a list are
+                                        // usually off-screen, so wrapping reads
+                                        // as a jump to somewhere unrelated.
+                                        const last: i32 = @intCast(rows.items.len - 1);
+                                        const cur: i32 = if (rows.active.*) |a| @as(i32, @intCast(a)) else if (down > 0) -1 else last + 1;
+                                        const next: u16 = @intCast(std.math.clamp(cur + down, 0, last));
+                                        if (rows.active.* == null or rows.active.*.? != next) {
+                                            rows.active.* = next;
+                                            dirty = true;
+                                        }
+                                    }
+                                    break :tab;
+                                }
+                                if (!k.repeat and k.named == .enter) {
+                                    if (rows.active.*) |a| {
+                                        if (a < rows.items.len) {
+                                            const item = rows.items[a];
+                                            if (!item.disabled) if (item.msg) |msg| {
+                                                const action = rt.dispatch(msg);
+                                                stats.messages += 1;
+                                                if (action.quit) running = false;
+                                                dirty = dirty or action.repaint;
+                                            };
+                                        }
+                                    }
+                                    break :tab;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Roving: arrows move the cursor inside one tab stop, so a list
+                // is navigable without every row being a stop of its own. Only
+                // when the focused element is actually a row -- otherwise the
+                // key is the app's.
+                if (frame) |*f| {
+                    const delta: i32 = if (k.named) |n| switch (n) {
+                        .up, .left => @as(i32, -1),
+                        .down, .right => @as(i32, 1),
+                        else => @as(i32, 0),
+                    } else 0;
+                    if (delta != 0 and !k.repeat) {
+                        if (f.rovingMove(rt.focus, delta)) |r| {
+                            if (r.key != rt.focus) {
+                                rt.focus = r.key;
+                                dirty = true;
                             }
                             break :tab;
                         }
@@ -2234,18 +2389,18 @@ test "bg, border, and both, each emit the number of prims they cost" {
 
 test "the loop never blocks forever while a theme file is being watched" {
     // Nothing watched: an app is allowed to sleep until input, as before.
-    try std.testing.expectEqual(@as(i32, -1), effectiveTimeout(.{}, false, false, false));
+    try std.testing.expectEqual(@as(i32, -1), effectiveTimeout(.{}, false, false, false, false));
     // Watched: bounded, or an edit waits for the pointer to enter the window.
-    try std.testing.expectEqual(@as(i32, 250), effectiveTimeout(.{ .theme_path = "theme.zon" }, false, true, false));
+    try std.testing.expectEqual(@as(i32, 250), effectiveTimeout(.{ .theme_path = "theme.zon" }, false, true, false, false));
     // A command in flight keeps its own tighter budget.
-    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{ .theme_path = "theme.zon" }, true, true, false));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{ .theme_path = "theme.zon" }, true, true, false, false));
     // An app that already asked for less does not get slowed down.
-    try std.testing.expectEqual(@as(i32, 30), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, true, false));
+    try std.testing.expectEqual(@as(i32, 30), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, true, false, false));
     // Animating outranks an idle block: a frame clock that waits for input is
     // not a clock. Busy still wins, because a command result is due sooner.
-    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{}, false, false, true));
-    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, false, true));
-    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, true));
+    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{}, false, false, true, false));
+    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, false, true, false));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, true, false));
 }
 
 test "a relative theme path resolves beside the executable, not the cwd" {
@@ -3191,4 +3346,158 @@ test "a press that lands on nothing reaches the app, so a popup can dismiss itse
 
     try std.testing.expectEqual(@as(u32, 1), rt.state.clicks);
     try std.testing.expectEqual(@as(u32, 1), rt.state.outside);
+}
+
+fn roveRunnerView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
+    var kids: [3]*elmz.Element(TMsg) = undefined;
+    var i: u16 = 0;
+    while (i < 3) : (i += 1) {
+        const r = ui.button(.{ .label = "r", .msg = .inc, .key = 40 + i });
+        r.focusable = true;
+        r.roving = 30;
+        r.roving_index = i;
+        kids[i] = r;
+    }
+    return ui.column(.{ .children = &kids });
+}
+
+test "an arrow key moves the roving cursor, not just the frame" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 160);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, roveRunnerView);
+    defer rt.deinit();
+    rt.focus = 40;
+
+    const events = [_]elmz.Event{ .{ .key = .{ .named = .down } }, .quit };
+    var fake: Fake = .{ .events = &events };
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+
+    // The frame knew how to move a roving cursor for a while and nothing ever
+    // asked it to: `rovingStep` had a test and no caller. This asserts the
+    // wiring, which is the half that cannot be seen from a Frame.
+    try std.testing.expectEqual(@as(?u64, 41), rt.focus);
+}
+
+var toast_clock: u64 = 0;
+fn toastNow() u64 {
+    toast_clock += 400 * std.time.ns_per_ms;
+    return toast_clock;
+}
+
+fn toastView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
+    const e = ui.text(.{ .label = "saved" });
+    e.key = 70;
+    if (s.n == 0) {
+        e.widget = ui.payload(.{ .toast = .{ .ttl_ms = 1000, .msg = .inc } });
+    }
+    return e;
+}
+
+test "a toast expires on the clock with no input at all" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 120, 60);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, toastView);
+    defer rt.deinit();
+
+    toast_clock = 0;
+    // Nothing but time passes: the keys are ones the app ignores. Without the
+    // shortened poll the loop would block forever and this would never fire.
+    const events = [_]elmz.Event{
+        .{ .key = .{ .code = 'a' } },
+        .{ .key = .{ .code = 'b' } },
+        .{ .key = .{ .code = 'c' } },
+        .{ .key = .{ .code = 'd' } },
+        .quit,
+    };
+    var fake: Fake = .{ .events = &events };
+    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{
+        .poll_timeout_ms = 0,
+        .now_ns = &toastNow,
+    });
+
+    try std.testing.expectEqual(@as(i32, 1), rt.state.n);
+}
+
+test "a live toast shortens the poll, and a busy command still wins" {
+    try std.testing.expectEqual(@as(i32, 100), effectiveTimeout(.{}, false, false, false, true));
+    try std.testing.expectEqual(@as(i32, 50), effectiveTimeout(.{ .poll_timeout_ms = 50 }, false, false, false, true));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, false, true));
+}
+
+const PopState = struct {
+    active: ?u16 = null,
+    picked_b: u32 = 0,
+    toggles: u32 = 0,
+};
+const PopMsg = enum { pick_a, pick_b, toggle };
+
+fn popUpdate(s: *PopState, m: PopMsg) elmz.Action(PopMsg) {
+    switch (m) {
+        .pick_a => {},
+        .pick_b => s.picked_b += 1,
+        .toggle => s.toggles += 1,
+    }
+    return .{};
+}
+
+var pop_opts = [_]elmz.Choice(PopMsg){
+    .{ .label = "alpha", .msg = .pick_a },
+    .{ .label = "beta", .msg = .pick_b },
+};
+
+fn popView(s: *PopState, ui: *elmz.Ui(PopMsg)) *elmz.Element(PopMsg) {
+    const field = ui.button(.{ .label = "choose", .msg = .toggle, .key = 60 });
+    field.widget = ui.payload(.{ .select = .{
+        .open = true,
+        .selected = 0,
+        .active = &s.active,
+        .options = &pop_opts,
+        .msg = .toggle,
+    } });
+    return ui.column(.{ .children = &.{field}, .width = 200, .height = 200 });
+}
+
+test "a press on an option chooses it, rather than dismissing the list" {
+    const gpa = std.testing.allocator;
+    var canvas = try testCanvas(gpa, 200, 200);
+    defer canvas.deinit();
+
+    var rt = elmz.Runtime(PopState, PopMsg).init(gpa, .{}, popUpdate, popView);
+    defer rt.deinit();
+
+    var probe = try rt.frame(.{ .w = 200, .h = 200 }, canvas.renderer());
+    defer probe.deinit();
+
+    // The row's own rectangle, taken from the hit list the frame actually
+    // recorded rather than recomputed from the popup geometry: a test that
+    // re-derives the box can only agree with itself.
+    var beta: ?elmz.Rect = null;
+    for (probe.hits) |h| {
+        if (h.msg) |m| {
+            if (m == .pick_b) beta = h.rect;
+        }
+    }
+    try std.testing.expect(beta != null);
+
+    // This is the ordering assertion. The scrim covers the whole window and
+    // carries the toggle, so if it were appended AFTER the rows a press here
+    // would close the list instead of choosing from it.
+    const on_row: [2]f32 = .{ beta.?.x + beta.?.w / 2, beta.?.y + beta.?.h / 2 };
+    const ev = [_]elmz.Event{ .{ .pointer_down = on_row }, .{ .pointer_up = on_row } };
+    var fake: Fake = .{ .events = &ev, .w = 200, .h = 200 };
+    _ = try run(struct {}, PopState, PopMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
+    try std.testing.expectEqual(@as(u32, 0), rt.state.toggles);
+
+    // A press away from the list is the scrim's, and dismisses.
+    const away: [2]f32 = .{ 195, 195 };
+    const ev2 = [_]elmz.Event{ .{ .pointer_down = away }, .{ .pointer_up = away } };
+    var fake2: Fake = .{ .events = &ev2, .w = 200, .h = 200 };
+    _ = try run(struct {}, PopState, PopMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
+    try std.testing.expectEqual(@as(u32, 1), rt.state.toggles);
+    try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
 }

@@ -2291,6 +2291,27 @@ pub fn Ui(comptime M: type) type {
             return self.arena.allocator();
         }
 
+        /// Put a widget payload in the FRAME ARENA and hand back a pointer.
+        ///
+        /// The arena is exactly the right lifetime for this: `view` builds it,
+        /// the runtime reads it after layout, the frame ends. Anything that has
+        /// to outlive a frame points at the Model instead -- which is why
+        /// `slider.value`, `select.active` and `menu.active` are pointers and
+        /// not values here.
+        ///
+        /// Optional rather than a failure pointer: the caller has an element in
+        /// hand and can return it without the payload, which is a widget that
+        /// paints but does not respond. Silently returning a dangling or shared
+        /// pointer would be far worse.
+        pub fn payload(self: *Self, w: Widget(M)) ?*const Widget(M) {
+            const p = self.alloc().create(Widget(M)) catch {
+                self.failWith(.layout_allocation);
+                return null;
+            };
+            p.* = w;
+            return p;
+        }
+
         fn mk(self: *Self, geometry: Elem.Geometry) *Elem {
             const e = self.alloc().create(Elem) catch {
                 self.failWith(.layout_allocation);
@@ -2722,6 +2743,60 @@ pub fn Frame(comptime M: type) type {
                 }
             }
             return hi orelse lo;
+        }
+
+        /// Where an arrow key moves a roving control, given the key that
+        /// currently has focus. Null when the focused element is not a row of
+        /// one -- which is what lets the caller fall through to the app rather
+        /// than swallowing every arrow press in the window.
+        ///
+        /// The caller never needs to know the owner or the row index: it has a
+        /// focused key and a direction, and both live here.
+        pub fn rovingMove(self: *const Self, from_key: ?u64, delta: i32) ?Roamer {
+            const k = from_key orelse return null;
+            for (self.hits) |h| {
+                if (h.key != k) continue;
+                const owner = h.roving orelse return null;
+                return self.rovingStep(owner, h.roving_index, delta);
+            }
+            return null;
+        }
+
+        /// The open popup that should take the keyboard, preferring one
+        /// anchored on the focused element.
+        ///
+        /// Every popup is closed in the ordinary case, so this must be cheap:
+        /// one pass over the hit list and a tag check. Null is the answer that
+        /// makes the caller fall through to activation and then to the app.
+        pub fn openPopup(self: *const Self, prefer_key: ?u64) ?*const Widget(M) {
+            var any: ?*const Widget(M) = null;
+            for (self.hits) |h| {
+                const w = h.widget orelse continue;
+                const open = switch (w.*) {
+                    .select => |sel| sel.open,
+                    .menu => |mn| mn.open,
+                    else => false,
+                };
+                if (!open) continue;
+                if (prefer_key != null and h.key != null and h.key.? == prefer_key.?) return w;
+                if (any == null) any = w;
+            }
+            return any;
+        }
+
+        /// The highlight of a popup, and the items it highlights. Split out
+        /// because both arms have to agree about which list `active` indexes.
+        pub const PopupRows = struct {
+            items: []const Choice(M),
+            active: *?u16,
+        };
+
+        pub fn popupRows(w: *const Widget(M)) ?PopupRows {
+            return switch (w.*) {
+                .select => |sel| .{ .items = sel.options, .active = sel.active },
+                .menu => |mn| .{ .items = mn.items, .active = mn.active },
+                else => null,
+            };
         }
 
         /// Activated by the focused control, if it has one.
@@ -6136,4 +6211,25 @@ test "a menu anchored off the left edge is pulled back on screen" {
     const lay = popupLayout(anchor, 100, 3, null, view, .below, popup_row_h);
     try std.testing.expectApproxEqAbs(0.0, lay.rect.x, 0.01);
     try std.testing.expectApproxEqAbs(64.0, lay.rect.y, 0.01);
+}
+
+test "an arrow asks the frame where a roving cursor goes" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(RoveState, RoveMsg).init(gpa, .{}, roveUpdate, roveView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
+    defer f.deinit();
+
+    // The caller has a focused key and a direction; the owner and row index
+    // stay inside the frame.
+    try std.testing.expectEqual(@as(u64, 41), f.rovingMove(40, 1).?.key);
+    try std.testing.expectEqual(@as(u64, 40), f.rovingMove(41, -1).?.key);
+    // Row 0 back one row stays on row 0 rather than wrapping.
+    try std.testing.expectEqual(@as(u64, 40), f.rovingMove(40, -1).?.key);
+
+    // Not a row of anything: the key must reach the app instead.
+    try std.testing.expect(f.rovingMove(30, 1) == null);
+    try std.testing.expect(f.rovingMove(50, 1) == null);
+    try std.testing.expect(f.rovingMove(null, 1) == null);
 }
