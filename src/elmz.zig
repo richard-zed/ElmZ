@@ -3299,38 +3299,73 @@ pub fn Executor(comptime M: type) type {
         gpa: Allocator,
         mutex: Spin = .{},
         done: std.ArrayList(M) = .empty,
-        threads: std.ArrayList(std.Thread) = .empty,
+        /// One entry per command whose worker may still be running. The
+        /// completion flag is per-command, so `reap` can tell which handles are
+        /// joinable WITHOUT waiting for the whole executor to go idle. Waiting
+        /// on `outstanding == 0` bounded the list between bursts but not during
+        /// one: an app that always had a command in flight never reaped at all.
+        handles: std.ArrayList(Handle) = .empty,
         outstanding: usize = 0, // guarded by mutex
         lost: usize = 0, // guarded by mutex
 
-        pub fn submit(self: *Self, cmd: Cmd(M)) void {
-            self.mutex.lock();
-            self.outstanding += 1;
-            self.mutex.unlock();
+        /// Per-command completion, heap-owned so its address is stable: the
+        /// handle list can reallocate while a worker is still writing to this,
+        /// which is why the flag does not live inside `Handle`.
+        const Job = struct {
+            finished: std.atomic.Value(bool) = .init(false),
+        };
+        const Handle = struct {
+            thread: std.Thread,
+            job: *Job,
+        };
 
-            const t = std.Thread.spawn(.{}, worker, .{ self, cmd }) catch {
+        pub fn submit(self: *Self, cmd: Cmd(M)) void {
+            const job = self.gpa.create(Job) catch {
+                // Without a completion flag the handle could never be reaped,
+                // which is the unbounded list this type exists to avoid. Not
+                // starting is the honest outcome, and it is counted.
                 self.mutex.lock();
-                self.outstanding -= 1;
                 self.lost += 1;
                 self.mutex.unlock();
                 return;
             };
-            self.threads.append(self.gpa, t) catch {
+            job.* = .{};
+
+            self.mutex.lock();
+            self.outstanding += 1;
+            self.mutex.unlock();
+
+            const t = std.Thread.spawn(.{}, worker, .{ self, cmd, job }) catch {
+                self.mutex.lock();
+                self.outstanding -= 1;
+                self.lost += 1;
+                self.mutex.unlock();
+                self.gpa.destroy(job);
+                return;
+            };
+            self.handles.append(self.gpa, .{ .thread = t, .job = job }) catch {
                 // The handle is gone, so nothing can join this worker, and
                 // dropping a joinable thread is how a shutdown race gets
                 // written. Detaching is safe here: its only contact with
                 // `self` is inside the mutex, and `deinit` waits for
-                // `outstanding` to reach zero before freeing anything.
+                // `outstanding` to reach zero before freeing anything. The
+                // `Job` is deliberately leaked rather than freed -- the worker
+                // still writes to it, and there is no one left to free it
+                // afterwards. One allocation on an allocation-failure path.
                 t.detach();
             };
         }
 
-        fn worker(self: *Self, cmd: Cmd(M)) void {
+        fn worker(self: *Self, cmd: Cmd(M), job: *Job) void {
             const out = cmd.run(cmd.ctx);
             self.mutex.lock();
-            defer self.mutex.unlock();
             if (out) |m| self.done.append(self.gpa, m) catch {};
             self.outstanding -= 1;
+            self.mutex.unlock();
+            // LAST statement: once this store is visible, `reap` may join this
+            // thread at any moment, so nothing may touch `self` or `job` after
+            // it, and the unlock has to have happened first.
+            job.finished.store(true, .release);
         }
 
         /// Commands that could not be started. A command that never runs is a
@@ -3342,18 +3377,22 @@ pub fn Executor(comptime M: type) type {
             return self.lost;
         }
 
-        /// Join workers that have finished, so `threads` stays bounded by the
+        /// Join workers that have finished, so `handles` stays bounded by the
         /// commands IN FLIGHT rather than growing for the life of the app.
-        /// Every handle used to be kept until `deinit`, which for a long
-        /// session is an unbounded list plus a pile of finished-but-unjoined
-        /// threads still holding their stacks.
+        /// Per-command flags mean this does not wait for the executor to go
+        /// idle: a burst of fast commands is reaped while a slow one runs on.
         pub fn reap(self: *Self) void {
-            self.mutex.lock();
-            const idle = self.outstanding == 0;
-            self.mutex.unlock();
-            if (!idle or self.threads.items.len == 0) return;
-            for (self.threads.items) |t| t.join();
-            self.threads.clearRetainingCapacity();
+            var i: usize = 0;
+            while (i < self.handles.items.len) {
+                const h = self.handles.items[i];
+                if (!h.job.finished.load(.acquire)) {
+                    i += 1;
+                    continue;
+                }
+                h.thread.join();
+                self.gpa.destroy(h.job);
+                _ = self.handles.swapRemove(i);
+            }
         }
 
         /// True while workers are still running (cheap hint for the loop: it
@@ -3374,7 +3413,7 @@ pub fn Executor(comptime M: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            // `threads` need not hold every handle (an append that failed
+            // `handles` need not hold every handle (an append that failed
             // detached its worker), so wait for the work itself to finish
             // before freeing what the workers reach.
             //
@@ -3392,8 +3431,11 @@ pub fn Executor(comptime M: type) type {
                 if (n == 0) break;
                 std.Thread.yield() catch {};
             }
-            for (self.threads.items) |t| t.join();
-            self.threads.deinit(self.gpa);
+            for (self.handles.items) |h| {
+                h.thread.join();
+                self.gpa.destroy(h.job);
+            }
+            self.handles.deinit(self.gpa);
             self.done.deinit(self.gpa);
         }
     };
@@ -6463,10 +6505,59 @@ test "finished workers are reaped instead of accumulating for the session" {
     ex.reap();
     // Without the reap this is 8 -- one handle per command, kept until deinit,
     // which for a long session is an unbounded list of finished threads.
-    try std.testing.expectEqual(@as(usize, 0), ex.threads.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ex.handles.items.len);
 
     var got: std.ArrayList(u32) = .empty;
     defer got.deinit(std.testing.allocator);
     try ex.drainInto(&got);
     try std.testing.expectEqual(@as(usize, 8), got.items.len);
+}
+
+test "a command still running does not stop finished ones being reaped" {
+    const H = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        var quick_done: std.atomic.Value(usize) = .init(0);
+        fn block(ctx: *const anyopaque) ?u32 {
+            _ = ctx;
+            var guard: usize = 0;
+            while (!release.load(.acquire) and guard < 4_000_000) : (guard += 1) {
+                std.Thread.yield() catch {};
+            }
+            return 1;
+        }
+        fn quick(ctx: *const anyopaque) ?u32 {
+            _ = ctx;
+            _ = quick_done.fetchAdd(1, .acq_rel);
+            return 2;
+        }
+    };
+    H.release.store(false, .release);
+    H.quick_done.store(0, .release);
+
+    const box = [_]u8{0};
+    var ex = Executor(u32){ .gpa = std.testing.allocator };
+    defer ex.deinit();
+
+    ex.submit(.{ .ctx = @ptrCast(&box), .run = H.block });
+    for (0..8) |_| ex.submit(.{ .ctx = @ptrCast(&box), .run = H.quick });
+
+    var guard: usize = 0;
+    while (H.quick_done.load(.acquire) < 8 and guard < 400_000) : (guard += 1) {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 8), H.quick_done.load(.acquire));
+
+    // The blocked command is still running, so the executor is busy: reaping
+    // only when `outstanding == 0` would leave ALL NINE handles here. The
+    // finished ones are joinable regardless, which is the whole point.
+    try std.testing.expect(ex.busy());
+    ex.reap();
+    try std.testing.expectEqual(@as(usize, 1), ex.handles.items.len);
+
+    H.release.store(true, .release);
+    guard = 0;
+    while (ex.busy() and guard < 400_000) : (guard += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!ex.busy());
+    ex.reap();
+    try std.testing.expectEqual(@as(usize, 0), ex.handles.items.len);
 }
