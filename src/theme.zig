@@ -214,6 +214,11 @@ pub const GradientSpec = union(enum) {
 ///
 /// Fields are `u32` hex rather than `Color` because a `.zon` is literal data --
 /// no expressions, no calls -- so it cannot spell `Color.rgbHex(0x1e1e2e)`.
+///
+/// Six digits is opaque RGB and eight is `0xRRGGBBAA`, decided by the value's
+/// magnitude (`Color.hex`). Both shapes had to work: a role that wants alpha
+/// cannot express it in six, and rejecting eight would mean a caller who wrote
+/// one got a parse error naming a colour they can plainly see.
 pub const ColorsSpec = struct {
     bg: ?u32 = null,
     panel: ?u32 = null,
@@ -232,7 +237,7 @@ pub const ColorsSpec = struct {
     pub fn overlay(self: ColorsSpec, base: Theme) Theme {
         var t = base;
         inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
-            if (@field(self, f.name)) |hex| @field(t, f.name) = Color.rgbHex(hex);
+            if (@field(self, f.name)) |hex| @field(t, f.name) = Color.hex(hex);
         }
         return t;
     }
@@ -478,6 +483,25 @@ test "the shipped defaults resolve to the compiled palette" {
 }
 
 test "an override replaces exactly one role" {
+    // Eight digits is RGBA. `rgbHex` on the same number would have read the LOW
+    // three bytes and produced a plausible, wrong blue-green -- no error, no
+    // warning, just a different colour than the file asked for.
+    {
+        var diag: ThemeDiag = .{};
+        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xff000080 } } }", Theme{}, &diag);
+        try std.testing.expectEqual(@as(u8, 0xff), loaded.theme.accent.r);
+        try std.testing.expectEqual(@as(u8, 0x00), loaded.theme.accent.g);
+        try std.testing.expectEqual(@as(u8, 0x00), loaded.theme.accent.b);
+        try std.testing.expectEqual(@as(u8, 0x80), loaded.theme.accent.a);
+    }
+    // Six digits still means opaque, so the common case did not shift.
+    {
+        var diag: ThemeDiag = .{};
+        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag);
+        try std.testing.expectEqual(@as(u8, 255), loaded.theme.accent.a);
+        try std.testing.expectEqual(@as(u8, 0x89), loaded.theme.accent.r);
+    }
+
     const src = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xff0000 } } }";
     var diag: ThemeDiag = .{};
     const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);

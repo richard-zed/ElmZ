@@ -25,12 +25,34 @@ pub const Color = struct {
         return .{ .r = r, .g = g, .b = b };
     }
 
-    pub fn rgbHex(hex: u32) Color {
+    pub fn rgbHex(v: u32) Color {
         return .{
-            .r = @intCast((hex >> 16) & 0xff),
-            .g = @intCast((hex >> 8) & 0xff),
-            .b = @intCast(hex & 0xff),
+            .r = @intCast((v >> 16) & 0xff),
+            .g = @intCast((v >> 8) & 0xff),
+            .b = @intCast(v & 0xff),
         };
+    }
+
+    /// `0xRRGGBBAA`.
+    pub fn rgbaHex(v: u32) Color {
+        return .{
+            .r = @intCast((v >> 24) & 0xff),
+            .g = @intCast((v >> 16) & 0xff),
+            .b = @intCast((v >> 8) & 0xff),
+            .a = @intCast(v & 0xff),
+        };
+    }
+
+    /// Six digits or eight, decided by the value's own magnitude.
+    ///
+    /// This exists because the alternative is worse than an error: a `.zon`
+    /// carries a bare `u32`, and `rgbHex(0x89b4fa80)` is not the colour and not
+    /// a rejection either -- it reads the LOW three bytes and returns a
+    /// perfectly plausible different colour. Silent and plausible is the one
+    /// outcome a loader must not produce, so the digits are counted instead of
+    /// the top byte being trusted.
+    pub fn hex(v: u32) Color {
+        return if (v > 0xFFFFFF) rgbaHex(v) else rgbHex(v);
     }
 };
 
