@@ -82,6 +82,17 @@ pub const Windows = struct {
     /// SDL for it instead would mean comparing against a window-flags bit,
     /// and that constant has no compile check in a sandbox without headers.
     fullscreen: bool = false,
+    /// Clipboard scratch, inbound. The clipboard text belongs to SDL and must
+    /// be freed, while the seam hands out BORROWED bytes that stay valid until
+    /// the next call -- so SDL's buffer is copied here and immediately freed
+    /// rather than returned and leaked.
+    clip_in: [4096]u8 = undefined,
+    /// Clipboard scratch, outbound. `SDL_SetClipboardText` takes a C string and
+    /// the bytes an app passes come from the frame arena with no terminator, so
+    /// they are copied behind a NUL. Truncation is deliberate: a clipboard
+    /// write is a courtesy, and refusing the whole thing because it was long
+    /// would be the worse failure.
+    clip_out: [4097]u8 = undefined,
 
     /// `title` must be null-terminated.
     pub fn init(title: [:0]const u8, w: u32, h: u32) !Self {
@@ -156,6 +167,8 @@ pub const Windows = struct {
         .present = vtPresent,
         .size = vtSize,
         .density = vtDensity,
+        .clipboard_text = vtClipboardText,
+        .set_clipboard = vtSetClipboard,
         .deinit = vtDeinit,
     };
 
@@ -313,6 +326,26 @@ pub const Windows = struct {
             return .{ .w = @floatFromInt(self.w), .h = @floatFromInt(self.h) };
         }
         return .{ .w = @floatFromInt(w), .h = @floatFromInt(h) };
+    }
+
+    fn vtClipboardText(ptr: *anyopaque) ?[]const u8 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const raw = c.SDL_GetClipboardText();
+        if (raw == null) return null;
+        defer c.SDL_free(@ptrCast(raw));
+        const bytes = std.mem.sliceTo(raw, 0);
+        if (bytes.len == 0) return null;
+        const n = @min(bytes.len, self.clip_in.len);
+        @memcpy(self.clip_in[0..n], bytes[0..n]);
+        return self.clip_in[0..n];
+    }
+
+    fn vtSetClipboard(ptr: *anyopaque, text: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const n = @min(text.len, self.clip_out.len - 1);
+        @memcpy(self.clip_out[0..n], text[0..n]);
+        self.clip_out[n] = 0;
+        _ = c.SDL_SetClipboardText(@ptrCast(&self.clip_out));
     }
 
     fn vtDeinit(ptr: *anyopaque) void {
