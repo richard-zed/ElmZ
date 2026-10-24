@@ -842,7 +842,14 @@ pub const FailKind = enum {
 /// What the wheel needs from a scroll viewport: how tall the content is and
 /// how much of it is on screen. Travels with the hit region rather than being
 /// stored, because only paint knows the content height.
-pub const ScrollView = struct { content_h: f32, view_h: f32 };
+pub const ScrollView = struct {
+    content_h: f32,
+    view_h: f32,
+    /// The other axis. A container can overflow both ways at once, and the
+    /// wheel needs both extents to know which delta to spend.
+    content_w: f32 = 0,
+    view_w: f32 = 0,
+};
 
 /// A request to move one viewport. Two forms because the two things an app
 /// actually wants are different: go to a place, or move by an amount.
@@ -854,7 +861,7 @@ pub const ScrollChange = union(enum) {
 /// One viewport's offset, keyed by the element's `key`. Owned by the runtime
 /// so that no message ever carries a continuous value: a drag or a wheel tick
 /// changes this, and the next frame reads it.
-pub const ScrollSlot = struct { key: u64 = 0, offset: f32 = 0 };
+pub const ScrollSlot = struct { key: u64 = 0, offset: f32 = 0, offset_x: f32 = 0 };
 
 /// Scrollbar geometry, in logical units. The thumb has a floor or it becomes
 /// impossible to grab on a long list; the strip is thin and sits over the
@@ -869,6 +876,22 @@ pub const scrollbar_min_thumb: f32 = 24;
 /// right edge is the viewport's own border.
 pub const scrollbar_grab: f32 = 14;
 
+/// The root container's scroll identity. Any constant works -- what matters is
+/// that it is stable across frames, because the scroll store outlives one.
+pub const scroll_path_root: u64 = 0x9e3779b97f4a7c15;
+
+/// One step down the tree. FNV-1a over the parent's hash and the child index:
+/// cheap, allocator-free, and identical for the same position in the same tree,
+/// which is all a scroll slot needs. A reordered list therefore moves its
+/// offsets, which is the honest answer -- the store is positional.
+pub fn pathChild(parent: u64, index: usize) u64 {
+    var h = parent ^ 0xcbf29ce484222325;
+    h *%= 0x100000001b3;
+    h ^= @as(u64, @intCast(index)) +% 1;
+    h *%= 0x100000001b3;
+    return h;
+}
+
 /// A thumb that has taken the pointer. Carried on the hit region instead of a
 /// message, because a drag produces a continuous value and nothing that is
 /// continuous may ride in a Msg. The key travels here rather than on
@@ -877,6 +900,10 @@ pub const scrollbar_grab: f32 = 14;
 pub const ScrollDrag = struct {
     key: u64,
     view: ScrollView,
+    /// Which offset this thumb writes. A container can carry two thumbs, and a
+    /// drag that guessed the axis from the numbers would be wrong the moment
+    /// both axes overflow.
+    horizontal: bool = false,
 };
 
 /// Which way a control runs. A separate name rather than a `vertical: bool`,
@@ -1158,6 +1185,12 @@ pub fn Hit(comptime M: type) type {
         /// keeps wheel routing to one walk of the hit list instead of a second
         /// traversal of the tree.
         scroll: ?ScrollView = null,
+        /// The tree-path identity of the container that scrolled, for regions
+        /// produced by IMPLICIT scrolling. Separate from `key` because it is
+        /// runtime-computed, not app-authored: the wheel and the thumb store
+        /// their offset under this, so an app never invents a viewport key and
+        /// the duplicate-key guard never sees a synthesized one.
+        scroll_id: ?u64 = null,
         /// Set on a scroll THUMB, which claims the pointer as a drag rather
         /// than as a press. Recorded with no `key` and no `msg`: it dispatches
         /// nothing, and its identity is the viewport's, so the duplicate-key
@@ -1369,6 +1402,14 @@ pub fn Element(comptime M: type) type {
         /// layout -- writing it in `view` is meaningless, because the next
         /// frame overwrites it. Ask for a change with `Action.scroll`.
         scroll_offset: f32 = 0,
+        /// Runtime-written: this container's TREE PATH, hashed by the injection
+        /// walk. Implicit scrolling needs an identity for every container the
+        /// app did not key, and the path is the only one that exists without
+        /// asking. Never set this by hand.
+        scroll_key: ?u64 = null,
+        /// The horizontal half of `scroll_offset`: both axes scroll on every
+        /// container kind, so both offsets have to exist.
+        scroll_offset_x: f32 = 0,
         /// background while the pointer is over this element. null = no
         /// hover feedback, so nothing that does not ask for it changes.
         /// Still a `Fill` rather than the `Color` + `_grad` pair the three
@@ -1760,6 +1801,165 @@ pub fn Element(comptime M: type) type {
             return s;
         }
 
+        /// A column's content extent: the sum down its main axis, and the widest
+        /// child across it. Both are needed now that either axis can overflow.
+        fn columnContent(r: Renderer, kids: []const *Self, gap: f32, inner_w: f32) struct { w: f32, h: f32 } {
+            var h: f32 = 0;
+            var w: f32 = 0;
+            for (kids, 0..) |ch, i| {
+                if (i > 0) h += gap;
+                const cs = ch.measure(r, inner_w);
+                h += ch.margin_top + cs.h + ch.margin_bottom;
+                w = @max(w, ch.margin_left + (ch.width orelse cs.w) + ch.margin_right);
+            }
+            return .{ .w = w, .h = h };
+        }
+
+        /// A row's cross-axis extent: the tallest child, floored at the box so a
+        /// row that fits reports nothing to scroll.
+        fn rowContentHeight(r: Renderer, kids: []const *Self, avail_w: f32, inner_h: f32) f32 {
+            var h: f32 = inner_h;
+            for (kids) |ch| {
+                const cs = ch.measure(r, avail_w);
+                h = @max(h, ch.margin_top + cs.h + ch.margin_bottom);
+            }
+            return h;
+        }
+
+        const ScrollFit = struct {
+            max_x: f32 = 0,
+            max_y: f32 = 0,
+            off_x: f32 = 0,
+            off_y: f32 = 0,
+            vp: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+            fn active(f: ScrollFit) bool {
+                return f.max_x > 0 or f.max_y > 0;
+            }
+        };
+
+        /// THE RULE, in one place: compare content extent against the box the
+        /// parent painted, per axis. No declaration, no height, no key. The box
+        /// comes from the parent, so whichever container the content actually
+        /// overflows is the one that scrolls -- the window is just the outermost
+        /// case of it.
+        fn scrollFit(self: *const Self, inner: Rect, clip: Rect, cw: f32, ch: f32) ScrollFit {
+            if (inner.w <= 0 or inner.h <= 0) return .{ .vp = clip };
+            const max_x = @max(0, cw - inner.w);
+            const max_y = @max(0, ch - inner.h);
+            if (max_x <= 0 and max_y <= 0) return .{ .vp = clip };
+            return .{
+                .max_x = max_x,
+                .max_y = max_y,
+                // Clamped on READ: the store is written by a frame that may have
+                // had different content, so clamping here is what stops it
+                // painting blank space past the end.
+                .off_x = if (max_x > 0) std.math.clamp(self.scroll_offset_x, 0, max_x) else 0,
+                .off_y = if (max_y > 0) std.math.clamp(self.scroll_offset, 0, max_y) else 0,
+                .vp = inner.intersect(clip),
+            };
+        }
+
+        /// Everything a scrolling container owes the runtime: the region the
+        /// wheel targets, and whichever thumbs apply. One function for every
+        /// kind, so a column and a stack cannot disagree about what "scrolled"
+        /// means.
+        fn scrollChrome(
+            self: *const Self,
+            r: Renderer,
+            th: Theme,
+            inner: Rect,
+            f: ScrollFit,
+            cw: f32,
+            ch: f32,
+            hits: *std.ArrayList(Hit(M)),
+            gpa: Allocator,
+            generic_at: usize,
+        ) Allocator.Error!void {
+            if (!f.active() or f.vp.isEmpty()) return;
+            const info: ScrollView = .{ .content_h = ch, .view_h = inner.h, .content_w = cw, .view_w = inner.w };
+            if (hits.items.len > generic_at) {
+                // Upgrade the region the generic pass already recorded: it is
+                // this element's identity, and a second hit under the same key
+                // would trip the frame-global duplicate-key guard.
+                const hit = &hits.items[generic_at];
+                hit.scroll = info;
+                hit.scroll_id = self.scroll_key;
+            } else if (self.scroll_key) |sid| try hitAppend(M, hits, gpa, .{
+                .rect = inner,
+                .clip = f.vp,
+                .msg = self.on_press,
+                .key = self.key,
+                .active = !self.disabled,
+                .focusable = self.focusable and self.key != null,
+                .scroll = info,
+                .scroll_id = sid,
+            });
+            if (self.scroll_key) |k| {
+                if (thumbHit(inner, f.vp, ch, f.off_y, f.max_y, k, !self.disabled)) |h| try hits.append(gpa, h);
+                if (thumbHitH(inner, f.vp, cw, f.off_x, f.max_x, k, !self.disabled)) |h| try hits.append(gpa, h);
+            }
+            paintScrollbar(r, th, inner, f.vp, ch, f.off_y, f.max_y);
+            paintScrollbarH(r, th, inner, f.vp, cw, f.off_x, f.max_x);
+        }
+
+        /// The vertical scrollbar, painted last so content cannot cover it, and
+        /// only when there is something to scroll.
+        fn paintScrollbar(r: Renderer, th: Theme, inner: Rect, vp: Rect, content_h: f32, off: f32, max_off: f32) void {
+            if (max_off <= 0 or inner.w <= 2 * scrollbar_w or content_h <= 0) return;
+            const track = inner.h;
+            const thumb_h = @min(track, @max(scrollbar_min_thumb, track * (track / content_h)));
+            const ty = inner.y + (track - thumb_h) * (off / max_off);
+            r.quad(
+                .{ .x = inner.x + inner.w - scrollbar_w, .y = ty, .w = scrollbar_w, .h = thumb_h },
+                .{ .solid = th.border },
+                vp,
+            );
+        }
+
+        /// The thumb's grab region: wider than the 6px it draws, because a strip
+        /// that can only be hit on the pixel it paints is not draggable in
+        /// practice.
+        fn thumbHit(inner: Rect, vp: Rect, content_h: f32, off: f32, max_off: f32, key: u64, active: bool) ?Hit(M) {
+            if (max_off <= 0 or inner.w <= 2 * scrollbar_w or content_h <= 0) return null;
+            const track = inner.h;
+            const thumb_h = @min(track, @max(scrollbar_min_thumb, track * (track / content_h)));
+            const ty = inner.y + (track - thumb_h) * (off / max_off);
+            const grab_w = @min(inner.w, scrollbar_grab);
+            return .{
+                .rect = .{ .x = inner.x + inner.w - grab_w, .y = ty, .w = grab_w, .h = thumb_h },
+                .clip = vp,
+                .active = active,
+                .drag = .{ .thumb = .{ .key = key, .horizontal = false, .view = .{ .content_h = content_h, .view_h = inner.h } } },
+            };
+        }
+
+        /// The horizontal twin of `paintScrollbar`: a bar along the bottom edge.
+        fn paintScrollbarH(r: Renderer, th: Theme, inner: Rect, vp: Rect, content_w: f32, off: f32, max_off: f32) void {
+            if (max_off <= 0 or inner.h <= 2 * scrollbar_w or content_w <= 0) return;
+            const track = inner.w;
+            const thumb_w = @min(track, @max(scrollbar_min_thumb, track * (track / content_w)));
+            const tx = inner.x + (track - thumb_w) * (off / max_off);
+            r.quad(
+                .{ .x = tx, .y = inner.y + inner.h - scrollbar_w, .w = thumb_w, .h = scrollbar_w },
+                .{ .solid = th.border },
+                vp,
+            );
+        }
+
+        fn thumbHitH(inner: Rect, vp: Rect, content_w: f32, off: f32, max_off: f32, key: u64, active: bool) ?Hit(M) {
+            if (max_off <= 0 or inner.h <= 2 * scrollbar_w or content_w <= 0) return null;
+            const track = inner.w;
+            const thumb_w = @min(track, @max(scrollbar_min_thumb, track * (track / content_w)));
+            const tx = inner.x + (track - thumb_w) * (off / max_off);
+            const grab_h = @min(inner.h, scrollbar_grab);
+            return .{
+                .rect = .{ .x = tx, .y = inner.y + inner.h - grab_h, .w = thumb_w, .h = grab_h },
+                .clip = vp,
+                .active = active,
+                .drag = .{ .thumb = .{ .key = key, .horizontal = true, .view = .{ .content_h = content_w, .view_h = inner.w, .content_w = content_w, .view_w = inner.w } } },
+            };
+        }
+
         pub fn paint(
             self: *const Self,
             r: Renderer,
@@ -1904,6 +2104,12 @@ pub fn Element(comptime M: type) type {
             // key, and the frame-global duplicate-key guard would then report
             // an app for using the feature as documented.
             const viewport_claims_this = std.meta.activeTag(self.geometry) == .scroll and self.key != null;
+            // Where the generic region lands. A container that turns out to
+            // overflow UPGRADES that region with its scroll extent instead of
+            // appending a second one under the same key: two hits per key trips
+            // the frame-global duplicate-key guard, which would report an app
+            // for using the feature as documented.
+            const generic_at = hits.items.len;
             // A widget-bearing element records a region even with no message
             // and no focus: the runtime has to FIND it to open a popup, move a
             // highlight or start a drag, and a slider produces no message of
@@ -2014,8 +2220,18 @@ pub fn Element(comptime M: type) type {
 
                 .column => |c| {
                     if (child_clip.isEmpty()) return;
-                    var y = rect.y + self.pad;
                     const inner_w = (self.width orelse rect.w) - 2 * self.pad;
+                    const inner: Rect = .{
+                        .x = rect.x + self.pad,
+                        .y = rect.y + self.pad,
+                        .w = inner_w,
+                        .h = (self.height orelse rect.h) - 2 * self.pad,
+                    };
+                    // BOTH AXES, and no declaration of any kind.
+                    const content = columnContent(r, c.children, self.gap, inner_w);
+                    const sfit = self.scrollFit(inner, child_clip, content.w, content.h);
+                    try self.scrollChrome(r, th, inner, sfit, content.w, content.h, hits, gpa, generic_at);
+                    var y = rect.y + self.pad - sfit.off_y;
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) y += self.gap;
                         y += ch.margin_top;
@@ -2023,8 +2239,22 @@ pub fn Element(comptime M: type) type {
                         const cs = ch.measure(r, inner_w);
                         // Cross-axis: the margin is taken off the width, so the
                         // child cannot paint over the space it asked to reserve.
-                        const w = @max(0, (ch.width orelse inner_w) - ch.margin_left - ch.margin_right);
-                        try ch.paint(r, .{ .x = rect.x + self.pad + ch.margin_left, .y = y, .w = w, .h = cs.h }, child_clip, ptr, hits, gpa, hov, th);
+                        // When the column scrolls SIDEWAYS the child keeps its
+                        // natural width -- squeezing it is what hid the overflow.
+                        const w = if (sfit.max_x > 0)
+                            @max(0, (ch.width orelse cs.w) - ch.margin_left - ch.margin_right)
+                        else
+                            @max(0, (ch.width orelse inner_w) - ch.margin_left - ch.margin_right);
+                        try ch.paint(
+                            r,
+                            .{ .x = rect.x + self.pad - sfit.off_x + ch.margin_left, .y = y, .w = w, .h = cs.h },
+                            sfit.vp,
+                            ptr,
+                            hits,
+                            gpa,
+                            hov,
+                            th,
+                        );
                         y += cs.h;
                         y += ch.margin_bottom;
                     }
@@ -2032,7 +2262,7 @@ pub fn Element(comptime M: type) type {
 
                 .row => |c| {
                     if (child_clip.isEmpty()) return;
-                    var x = rect.x + self.pad;
+                    var x: f32 = undefined;
                     const inner_h = (self.height orelse rect.h) - 2 * self.pad;
                     const avail_w = (self.width orelse rect.w) - 2 * self.pad;
                     // Same totals `measure` used, so paint places children where
@@ -2040,6 +2270,21 @@ pub fn Element(comptime M: type) type {
                     // taking no allocator: per-child extents cannot be held
                     // anywhere between here and there.
                     const fit = rowFit(r, c.children, self.gap, avail_w);
+                    // Same rule, other axis -- and BOTH axes, because a row can
+                    // be squeezed vertically just as a column can be sideways.
+                    // Horizontally it overflows only when even the children's
+                    // FLOORS do not fit, because a row squeezes first.
+                    const inner: Rect = .{
+                        .x = rect.x + self.pad,
+                        .y = rect.y + self.pad,
+                        .w = avail_w,
+                        .h = inner_h,
+                    };
+                    const content_w = @max(fit.inner, fit.total_min);
+                    const content_h = rowContentHeight(r, c.children, avail_w, inner_h);
+                    const sfit = self.scrollFit(inner, child_clip, content_w, content_h);
+                    try self.scrollChrome(r, th, inner, sfit, content_w, content_h, hits, gpa, generic_at);
+                    x = rect.x + self.pad - sfit.off_x;
                     // Same pre-pass `measure` runs, for the same reason: the
                     // common baseline is the deepest child's, so placement
                     // cannot begin until every child's has been found. Both
@@ -2069,7 +2314,7 @@ pub fn Element(comptime M: type) type {
                         // box minus its cross-axis margins.
                         const slot_y = rect.y + self.pad + ch.margin_top;
                         const slot_h = @max(0, inner_h - ch.margin_top - ch.margin_bottom);
-                        const ch_h: f32 = if (self.row_align == .stretch) slot_h else blk_h: {
+                        const ch_h: f32 = if (self.row_align == .stretch and sfit.max_y == 0) slot_h else blk_h: {
                             const at = if (w < cs.w) ch.measure(r, w) else cs;
                             break :blk_h at.h;
                         };
@@ -2081,7 +2326,7 @@ pub fn Element(comptime M: type) type {
                             },
                             .stretch, .start => slot_y,
                         };
-                        try ch.paint(r, .{ .x = x, .y = y, .w = w, .h = ch_h }, child_clip, ptr, hits, gpa, hov, th);
+                        try ch.paint(r, .{ .x = x, .y = y, .w = w, .h = ch_h }, sfit.vp, ptr, hits, gpa, hov, th);
                         x += w;
                         x += ch.margin_right;
                     }
@@ -2100,6 +2345,23 @@ pub fn Element(comptime M: type) type {
                     // space in the flow around it, and its children still paint
                     // and still claim the pointer, because a child's height
                     // comes from its own measure and never from the stack.
+                    // A stack overflows too, and it is what overlays are built
+                    // from, so it gets the same rule as the rest.
+                    const inner: Rect = .{
+                        .x = rect.x + self.pad,
+                        .y = rect.y + self.pad,
+                        .w = avail_w,
+                        .h = (self.height orelse rect.h) - 2 * self.pad,
+                    };
+                    var sw: f32 = 0;
+                    var sh: f32 = 0;
+                    for (c.children) |ch| {
+                        const cs0 = ch.measure(r, avail_w);
+                        sw = @max(sw, ch.offset[0] + (ch.width orelse cs0.w));
+                        sh = @max(sh, ch.offset[1] + cs0.h);
+                    }
+                    const sfit = self.scrollFit(inner, child_clip, sw, sh);
+                    try self.scrollChrome(r, th, inner, sfit, sw, sh, hits, gpa, generic_at);
                     for (c.children) |ch| {
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, avail_w);
@@ -2720,34 +2982,6 @@ pub fn Ui(comptime M: type) type {
             return e;
         }
 
-        /// Uneven spacing lives on the child it separates, so no spacer ever
-        /// occupies a slot in the child list: `gap` covers the uniform case and
-        /// these cover the rest. One helper per side, because which side a gap
-        /// belongs on is the call site's decision and nobody else can make it.
-        pub fn marginTop(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.margin_top += size;
-            return e;
-        }
-
-        pub fn marginLeft(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.margin_left += size;
-            return e;
-        }
-
-        pub fn marginRight(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.margin_right += size;
-            return e;
-        }
-
-        pub fn marginBottom(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.margin_bottom += size;
-            return e;
-        }
-
         /// Sets the margin on BOTH axes' leading edge. Kept for call sites that
         /// predate the four-field form and are correct either way: only the axis
         /// the parent actually lays out along is ever read, so a column sees the
@@ -2756,14 +2990,6 @@ pub fn Ui(comptime M: type) type {
             _ = self;
             e.margin_left += size;
             e.margin_top += size;
-            return e;
-        }
-
-        /// Trailing counterpart of `spaceBefore`, same reasoning.
-        pub fn spaceAfter(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.margin_right += size;
-            e.margin_bottom += size;
             return e;
         }
 
@@ -2995,7 +3221,7 @@ pub fn Ui(comptime M: type) type {
             return e;
         }
 
-        pub const ControlKind = enum { checkbox, radio, @"switch" };
+        pub const ControlKind = enum { checkbox, radio, toggle };
 
         pub const ControlOpts = struct {
             key: u64,
@@ -3078,7 +3304,7 @@ pub fn Ui(comptime M: type) type {
                     dot_e.offset = .{ (o.box - dot) * 0.5, (o.box - dot) * 0.5 };
                     break :blk self.stack(.{ .width = o.box, .height = o.box, .children = &.{ outer, dot_e } });
                 },
-                .@"switch" => blk: {
+                .toggle => blk: {
                     const w = o.box * 2;
                     const knob = o.box - 4;
                     const track = self.rect(.{
@@ -3145,6 +3371,29 @@ pub fn Ui(comptime M: type) type {
         /// The colour a severity is drawn in. Public because an app composing
         /// its own notification -- a banner, a status line -- should not have to
         /// repeat the mapping to stay in step with the toast.
+        /// Names for the three shapes `control` paints. Thin on purpose: the
+        /// kind is the only thing they decide, so behaviour has one home and
+        /// cannot drift between a toggle and a checkbox that look different.
+        pub fn checkbox(self: *Self, o: ControlOpts) *Elem {
+            var c = o;
+            c.kind = .checkbox;
+            return self.control(c);
+        }
+
+        pub fn radio(self: *Self, o: ControlOpts) *Elem {
+            var c = o;
+            c.kind = .radio;
+            return self.control(c);
+        }
+
+        /// A toggle is a checkbox with different paint: same key, same message,
+        /// same checked-in / message-out ownership. Only the silhouette moves.
+        pub fn toggle(self: *Self, o: ControlOpts) *Elem {
+            var c = o;
+            c.kind = .toggle;
+            return self.control(c);
+        }
+
         pub fn severityColor(self: *Self, s: Severity) Color {
             return switch (s) {
                 .info => self.theme.accent,
@@ -4582,6 +4831,30 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             return self.scrollAtKey(key);
         }
 
+        fn scrollAtKeyX(self: *const Self, key: ?u64) f32 {
+            const k = key orelse return 0;
+            for (self.scroll_slots[0..self.scroll_n]) |s| {
+                if (s.key == k) return s.offset_x;
+            }
+            return 0;
+        }
+
+        pub fn scrollOffsetX(self: *const Self, key: u64) f32 {
+            return self.scrollAtKeyX(key);
+        }
+
+        /// The horizontal twin of `scrollTo`: same slot, other half.
+        pub fn scrollToX(self: *Self, key: u64, off: f32) void {
+            for (self.scroll_slots[0..self.scroll_n]) |*s| {
+                if (s.key == key) {
+                    s.offset_x = off;
+                    return;
+                }
+            }
+            self.scrollTo(key, 0);
+            self.scroll_slots[self.scroll_n - 1].offset_x = off;
+        }
+
         /// Set a viewport's offset outright. The wheel clamps before calling
         /// this, because the content extent is only known to the frame it just
         /// came from; paint clamps again on read, which is what makes a stored
@@ -4630,17 +4903,35 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         /// Push the store into the tree. The offset is runtime state, so it
         /// cannot be written in `view` -- an app that set it there would be
         /// overwritten every frame. Same shape as `disabled` inheritance.
-        fn injectScrollOffsets(self: *Self, e: *Elem) void {
-            if (e.geometry == .scroll) e.scroll_offset = self.scrollAtKey(e.key);
+        fn injectScrollOffsets(self: *Self, e: *Elem, path: u64) void {
+            // EVERY container is a candidate viewport now: whether it overflows
+            // is decided by the box its parent paints it into, which is only
+            // known during paint. Stamping the identity and the offset here is
+            // free for one that turns out not to overflow -- the number is never
+            // read.
+            //
+            // Identity comes from the TREE PATH, so an app declares nothing. The
+            // path is unique per node by construction, which is also why a
+            // synthesized key cannot collide in the frame-global duplicate-key
+            // guard the way an app-authored one could.
+            const tag = std.meta.activeTag(e.geometry);
+            switch (tag) {
+                .column, .row, .stack, .scroll => {
+                    e.scroll_key = path;
+                    e.scroll_offset = self.scrollAtKey(path);
+                    e.scroll_offset_x = self.scrollAtKeyX(path);
+                },
+                .text, .button, .bar, .rect => {},
+            }
             switch (e.geometry) {
-                .column => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
-                .row => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
-                .scroll => |c| self.injectScrollOffsets(c.child),
+                .column => |c| for (c.children, 0..) |ch, i| self.injectScrollOffsets(ch, pathChild(path, i)),
+                .row => |c| for (c.children, 0..) |ch, i| self.injectScrollOffsets(ch, pathChild(path, i)),
+                .scroll => |c| self.injectScrollOffsets(c.child, pathChild(path, 0)),
                 // A stack is a container like any other: without this arm the
                 // else-branch drops the whole subtree, and a viewport nested in
                 // an overlay never receives its offset -- it renders as if it
                 // could not scroll, with a thumb that is there and inert.
-                .stack => |c| for (c.children) |ch| self.injectScrollOffsets(ch),
+                .stack => |c| for (c.children, 0..) |ch, i| self.injectScrollOffsets(ch, pathChild(path, i)),
                 .text, .button, .bar, .rect => {},
             }
         }
@@ -4684,7 +4975,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             self.ui.scrolls = self.scroll_slots[0..self.scroll_n];
 
             const root = self.viewFn(&self.state, &self.ui);
-            self.injectScrollOffsets(root);
+            // The root's path is a constant, so the window itself is the first
+            // viewport: content taller than the window scrolls it, which is the
+            // case an app hits without doing anything at all.
+            self.injectScrollOffsets(root, scroll_path_root);
 
             var collector: Collector(M) = .{ .gpa = a, .metrics = metrics };
             const r = collector.renderer();
@@ -5769,8 +6063,17 @@ test "a rounded control is not claimed by its empty corner" {
 
     var f = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
     defer f.deinit();
-    try std.testing.expectEqual(@as(usize, 1), f.hits.len);
-    const r = f.hits[0].rect;
+    // The container itself now scrolls -- its content is taller than the 16px
+    // box it was given -- so it records a region and a thumb besides the
+    // button. What this test is about is the BUTTON's claim, so count
+    // message-bearing regions rather than all of them.
+    var n_msg: usize = 0;
+    var r: Rect = undefined;
+    for (f.hits) |hit| if (hit.msg != null) {
+        n_msg += 1;
+        r = hit.rect;
+    };
+    try std.testing.expectEqual(@as(usize, 1), n_msg);
     // The radius the rasteriser would clamp to, so the test states the shape it
     // is asserting against: half the short side.
     try std.testing.expectEqual(@as(f32, 30), f.hits[0].radius);
@@ -6154,13 +6457,24 @@ fn vpView(_: *VPState, ui: *Ui(VPMsg)) *Element(VPMsg) {
     for (&kids, 0..) |*k, i| {
         k.* = ui.rect(.{ .width = 80, .height = 20, .on_press = .tap, .key = 100 + i });
     }
-    const col = ui.column(.{ .children = &kids });
-    const vp = ui.scroll(.{ .key = 7, .height = 100, .child = col });
-    return ui.column(.{ .children = &.{vp} });
+    // Implicit scroll: the container IS the viewport. A definite height and
+    // more content than fits is the whole declaration -- there is no wrapper.
+    const col = ui.column(.{ .key = 7, .height = 100, .children = &kids });
+    return ui.column(.{ .children = &.{col} });
+}
+
+/// The viewport's scroll identity: the column the view builds sits at child 0
+/// of the root, so its identity is one step down the root path. NOTHING in the
+/// app supplies this -- that is the whole point of implicit scrolling.
+fn vpKey() u64 {
+    return pathChild(scroll_path_root, 0);
 }
 
 fn vpRegion(hits: []const Hit(VPMsg), key: u64) ?Hit(VPMsg) {
     for (hits) |h| {
+        // A scrolled container carries its identity in `scroll_id`; an ordinary
+        // region carries an app key. Either can be the thing being looked for.
+        if (h.scroll_id) |k| if (k == key) return h;
         if (h.key) |k| if (k == key) return h;
     }
     return null;
@@ -6176,7 +6490,7 @@ test "a viewport records its content height and translates its content" {
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
-        const vp = vpRegion(f.hits, 7) orelse return error.NoViewport;
+        const vp = vpRegion(f.hits, vpKey()) orelse return error.NoViewport;
         const sv = vp.scroll orelse return error.NoScrollInfo;
         try std.testing.expectEqual(@as(f32, 200), sv.content_h);
         try std.testing.expectEqual(@as(f32, 100), sv.view_h);
@@ -6186,7 +6500,7 @@ test "a viewport records its content height and translates its content" {
     // Offset 40: the first two rows are gone and row 2 has taken row 0's
     // place. A region that scrolled out produces NO hit at all, which is the
     // clip doing its work rather than paint pretending.
-    rt.scrollTo(7, 40);
+    rt.scrollTo(vpKey(), 40);
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
@@ -6196,7 +6510,7 @@ test "a viewport records its content height and translates its content" {
 
     // Offset past the end: paint clamps to content_h - view_h, so the store is
     // allowed to be one frame ahead without painting blank space.
-    rt.scrollTo(7, 9999);
+    rt.scrollTo(vpKey(), 9999);
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
@@ -6226,12 +6540,12 @@ test "a viewport inside a stack still receives its offset" {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
         try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 100).?.rect.y);
-        try std.testing.expectEqual(@as(f32, 200), vpRegion(f.hits, 7).?.scroll.?.content_h);
+        try std.testing.expectEqual(@as(f32, 200), vpRegion(f.hits, vpKey()).?.scroll.?.content_h);
     }
 
     // Row 0 scrolled out, row 2 took its place. Without the stack arm both
     // assertions read as an unscrolled frame.
-    rt.scrollTo(7, 40);
+    rt.scrollTo(vpKey(), 40);
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
@@ -6670,9 +6984,8 @@ test "a thumb exists only when there is overflow, and claims where it paints" {
             for (&kids, 0..) |*k, i| {
                 k.* = ui.rect(.{ .width = 80, .height = 20, .key = 100 + i });
             }
-            const col = ui.column(.{ .children = &kids });
-            const vp = ui.scroll(.{ .key = 7, .height = if (s.fits) 300 else 100, .child = col });
-            return ui.column(.{ .children = &.{vp} });
+            const col = ui.column(.{ .key = 7, .height = if (s.fits) 300 else 100, .children = &kids });
+            return ui.column(.{ .children = &.{col} });
         }
     };
 
@@ -6699,7 +7012,7 @@ test "a thumb exists only when there is overflow, and claims where it paints" {
         // `key`: a second region with key 7 would trip the duplicate-key guard
         // and would let `Press.rebind` hand the claim to the content region.
         try std.testing.expectEqual(@as(?u64, null), t.key);
-        try std.testing.expectEqual(@as(u64, 7), t.drag.?.thumb.key);
+        try std.testing.expectEqual(vpKey(), t.drag.?.thumb.key);
         // No message: a thumb produces an offset, not an event.
         try std.testing.expectEqual(@as(?ThMsg, null), t.msg);
     }
@@ -6728,8 +7041,7 @@ test "a keyed scroll viewport is one region, so it cannot collide with itself" {
             for (&kids, 0..) |*k, i| {
                 k.* = ui.rect(.{ .width = 80, .height = 20, .key = 200 + i });
             }
-            const col = ui.column(.{ .children = &kids });
-            const vp = ui.scroll(.{ .key = 7, .height = 100, .child = col, .on_press = .press });
+            const vp = ui.column(.{ .key = 7, .height = 100, .children = &kids, .on_press = .press });
             // Focusable is a plain field: it exists for the Tab order, which no
             // builder needs to spell out.
             vp.focusable = true;
@@ -7423,7 +7735,7 @@ fn wgControls(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
     return ui.column(.{ .gap = 6, .children = &.{
         ui.control(.{ .key = 101, .label = "Remember", .checked = true, .msg = .toggled }),
         ui.control(.{ .key = 102, .label = "Small", .kind = .radio, .checked = false, .msg = .pick_a }),
-        ui.control(.{ .key = 103, .label = "Enabled", .kind = .@"switch", .checked = true, .msg = .moved }),
+        ui.control(.{ .key = 103, .label = "Enabled", .kind = .toggle, .checked = true, .msg = .moved }),
     } });
 }
 

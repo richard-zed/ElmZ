@@ -143,12 +143,17 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // the viewport measures at its content and could never scroll.
     var rows_buf: [rows]*elmz.Element(Msg) = undefined;
     for (&rows_buf, 0..) |*r, i| r.* = listRow(ui, i);
-    const list = ui.column(.{ .children = &rows_buf, .gap = 2 });
-
-    const vp = ui.scroll(.{ .key = scroll_key, .child = list });
+    // Implicit scroll: this column IS the viewport. Its definite height is what
+    // makes an overflow possible, and it clips and scrolls itself -- there is no
+    // wrapper element to declare.
+    const vp = ui.column(.{
+        .children = &rows_buf,
+        .gap = 2,
+        .key = scroll_key,
+        .style = .{ .pad = 8, .bg = th.panel, .radius = 12, .border = th.border },
+    });
     vp.width = 300;
     vp.height = 268;
-    vp.applyStyle(.{ .pad = 8, .bg = th.panel, .radius = 12, .border = th.border });
 
     // -- right: switches with the tab -------------------------------------
     const actions_head = ui.text(.{ .label = "actions", .size = 11, .tone = .muted });

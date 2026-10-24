@@ -4325,3 +4325,44 @@ test "a non-finite rect paints nothing, not the whole clip" {
     c.fillRect(.{ .x = 2, .y = 2, .w = 4, .h = 4 }, .{ .solid = red });
     try std.testing.expectEqual(@as(u8, 255), testRgb(&c, 3, 3)[0]);
 }
+
+test "a run of ideographs wraps between characters and loses nothing" {
+    var buf: [16][]const u8 = undefined;
+    // No spaces anywhere. Under the space-only rule this was one hard break at
+    // whatever character happened to overflow; a break opportunity between
+    // ideographs is what makes the lines land on character boundaries instead.
+    const text = "日本語のテキストです";
+    const n = testing_font.get().wrapLines(text, 14, 60, &buf);
+    try std.testing.expect(n > 1);
+    // Nothing lost, nothing duplicated, nothing reordered: the pieces are
+    // consecutive slices of the input.
+    var at: usize = 0;
+    for (buf[0..n]) |line| {
+        try std.testing.expect(line.len > 0);
+        try std.testing.expect(std.mem.eql(u8, text[at..][0..line.len], line));
+        at += line.len;
+    }
+    try std.testing.expectEqual(text.len, at);
+}
+
+test "punctuation is never stranded at the start of a CJK line" {
+    var buf: [16][]const u8 = undefined;
+    // 「 opens, 」and 。 close. The natural greedy break lands right on the
+    // punctuation, which is what a space-only rule does and what kinsoku
+    // forbids: a closing mark belongs to the line before it.
+    const text = "「日本語」の文章。";
+    const n = testing_font.get().wrapLines(text, 14, 45, &buf);
+    try std.testing.expect(n > 1);
+    var at: usize = 0;
+    for (buf[0..n]) |line| {
+        try std.testing.expect(std.mem.eql(u8, text[at..][0..line.len], line));
+        at += line.len;
+    }
+    for (buf[1..n]) |line| {
+        try std.testing.expect(!std.mem.startsWith(u8, line, "。"));
+        try std.testing.expect(!std.mem.startsWith(u8, line, "」"));
+    }
+    for (buf[0..n]) |line| {
+        try std.testing.expect(!std.mem.endsWith(u8, line, "「"));
+    }
+}

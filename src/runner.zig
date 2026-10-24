@@ -649,6 +649,7 @@ fn ActiveDrag(comptime M: type) type {
         thumb: struct {
             d: elmz.ScrollDrag,
             from_y: f32,
+            from_x: f32,
             from_off: f32,
         },
         /// A value control: tracked by ABSOLUTE position.
@@ -980,7 +981,8 @@ pub fn run(
                             .thumb => |t| drag = .{ .thumb = .{
                                 .d = t,
                                 .from_y = p[1],
-                                .from_off = rt.scrollOffset(t.key),
+                                .from_x = p[0],
+                                .from_off = if (t.horizontal) rt.scrollOffsetX(t.key) else rt.scrollOffset(t.key),
                             } },
                             .slider => |sl| {
                                 // The message comes off the widget payload, not
@@ -1063,7 +1065,17 @@ pub fn run(
                 // hover would only mark a frame dirty that is already dirty.
                 if (drag) |*held| switch (held.*) {
                     .thumb => |t| {
-                        if (t.d.view.view_h > 0) {
+                        if (t.d.horizontal) {
+                            const max_off = @max(0, t.d.view.content_w - t.d.view.view_w);
+                            if (t.d.view.view_w > 0 and max_off > 0) {
+                                const ratio = t.d.view.content_w / t.d.view.view_w;
+                                const next = std.math.clamp(t.from_off + (p[0] - t.from_x) * ratio, 0, max_off);
+                                if (next != rt.scrollOffsetX(t.d.key)) {
+                                    rt.scrollToX(t.d.key, next);
+                                    dirty = true;
+                                }
+                            }
+                        } else if (t.d.view.view_h > 0) {
                             // One unit of thumb travel is worth this much content.
                             const ratio = t.d.view.content_h / t.d.view.view_h;
                             const max_off = @max(0, t.d.view.content_h - t.d.view.view_h);
@@ -1296,16 +1308,24 @@ pub fn run(
                         i -= 1;
                         const h = f.hits[i];
                         const sv = h.scroll orelse continue;
-                        const key = h.key orelse continue;
+                        // Scroll identity, not press identity: an implicit
+                        // viewport is never given a key by the app.
+                        const key = h.scroll_id orelse continue;
                         if (!h.rect.containsRounded(h.radius, p) or !h.clip.contains(p)) continue;
-                        const max_off = @max(0, sv.content_h - sv.view_h);
-                        if (max_off <= 0) continue;
-                        const before = rt.scrollOffset(key);
-                        const next = std.math.clamp(before + w.dy * scroll_step, 0, max_off);
+                        // Both deltas, both axes: a container can overflow
+                        // sideways and downward at once, and the wheel reports
+                        // them separately.
+                        const max_y = @max(0, sv.content_h - sv.view_h);
+                        const max_x = @max(0, sv.content_w - sv.view_w);
+                        const before_y = rt.scrollOffset(key);
+                        const before_x = rt.scrollOffsetX(key);
+                        const next_y = if (max_y > 0) std.math.clamp(before_y + w.dy * scroll_step, 0, max_y) else before_y;
+                        const next_x = if (max_x > 0) std.math.clamp(before_x + w.dx * scroll_step, 0, max_x) else before_x;
                         // A tick against the end of the content changed
                         // nothing, so it must not bill a repaint.
-                        if (next == before) break :blk;
-                        rt.scrollTo(key, next);
+                        if (next_y == before_y and next_x == before_x) break :blk;
+                        if (next_y != before_y) rt.scrollTo(key, next_y);
+                        if (next_x != before_x) rt.scrollToX(key, next_x);
                         dirty = true;
                         break :blk;
                     }
@@ -2278,8 +2298,16 @@ test "a press outside a clipping container is not a hit" {
     var f = try rt.frame(.{ .w = 200, .h = 120 }, canvas.renderer());
     defer f.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), f.hits.len);
-    const r = f.hits[0].rect;
+    // The 16px box now scrolls -- its one child is taller than it -- so the box
+    // records its own region and a thumb besides the button. What this test is
+    // about is the BUTTON's claim, so count message-bearing regions.
+    var n_msg: usize = 0;
+    var r: elmz.Rect = undefined;
+    for (f.hits) |hit| if (hit.msg != null) {
+        n_msg += 1;
+        r = hit.rect;
+    };
+    try std.testing.expectEqual(@as(usize, 1), n_msg);
     try std.testing.expect(r.h > 16); // the button really does stick out
 
     // inside both the button and the visible band
@@ -3096,7 +3124,7 @@ test "a viewport under the pointer takes the wheel before the app sees it" {
         fn view(_: *VWState, ui: *elmz.Ui(VWMsg)) *elmz.Element(VWMsg) {
             var kids: [10]*elmz.Element(VWMsg) = undefined;
             for (&kids) |*k| k.* = ui.rect(.{ .width = 50, .height = 20 });
-            const vp = ui.scroll(.{ .key = 9, .height = 60, .child = ui.column(.{ .children = &kids }) });
+            const vp = ui.column(.{ .key = 9, .height = 60, .children = &kids });
             return ui.column(.{ .children = &.{vp} });
         }
         fn onWheel(s: *VWState, w: elmz.Wheel) ?VWMsg {
@@ -3123,7 +3151,7 @@ test "a viewport under the pointer takes the wheel before the app sees it" {
 
     // Two notches at 48 units each, and the app's hook never ran: the offset is
     // runtime state, so there is nothing for the app to route.
-    try std.testing.expectEqual(@as(f32, 96), rt.scrollOffset(9));
+    try std.testing.expectEqual(@as(f32, 96), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
     try std.testing.expectEqual(@as(u32, 0), rt.state.hook_calls);
 }
 
@@ -3299,9 +3327,8 @@ fn dragView(_: *DragState, ui: *elmz.Ui(DragMsg)) *elmz.Element(DragMsg) {
     for (&kids, 0..) |*k, i| {
         k.* = ui.rect(.{ .width = 80, .height = 20, .on_press = .tap, .key = 100 + i });
     }
-    const col = ui.column(.{ .children = &kids });
-    const vp = ui.scroll(.{ .key = 7, .height = 100, .child = col });
-    return ui.column(.{ .children = &.{vp} });
+    const col = ui.column(.{ .key = 7, .height = 100, .children = &kids });
+    return ui.column(.{ .children = &.{col} });
 }
 
 test "dragging the thumb moves the content by the viewport's ratio, and letting go stops it" {
@@ -3328,7 +3355,7 @@ test "dragging the thumb moves the content by the viewport's ratio, and letting 
     // dragging the thumb DOWN has to move the content UP, i.e. increase the
     // offset. An inverted sign still scrolls, just backwards, which is why
     // this asserts a positive number.
-    try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(7));
+    try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
 }
 
 test "a cancelled drag stops moving the content" {
@@ -3353,7 +3380,7 @@ test "a cancelled drag stops moving the content" {
     };
     _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
 
-    try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(7));
+    try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
 }
 
 test "a press on the content is not a scroll drag" {
@@ -3376,7 +3403,7 @@ test "a press on the content is not a scroll drag" {
     };
     _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
 
-    try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(7));
+    try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
 }
 
 test "a drag clamps at both ends of the content" {
@@ -3398,7 +3425,7 @@ test "a drag clamps at both ends of the content" {
             .idle = 1,
         };
         _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
-        try std.testing.expectEqual(@as(f32, 100), rt.scrollOffset(7));
+        try std.testing.expectEqual(@as(f32, 100), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
     }
 
     // Far past the top, from a thumb already resting at the bottom: the thumb
@@ -3408,7 +3435,7 @@ test "a drag clamps at both ends of the content" {
         defer canvas.deinit();
         var rt = elmz.Runtime(DragState, DragMsg).init(gpa, .{}, dragUpdate, dragView);
         defer rt.deinit();
-        rt.scrollTo(7, 100);
+        rt.scrollTo(elmz.pathChild(elmz.scroll_path_root, 0), 100);
         var fake = Fake{
             .events = &.{
                 .{ .pointer_down = .{ 195, 60 } },
@@ -3418,7 +3445,7 @@ test "a drag clamps at both ends of the content" {
             .idle = 1,
         };
         _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
-        try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(7));
+        try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
     }
 }
 
