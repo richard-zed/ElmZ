@@ -482,6 +482,28 @@ pub fn build(b: *std.Build) void {
         &runExample(b, win_exe).step,
     );
 
+    const bare_exe = b.addExecutable(.{
+        .name = "counter-sdl3-bare",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/counter_sdl3.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+                .{ .name = "platform_sdl3", .module = sdl_mod },
+            },
+        }),
+    });
+
+    b.step("counter-sdl3-bare", "build the self-contained counter in an SDL3 window").dependOn(
+        &b.addInstallArtifact(bare_exe, .{}).step,
+    );
+    b.step("run-counter-sdl3-bare", "run the self-contained counter in an SDL3 window").dependOn(
+        &runExample(b, bare_exe).step,
+    );
+
     const gal_win = b.addExecutable(.{
         .name = "gallery-sdl3",
         .root_module = b.createModule(.{
