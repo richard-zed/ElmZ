@@ -25,10 +25,10 @@
 //! is stated rather than hidden.
 
 const std = @import("std");
-const elmz = @import("elmz.zig");
+const keys = @import("keys.zig");
 
 const Allocator = std.mem.Allocator;
-const Key = elmz.Key;
+const Key = keys.Key;
 
 /// A selection is an anchor plus wherever the caret is now.
 ///
@@ -362,7 +362,7 @@ const Harness = struct {
     fn gpa(self: *Harness) Allocator {
         return self.arena.allocator();
     }
-    fn key(self: *Harness, n: elmz.Named, mods: elmz.Mods) bool {
+    fn key(self: *Harness, n: keys.Named, mods: keys.Mods) bool {
         return self.t.handleKey(self.gpa(), .{ .named = n, .mods = mods });
     }
     fn typing(self: *Harness, bytes: []const u8) bool {
@@ -460,7 +460,7 @@ test "shift arrows grow a selection and shrink it back through the anchor" {
     _ = h.typing("abcdef");
     _ = h.t.moveTo(2, false);
 
-    const shift: elmz.Mods = .{ .shift = true };
+    const shift: keys.Mods = .{ .shift = true };
     _ = h.key(.right, shift);
     _ = h.key(.right, shift);
     try testing.expectEqualStrings("cd", h.t.selectedText().?);
@@ -510,7 +510,7 @@ test "home and end are the line, unless ctrl says the document" {
     _ = h.key(.end, .{});
     try testing.expectEqual(@as(usize, 7), h.t.caret);
 
-    const ctrl: elmz.Mods = .{ .ctrl = true };
+    const ctrl: keys.Mods = .{ .ctrl = true };
     _ = h.key(.home, ctrl);
     try testing.expectEqual(@as(usize, 0), h.t.caret);
     _ = h.key(.end, ctrl);
@@ -523,7 +523,7 @@ test "ctrl arrows move a word at a time" {
     _ = h.typing("one two  three");
     _ = h.t.moveTo(13, false); // end of "three"
 
-    const ctrl: elmz.Mods = .{ .ctrl = true };
+    const ctrl: keys.Mods = .{ .ctrl = true };
     _ = h.key(.left, ctrl);
     try testing.expectEqual(@as(usize, 9), h.t.caret); // start of "three"
     _ = h.key(.left, ctrl);
@@ -553,7 +553,7 @@ test "ctrl+a selects everything, once" {
     var h = Harness.init();
     defer h.deinit();
     _ = h.typing("hello");
-    const ctrl: elmz.Mods = .{ .ctrl = true };
+    const ctrl: keys.Mods = .{ .ctrl = true };
 
     try testing.expect(h.t.handleKey(h.gpa(), .{ .code = 'a', .mods = ctrl }));
     try testing.expectEqualStrings("hello", h.t.selectedText().?);
@@ -566,7 +566,7 @@ test "keys that are not ours are refused, not swallowed" {
     var h = Harness.init();
     defer h.deinit();
     _ = h.typing("x");
-    for ([_]elmz.Named{ .tab, .escape, .page_up, .page_down, .f5 }) |n| {
+    for ([_]keys.Named{ .tab, .escape, .page_up, .page_down, .f5 }) |n| {
         try testing.expect(!h.key(n, .{}));
     }
     // ...and the text is untouched by any of them.
