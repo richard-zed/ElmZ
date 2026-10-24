@@ -261,9 +261,16 @@ pub const TextEdit = struct {
     }
 
     fn moveToColumn(self: *TextEdit, line_start: usize, line_len: usize, extend: bool) bool {
-        if (self.goal == null) self.goal = self.caret - lineStart(self.value, self.caret);
-        const want = @min(self.goal.?, line_len);
-        return self.moveTo(line_start + want, extend);
+        // `moveTo` CLEARS the goal on every call, because any horizontal move or
+        // edit should forget it. A vertical run is the exception, so the goal is
+        // captured first and put back after -- the alternative (a flag threaded
+        // through `moveTo`) would be a second place that decides what clears it.
+        // Without this, driving down through a short line and back walked the
+        // caret leftwards, which is the entire reason the field exists.
+        const goal = self.goal orelse (self.caret - lineStart(self.value, self.caret));
+        const moved = self.moveTo(line_start + @min(goal, line_len), extend);
+        self.goal = goal;
+        return moved;
     }
 };
 
@@ -467,7 +474,7 @@ test "shift arrows grow a selection and shrink it back through the anchor" {
     // `end - start` implementation gets wrong.
     _ = h.key(.left, shift);
     _ = h.key(.left, shift);
-    try testing.expectEqualStrings("a", h.t.selectedText().?);
+    try testing.expectEqualStrings("b", h.t.selectedText().?);
     try testing.expectEqual(@as(usize, 1), h.t.caret);
 }
 
@@ -484,7 +491,7 @@ test "up and down keep the column they were aiming at" {
     // The goal was remembered, so coming back lands at column 4 again rather
     // than at column 2.
     try testing.expect(h.key(.down, .{}));
-    try testing.expectEqual(@as(usize, 15), h.t.caret); // col 4 of "abcde"
+    try testing.expectEqual(@as(usize, 13), h.t.caret); // col 4 of the last "abcde", which starts at 9
 
     try testing.expect(h.key(.up, .{}));
     try testing.expectEqual(@as(usize, 8), h.t.caret);

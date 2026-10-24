@@ -383,10 +383,25 @@ pub fn build(b: *std.Build) void {
 
     const software_tests = b.addTest(.{ .root_module = software_mod });
 
-    const test_step = b.step("test", "run core + software + runner tests");
+    // The reducer is a leaf that nothing imports yet, so without its own root
+    // its tests would never compile under `zig build test` -- the same silent
+    // drop that once took a suite from 65 to 53 when a file moved.
+    const reducer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/reducer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+            },
+        }),
+    });
+
+    const test_step = b.step("test", "run core + software + runner + reducer tests");
     test_step.dependOn(&b.addRunArtifact(software_tests).step);
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     test_step.dependOn(&b.addRunArtifact(runner_tests).step);
+    test_step.dependOn(&b.addRunArtifact(reducer_tests).step);
 
     // ---------------------------------------------------------------------
     // the -sdl3 variants. Only built when asked for, so a machine without
