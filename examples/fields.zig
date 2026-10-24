@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     for (typed) |c| {
         if (onText(&rt.state, &.{c})) |msg| _ = rt.dispatch(msg);
         var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
-        try report(out, &rt, &frame, i, "type");
+        try snap(io, gpa, out, &rt, &canvas, &frame, i, "type");
         frame.deinit();
         i += 1;
     }
@@ -162,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
     for ("hunter2") |c| {
         if (onText(&rt.state, &.{c})) |msg| _ = rt.dispatch(msg);
         var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
-        try report(out, &rt, &frame, i, "type");
+        try snap(io, gpa, out, &rt, &canvas, &frame, i, "type");
         frame.deinit();
         i += 1;
     }
@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
     const back: elmz.keys.Key = .{ .named = .backspace };
     if (onKey(&rt.state, back)) |msg| _ = rt.dispatch(msg);
     var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
-    try report(out, &rt, &frame, i, "backspace");
+    try snap(io, gpa, out, &rt, &canvas, &frame, i, "backspace");
     frame.deinit();
 
     try out.print("\nname = \"{s}\" (caret {d})\n", .{ rt.state.name.value, rt.state.name.caret });
@@ -179,6 +179,13 @@ pub fn main(init: std.process.Init) !void {
         rt.state.pass.value, rt.state.pass.caret,
     });
     try out.flush();
+}
+
+fn snap(io: anytype, gpa: anytype, out: anytype, rt: anytype, canvas: anytype, frame: anytype, i: usize, what: []const u8) !void {
+    try report(out, rt, frame, i, what);
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "frames/{d:0>2}-{s}.png", .{ i, what });
+    try canvas.writePng(io, gpa, name);
 }
 
 fn report(out: anytype, rt: anytype, frame: anytype, i: usize, what: []const u8) !void {
