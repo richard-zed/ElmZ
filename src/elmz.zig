@@ -6470,6 +6470,12 @@ fn vpKey() u64 {
     return pathChild(scroll_path_root, 0);
 }
 
+/// The stack-wrapped view adds one level: stack -> column -> column.
+/// Identity is a tree path, so deeper nesting means a deeper key.
+fn vpKeyInStack() u64 {
+    return pathChild(pathChild(scroll_path_root, 0), 0);
+}
+
 fn vpRegion(hits: []const Hit(VPMsg), key: u64) ?Hit(VPMsg) {
     for (hits) |h| {
         // A scrolled container carries its identity in `scroll_id`; an ordinary
@@ -6540,12 +6546,12 @@ test "a viewport inside a stack still receives its offset" {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
         try std.testing.expectEqual(@as(f32, 0), vpRegion(f.hits, 100).?.rect.y);
-        try std.testing.expectEqual(@as(f32, 200), vpRegion(f.hits, vpKey()).?.scroll.?.content_h);
+        try std.testing.expectEqual(@as(f32, 200), vpRegion(f.hits, vpKeyInStack()).?.scroll.?.content_h);
     }
 
     // Row 0 scrolled out, row 2 took its place. Without the stack arm both
     // assertions read as an unscrolled frame.
-    rt.scrollTo(vpKey(), 40);
+    rt.scrollTo(vpKeyInStack(), 40);
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
