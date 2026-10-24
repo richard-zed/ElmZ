@@ -3450,6 +3450,205 @@ pub fn Ui(comptime M: type) type {
             } });
             return e;
         }
+
+        /// A row's key, derived from its control's key and its index.
+        ///
+        /// `roving` collapses N rows into one Tab stop, and the runtime cursor
+        /// holds a KEY rather than an index -- `rovingStep` skips a row with no
+        /// key at all, so an unkeyed row can be passed over but never landed
+        /// on, and the mechanism silently does nothing. Derived here rather
+        /// than declared by the caller so nobody hand-writes twenty keys that
+        /// then have to stay in step with the row list.
+        pub fn rovingKey(owner: u64, index: u16) u64 {
+            return owner *% 0x100000001b3 +% (@as(u64, index) +% 1);
+        }
+
+        pub const Tab = struct {
+            label: []const u8,
+            /// Dispatched on click, and by Enter or Space when the cursor is on
+            /// this tab. A Msg carries no payload, so "which tab" is the
+            /// identity of the message rather than a number inside it.
+            msg: M,
+            /// Painted only while this tab is the selected one. Empty is legal:
+            /// a strip governing content the app draws elsewhere is a normal
+            /// shape, not a degenerate one.
+            children: []const *Elem = &.{},
+        };
+
+        pub const TabsOpts = struct {
+            key: u64,
+            /// The Model decides. Out of range paints an empty panel instead of
+            /// asserting: a rebuilt view can drop a tab the Model still names,
+            /// and a library that panics on that turns a stale index into a
+            /// crash on the frame after a content change.
+            selected: u16,
+            tabs: []const Tab,
+            size: f32 = 16,
+            gap: f32 = 4,
+            pad: f32 = 10,
+            width: ?f32 = null,
+            style: Style = .{},
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+            disabled: bool = false,
+        };
+
+        /// A tab strip over its panels, where only the selected tab's children
+        /// are in the tree at all -- the others are never built, so nothing
+        /// hidden can take a focus stop or a hit region.
+        ///
+        /// Every tab is a ROVING row, exactly as in `ui.list`: the strip is one
+        /// Tab stop and arrows move between tabs, which is what makes a ten-tab
+        /// window cost one press of Tab rather than ten.
+        ///
+        /// The live tab is marked with a `.selected` fill, `.text` in place of
+        /// `.text_muted`, and an `.accent` border. An UNDERLINE indicator would
+        /// be the usual shape and is the one thing deliberately not done: a bar
+        /// spanning the tab needs the tab's own laid-out width, and `view`
+        /// cannot measure text without becoming a function of the font. The
+        /// border carries the same signal -- `.selected` and `.hover` are only
+        /// 1.2:1 apart, so something in the accent colour has to say which is
+        /// live -- without inventing a second measurement path.
+        pub fn tabs(self: *Self, o: TabsOpts) *Elem {
+            const th = self.theme;
+            const btns = self.alloc().alloc(*Elem, o.tabs.len) catch {
+                self.failWith(.layout_allocation);
+                return self.column(.{ .children = &.{} });
+            };
+            for (o.tabs, 0..) |t, i| {
+                const live = i == @as(usize, o.selected);
+                const label = self.text(.{
+                    .label = t.label,
+                    .size = o.size,
+                    .style = .{ .fg = if (live) th.text else th.text_muted },
+                });
+                const b = self.row(.{
+                    .children = &.{label},
+                    .style = .{
+                        .bg = if (live) th.selected else null,
+                        .border = if (live) th.accent else null,
+                        .pad = o.pad,
+                    },
+                    .hover_bg = .{ .solid = th.hover },
+                    .on_press = t.msg,
+                });
+                b.key = rovingKey(o.key, @intCast(i));
+                b.roving = o.key;
+                b.roving_index = @intCast(i);
+                b.disabled = o.disabled;
+                btns[i] = b;
+            }
+            const panel = if (@as(usize, o.selected) < o.tabs.len)
+                self.column(.{ .children = o.tabs[o.selected].children })
+            else
+                self.column(.{ .children = &.{} });
+            const strip = self.row(.{ .children = btns, .gap = o.gap });
+            const root = self.column(.{
+                .children = &.{ strip, panel },
+                .gap = o.gap,
+                .width = o.width,
+                .style = o.style,
+                .margin_left = o.margin_left,
+                .margin_right = o.margin_right,
+                .margin_top = o.margin_top,
+                .margin_bottom = o.margin_bottom,
+                .disabled = o.disabled,
+            });
+            root.key = o.key;
+            root.focusable = true;
+            return root;
+        }
+
+        pub const ListOpts = struct {
+            key: u64,
+            rows: []const Choice(M),
+            /// The committed row, owned by the Model. PAINTING ONLY: the
+            /// cursor is the runtime's, because "where the keyboard was last"
+            /// is not data, and restoring it into a different list after a
+            /// remount would land on an index that no longer means the same
+            /// thing.
+            selected: ?u16 = null,
+            /// Uniform on purpose. A list whose rows differ in height needs the
+            /// cursor position to be computed rather than multiplied, and
+            /// nothing has asked for that.
+            row_h: f32 = 26,
+            size: f32 = 16,
+            width: ?f32 = null,
+            gap: f32 = 0,
+            pad: f32 = 8,
+            style: Style = .{},
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+            disabled: bool = false,
+        };
+
+        /// A vertical list as ONE Tab stop, with arrows moving inside it.
+        ///
+        /// No widget payload, and that is a deliberate reading of the rules
+        /// rather than an omission: a list is a STRUCTURE, not a control. Every
+        /// behaviour it needs already exists -- roving is `Element.roving`,
+        /// selection belongs to the Model, hover and press are ordinary fields
+        /// on the row -- so a `.list` payload would carry nothing the runtime
+        /// could act on.
+        ///
+        /// Rows are `focusable` even though `focusStep` skips them, because a
+        /// region has to EXIST before `rovingStep` can find it: `hitAppend`
+        /// records one for a keyed focusable element, which is exactly what
+        /// makes an arrow able to land on a row that carries no message.
+        pub fn list(self: *Self, o: ListOpts) *Elem {
+            const th = self.theme;
+            const kids = self.alloc().alloc(*Elem, o.rows.len) catch {
+                self.failWith(.layout_allocation);
+                return self.column(.{ .children = &.{} });
+            };
+            for (o.rows, 0..) |r, i| {
+                const live = o.selected != null and o.selected.? == @as(u16, @intCast(i));
+                const label = self.text(.{
+                    .label = r.label,
+                    .size = o.size,
+                    .style = .{ .fg = if (live) th.text else th.text_muted },
+                });
+                const item = self.row(.{
+                    .children = &.{label},
+                    .height = o.row_h,
+                    .style = .{
+                        .bg = if (live) th.selected else null,
+                        .pad = o.pad,
+                    },
+                    .hover_bg = .{ .solid = th.hover },
+                    .on_press = r.msg,
+                });
+                item.key = rovingKey(o.key, @intCast(i));
+                item.focusable = true;
+                item.disabled = r.disabled or o.disabled;
+                // A disabled row is not a cursor stop: stepping onto something
+                // that cannot be activated is a dead end in the middle of a
+                // list, and arrows would appear to skip for no reason.
+                if (!item.disabled) {
+                    item.roving = o.key;
+                    item.roving_index = @intCast(i);
+                }
+                kids[i] = item;
+            }
+            const root = self.column(.{
+                .children = kids,
+                .gap = o.gap,
+                .width = o.width,
+                .style = o.style,
+                .margin_left = o.margin_left,
+                .margin_right = o.margin_right,
+                .margin_top = o.margin_top,
+                .margin_bottom = o.margin_bottom,
+                .disabled = o.disabled,
+            });
+            root.key = o.key;
+            root.focusable = true;
+            return root;
+        }
     };
 }
 
