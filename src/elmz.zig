@@ -365,6 +365,12 @@ pub const Region = struct {
     /// covers, which is the wrong meaning of "disabled".
     active: bool = true,
 
+    /// Carried so the hover scan can answer both "what lights up" and "what
+    /// explains itself" from ONE traversal. Never part of identity: `eql`
+    /// stays geometry-only, or a press would drop when a label reflowed
+    /// mid-gesture.
+    tooltip: ?[]const u8 = null,
+
     pub fn eql(self: Region, rect: Rect, clip: Rect) bool {
         return self.rect.eql(rect) and self.clip.eql(clip);
     }
@@ -1393,6 +1399,18 @@ pub fn Element(comptime M: type) type {
         /// an app never writes it, and the builder owns the pairing with
         /// `geometry` so the two cannot disagree.
         widget: ?*const Widget(M) = null,
+        /// A short label shown once the pointer has rested here for a while.
+        ///
+        /// A FIELD rather than a wrapper builder, because the tip belongs to the
+        /// thing rather than around it -- and because a field gives a property a
+        /// wrapper cannot: hovering a child with no tip falls through to an
+        /// ancestor that has one, so a whole toolbar row can explain itself with
+        /// one string.
+        ///
+        /// Never hit-tested, never focusable, never takes the pointer: it is an
+        /// explanation, not a control. Draws for a DISABLED element too, since
+        /// "why is this greyed out" is the main reason to have one.
+        tooltip: ?[]const u8 = null,
         /// confine every descendant to this element's rect (rect clip only;
         /// rounded corners are not cut yet). Off by default, so nothing that
         /// does not ask for it changes.
@@ -2022,8 +2040,13 @@ pub fn Element(comptime M: type) type {
                     }
                 }
             }
-            if (self.hover_bg != null) {
-                if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = self.key, .active = !self.disabled, .radius = self.radius });
+            // A tooltip rides the same scan as hover and for the same reason:
+            // both answer "what is under the pointer", and a second traversal
+            // would be a second place for that answer to disagree. Recorded even
+            // for a DISABLED element -- "why is this greyed out" is the main
+            // reason to have a tooltip at all.
+            if (self.hover_bg != null or self.tooltip != null) {
+                if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = self.key, .active = !self.disabled, .radius = self.radius, .tooltip = self.tooltip });
             }
             // A button or bar always fills, even with no `bg` set, so the
             // geometry default belongs here rather than in the geometry's paint arm.
@@ -5197,6 +5220,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             // paints with that answer. A press in flight shows no hover at
             // all, so those frames keep the single pass.
             var resolved: ?Region = null;
+            // Resolved independently of the hover target, and by its own walk:
+            // the innermost region WITH a tip wins, which is what lets a child
+            // with none fall through to an ancestor that has one.
+            var tip: ?Region = null;
             if (view.pos) |p| {
                 if (view.held == null) {
                     var scan_hits: std.ArrayList(Hit(M)) = .empty;
@@ -5211,6 +5238,15 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                         i -= 1;
                         if (regions.items[i].holds(p)) {
                             resolved = regions.items[i];
+                            break;
+                        }
+                    }
+                    var ti = regions.items.len;
+                    while (ti > 0) {
+                        ti -= 1;
+                        const reg = regions.items[ti];
+                        if (reg.tooltip != null and reg.holds(p)) {
+                            tip = reg;
                             break;
                         }
                     }
@@ -5345,6 +5381,38 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 const room = root_rect.w - 12;
                 while (msg.len > 0 and metrics.measureText(msg, 12).width > room) msg = msg[0 .. msg.len - 1];
                 r.text(6, 3, 12, .{ .solid = band_fg }, msg, Rect.unbounded);
+            }
+
+            // ---- tooltip ----
+            // Last of everything, because nothing is smaller than a tooltip: it
+            // belongs above an open menu, a select and a toast.
+            if (tip) |t| {
+                // The delay is what makes a tooltip an explanation rather than a
+                // flicker. Instant after that on the same frame clock -- a cold
+                // half-second every time makes a toolbar feel broken, and an
+                // instant show every time flickers across one.
+                if (self.ui.hover_since >= 0.5) {
+                    const tip_size: f32 = 13;
+                    const pad_x: f32 = 6;
+                    const pad_y: f32 = 4;
+                    const m = metrics.measureText(t.tooltip.?, tip_size);
+                    const h = tip_size + 2 * pad_y;
+                    var w = m.width + 2 * pad_x;
+                    if (w > root_rect.w - 4) w = root_rect.w - 4;
+                    var x = t.rect.x + t.rect.w / 2 - w / 2;
+                    if (x < 2) x = 2;
+                    if (x + w > root_rect.w - 2) x = root_rect.w - 2 - w;
+                    // Below, then above when there is no room: a tooltip that
+                    // hung off the bottom edge would be unreadable, and unlike a
+                    // menu it has no scroll of its own.
+                    var y = t.rect.y + t.rect.h + 6;
+                    if (y + h > root_rect.h - 2) y = t.rect.y - 6 - h;
+                    if (y < 2) y = 2;
+                    const box: Rect = .{ .x = x, .y = y, .w = w, .h = h };
+                    r.quad(box, .{ .solid = self.ui.theme.panel }, Rect.unbounded);
+                    r.quad(.{ .x = box.x, .y = box.y, .w = box.w, .h = 1 }, .{ .solid = self.ui.theme.border }, Rect.unbounded);
+                    r.text(box.x + pad_x, box.y + pad_y, tip_size, .{ .solid = self.ui.theme.text }, t.tooltip.?, Rect.unbounded);
+                }
             }
 
             // All allocations must happen BEFORE `arena` is copied into the
@@ -8031,6 +8099,153 @@ fn wgSliderOnly(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
     return ui.column(.{ .children = &.{
         ui.slider(.{ .key = 80, .value = &s.v, .msg = .moved, .length = 100, .thickness = 6 }),
     } });
+}
+
+fn wgListOnly(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    return ui.column(.{ .children = &.{
+        ui.list(.{
+            .key = 90,
+            .selected = 1,
+            .rows = &.{
+                .{ .label = "one", .msg = .pick_a },
+                .{ .label = "two", .msg = .pick_b },
+                .{ .label = "three" },
+            },
+        }),
+    } });
+}
+
+fn wgTabsAt(s: *WgState, ui: *Ui(WgMsg), sel: u16) *Element(WgMsg) {
+    _ = s;
+    const a = ui.rect(.{ .width = 10, .height = 10, .style = .{ .bg = Color.rgbHex(0x123456) } });
+    const b = ui.rect(.{ .width = 10, .height = 10, .style = .{ .bg = Color.rgbHex(0x654321) } });
+    return ui.column(.{ .children = &.{
+        ui.tabs(.{
+            .key = 95,
+            .selected = sel,
+            .tabs = &.{
+                .{ .label = "A", .msg = .pick_a, .children = &.{a} },
+                .{ .label = "B", .msg = .pick_b, .children = &.{b} },
+            },
+        }),
+    } });
+}
+
+fn wgTabsFirst(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    return wgTabsAt(s, ui, 0);
+}
+
+fn wgTabsSecond(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    return wgTabsAt(s, ui, 1);
+}
+
+fn wgTipView(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    const t = ui.text(.{ .label = "Save", .size = 16 });
+    t.tooltip = "Save the document";
+    return ui.column(.{ .children = &.{t} });
+}
+
+test "a tooltip waits for the delay, then paints above everything else" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgTipView);
+    defer rt.deinit();
+    rt.pointer.pos = .{ 10, 10 };
+
+    // Pointer resting, but not yet long enough: nothing is drawn. The delay is
+    // the whole difference between an explanation and a flicker.
+    rt.hover_since = 0.2;
+    var cold = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
+    defer cold.deinit();
+    const base = cold.prims.len;
+
+    // Same frame, pointer rested: a panel, an edge and one line of text, all of
+    // it AFTER the tree so it sits on top rather than under the label it explains.
+    rt.hover_since = 0.9;
+    var warm = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
+    defer warm.deinit();
+    try std.testing.expectEqual(base + 3, warm.prims.len);
+
+    // The last three prims are the tip, in the order they must paint.
+    try std.testing.expect(warm.prims[warm.prims.len - 1] == .text);
+    try std.testing.expect(warm.prims[warm.prims.len - 2] == .quad);
+    try std.testing.expect(warm.prims[warm.prims.len - 3] == .quad);
+}
+
+test "a list is one tab stop, and every row is a cursor stop including a label-only one" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgListOnly);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 160 }, nominalRenderer());
+    defer f.deinit();
+
+    // Three rows, one press of Tab. `focusStep` a second time from the control
+    // wraps onto itself, which is what proves the rows are NOT stops.
+    try std.testing.expectEqual(@as(?u64, 90), f.focusStep(null, true));
+    try std.testing.expectEqual(@as(?u64, 90), f.focusStep(90, true));
+
+    // The third row carries no message at all and is still reachable: rows are
+    // `focusable` so a region exists, and roving is what keeps them out of the
+    // Tab cycle. Without that, the cursor would stop after the second row.
+    try std.testing.expectEqual(@as(u16, 1), f.rovingStep(90, 0, 1).?.index);
+    try std.testing.expectEqual(Ui(WgMsg).rovingKey(90, 1), f.rovingStep(90, 0, 1).?.key);
+    try std.testing.expectEqual(@as(u16, 2), f.rovingStep(90, 1, 1).?.index);
+    try std.testing.expectEqual(@as(u16, 2), f.rovingStep(90, 2, 1).?.index);
+
+    // Clamped, not wrapped: running off the end stops on the end.
+    try std.testing.expectEqual(@as(u16, 0), f.rovingStep(90, 0, -1).?.index);
+
+    // The row itself is the hit region, and row 0 dispatches its own message.
+    const r0 = f.hit(.{ 5, 5 }).?;
+    try std.testing.expectEqual(Ui(WgMsg).rovingKey(90, 0), r0.key.?);
+    try std.testing.expectEqual(@as(?WgMsg, .pick_a), r0.msg);
+}
+
+test "tabs keep exactly one panel in the tree, and the strip is one tab stop" {
+    const gpa = std.testing.allocator;
+    const in_a = Color.rgbHex(0x123456);
+    const in_b = Color.rgbHex(0x654321);
+
+    {
+        var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgTabsFirst);
+        defer rt.deinit();
+        var f = try rt.frame(.{ .w = 200, .h = 160 }, nominalRenderer());
+        defer f.deinit();
+
+        // The unselected panel is not merely hidden: it was never built, so
+        // nothing in it can take a hit region or a focus stop.
+        try std.testing.expectEqual(@as(usize, 1), countSolidPrims(f.prims, in_a));
+        try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, in_b));
+
+        // One Tab stop for the whole strip.
+        try std.testing.expectEqual(@as(?u64, 95), f.focusStep(null, true));
+
+        // And the second tab is still clickable, which is the only way to get
+        // to its panel. Scanned rather than guessed: pad and label width decide
+        // where it starts, and a hard-coded x would encode today's font.
+        var found_b = false;
+        var x: f32 = 0;
+        while (x < 200) : (x += 1) {
+            if (f.hit(.{ x, 5 })) |h| {
+                if (h.msg) |m| {
+                    if (m == .pick_b) found_b = true;
+                }
+            }
+        }
+        try std.testing.expect(found_b);
+    }
+
+    {
+        var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgTabsSecond);
+        defer rt.deinit();
+        var f = try rt.frame(.{ .w = 200, .h = 160 }, nominalRenderer());
+        defer f.deinit();
+
+        try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, in_a));
+        try std.testing.expectEqual(@as(usize, 1), countSolidPrims(f.prims, in_b));
+    }
 }
 
 test "the widget builders hand the runtime what a call site used to assemble" {
