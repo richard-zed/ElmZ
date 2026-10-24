@@ -2,7 +2,10 @@
 //! pixels it is handed come from `software.zig` — and it exposes no SDL type
 //! to anything above it, only an `elmz.Window` vtable.
 //!
-//! SDL3 picks Wayland or X11 by itself; force it with SDL_VIDEODRIVER=wayland.
+//! WAYLAND ONLY, and the driver is FORCED below rather than left to SDL. An
+//! X11 window would be a second code path nothing tests, and on a Wayland-only
+//! SDL build the X11 attempt fails with "x11 not available", which reads like
+//! a missing system library rather than the decision it is.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -96,6 +99,11 @@ pub const Windows = struct {
 
     /// `title` must be null-terminated.
     pub fn init(title: [:0]const u8, w: u32, h: u32) !Self {
+        // Before SDL_Init, because the driver is chosen there. A failure is not
+        // worth reporting: this is a preference, and SDL falls back to whatever
+        // it was built with when wayland is absent. An environment variable
+        // still outranks the hint, which keeps a dummy driver usable.
+        _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland");
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
             std.log.err("SDL_Init: {s}", .{c.SDL_GetError()});
             return error.SdlInit;
