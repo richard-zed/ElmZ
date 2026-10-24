@@ -56,6 +56,12 @@ pub fn familyOf(name: []const u8) ?RoleFamily {
         .{ "panel", RoleFamily.fill },
         .{ "border", RoleFamily.line },
         .{ "accent", RoleFamily.emphasis },
+        // The three outcome roles are emphasis singletons too: a toast bar in
+        // the accent colour would read as "informational chrome" rather than as
+        // an outcome, so they are filed where they must stay distinct from it.
+        .{ "success", RoleFamily.emphasis },
+        .{ "warning", RoleFamily.emphasis },
+        .{ "error", RoleFamily.emphasis },
     };
     inline for (pairs) |pair| {
         if (std.mem.eql(u8, name, pair[0])) return pair[1];
@@ -230,6 +236,9 @@ pub const ColorsSpec = struct {
     pressed: ?u32 = null,
     selected: ?u32 = null,
     accent: ?u32 = null,
+    success: ?u32 = null,
+    warning: ?u32 = null,
+    @"error": ?u32 = null,
 
     /// `base` supplies whatever the spec leaves null. The field names mirror
     /// `Theme`; a test proves they stay mirrored, and this inline loop is what
@@ -259,6 +268,9 @@ pub const GradientsSpec = struct {
     pressed: ?GradientSpec = null,
     selected: ?GradientSpec = null,
     accent: ?GradientSpec = null,
+    success: ?GradientSpec = null,
+    warning: ?GradientSpec = null,
+    @"error": ?GradientSpec = null,
 };
 
 /// The resolved gradients: a role with no gradient is null, which is how every
@@ -274,6 +286,9 @@ pub const Gradients = struct {
     pressed: ?elmz.Fill = null,
     selected: ?elmz.Fill = null,
     accent: ?elmz.Fill = null,
+    success: ?elmz.Fill = null,
+    warning: ?elmz.Fill = null,
+    @"error": ?elmz.Fill = null,
 
     pub fn any(self: Gradients) bool {
         inline for (@typeInfo(Gradients).@"struct".fields) |f| {

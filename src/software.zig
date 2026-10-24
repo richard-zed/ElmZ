@@ -1211,7 +1211,12 @@ pub const Canvas = struct {
             if (cp != '\n') {
                 const rows = elmfont.glyphFor(cp);
                 const gx0: i64 = @intFromFloat(@round(pen));
-                const gy0: i64 = @intFromFloat(@round(y));
+                // The cell origin plus this glyph's drop, in whole cells. Doing
+                // it here rather than in the table keeps one glyph shape serving
+                // every position, and keeps measurement (which is x-only)
+                // untouched.
+                const gy_base: i64 = @intFromFloat(@round(y));
+                const gy0: i64 = gy_base + @as(i64, @intCast(elmfont.dyOf(cp) * s));
                 for (rows, 0..) |row, gy| {
                     var gx: u32 = 0;
                     while (gx < elmfont.glyph_w) : (gx += 1) {
@@ -4192,7 +4197,7 @@ test "the built-in face draws exactly the rows its table holds" {
     // transposed bit, an off-by-one pitch or a dropped final column is exactly
     // the class of error that a picture of legible text hides.
     const w = elmfont.order.len * elmfont.advance;
-    var c = try testCanvas(testing.allocator, w, 8);
+    var c = try testCanvas(testing.allocator, w, elmfont.line_h);
     defer c.deinit();
     c.setFont("");
     c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
@@ -4203,7 +4208,8 @@ test "the built-in face draws exactly the rows its table holds" {
         for (rows, 0..) |row, gy| {
             for (0..elmfont.glyph_w) |gx| {
                 const lit = (row >> @intCast(elmfont.glyph_w - 1 - gx)) & 1;
-                const got = c.px[(gy * w + i * elmfont.advance + gx) * 4];
+                const ry = gy + elmfont.dyOf(ch);
+                const got = c.px[(ry * w + i * elmfont.advance + gx) * 4];
                 try testing.expectEqual(@as(u8, if (lit == 1) 255 else 0), got);
             }
         }

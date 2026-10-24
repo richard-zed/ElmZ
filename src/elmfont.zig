@@ -30,7 +30,20 @@ const cedar = @import("cedar.zig");
 
 /// Cell size in pixels, and the advance that includes the one-column gap.
 pub const glyph_w: u32 = 5;
+/// The ink box: what `scaleFor` divides a point size by, so the glyph size a
+/// caller sees does not move when the line box does.
 pub const glyph_h: u32 = 6;
+/// The LINE box: the ink box plus room for the glyphs that hang below the
+/// baseline. Eight rows is the ink box plus two, which is exactly the deepest
+/// drop in `dyOf` (`j p q`), so the lowest pixel of the tallest descender lands
+/// on the last row of the box rather than being clipped by it. It is separate
+/// from `glyph_h` on purpose: a descender needs somewhere to go, and a taller
+/// ink box would silently repoint every size at smaller glyphs.
+///
+/// This is the number to raise if a deeper drop is ever wanted -- nine rows
+/// buys three. Lower it and the descenders are drawn outside the element box and
+/// clipped away, which looks exactly like a glyph nobody moved.
+pub const line_h: u32 = 8;
 pub const advance: u32 = glyph_w + 1;
 
 /// Every glyph this face can spell, in table order. Kept as a string so a test
@@ -139,6 +152,30 @@ pub fn glyphFor(cp: u32) [glyph_h]u8 {
     return glyphs[slot(cp) orelse 47];
 }
 
+/// Rows this glyph sits below the top of the ink box, in whole cells.
+///
+/// The sheet this face was drawn from put every glyph in the same six rows, so
+/// the letters with tails sat ON the baseline and the ones the source drew a
+/// bit high stayed high -- `e` and `g` began a row above `c` and `o`, and `j p
+/// q` had nowhere to descend to. This is the correction, and it is a number per
+/// glyph rather than a redrawn table because the shapes are right and only
+/// their placement is not.
+///
+/// It scales with `s` because it is measured in cells, not pixels: a drop of
+/// one is one pixel at size 6 and six at size 36. That keeps the whole-multiple
+/// rule `scaleFor` exists to enforce.
+///
+/// Uppercase folds to the same glyph, so it takes the same drop. Anything this
+/// face cannot spell draws as `?`, which has no drop, so an unknown codepoint
+/// resolves through the `else` like any other flat glyph.
+pub fn dyOf(cp: u32) u32 {
+    return switch (cp) {
+        'e', 'E', 'g', 'G', 'y', 'Y' => 1,
+        'j', 'J', 'p', 'P', 'q', 'Q' => 2,
+        else => 0,
+    };
+}
+
 /// Whether the codepoint is one this face can spell. Used by the measurement
 /// test to prove the fold and the `?` are not the same answer.
 pub fn spells(cp: u32) bool {
@@ -156,7 +193,9 @@ pub fn measure(bytes: []const u8, size: f32) elmz.TextMetrics {
         if (cp == '\n') continue;
         n += advance;
     }
-    const h: f32 = @floatFromInt(glyph_h * s);
+    // The measured height is the LINE box, not the ink box: an element sized to
+    // the ink box would clip the descenders the drop table moves below it.
+    const h: f32 = @floatFromInt(line_h * s);
     // The trailing gap is not ink, so it is not width. A label centred on a
     // measurement that included it sits one pixel left of centre.
     const w: f32 = if (n == 0) 0 else @floatFromInt((n - 1) * s);
@@ -292,10 +331,33 @@ test "widths are whole multiples of the advance, and the tail gap is not ink" {
     try testing.expectEqual(@as(f32, 10), measure("a", 12).width);
     try testing.expectEqual(@as(f32, 22), measure("ab", 12).width);
     try testing.expectEqual(@as(f32, 0), measure("", 12).width);
-    try testing.expectEqual(@as(f32, 12), measure("a", 12).height);
+    // The LINE box, not the ink box: two cells of scale, eight rows per cell.
+    try testing.expectEqual(@as(f32, 16), measure("a", 12).height);
     try testing.expectEqual(@as(usize, 1), scaleFor(6));
     try testing.expectEqual(@as(usize, 2), scaleFor(11.9));
     try testing.expectEqual(@as(usize, 1), scaleFor(1));
+}
+
+test "a descender drops inside the line box and never past it" {
+    // The drop is per glyph and in whole cells, so uppercase has to follow its
+    // lowercase and everything else has to stay put.
+    for ("egy") |ch| try testing.expectEqual(@as(u32, 1), dyOf(ch));
+    for ("jpq") |ch| try testing.expectEqual(@as(u32, 2), dyOf(ch));
+    for ("EGYJPQ") |ch| try testing.expectEqual(dyOf(ch + 32), dyOf(ch));
+    for ("abchinorstuvwz0123456789?!-_ ") |ch| try testing.expectEqual(@as(u32, 0), dyOf(ch));
+    // The check that makes the constant honest: the deepest ink in the table,
+    // shifted by the deepest drop, still lands inside `line_h`. Get this wrong
+    // and the descender is drawn below the element box and clipped away, which
+    // looks exactly like a glyph that was never shifted.
+    var deepest: usize = 0;
+    for (order, 0..) |ch, i| {
+        var last: usize = 0;
+        for (glyphs[i], 0..) |row, gy| {
+            if (row != 0) last = gy;
+        }
+        deepest = @max(deepest, last + dyOf(ch));
+    }
+    try testing.expect(deepest < line_h);
 }
 
 test "wrapping breaks on a space and never loses a word" {

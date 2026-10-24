@@ -48,6 +48,12 @@
             .selected = 0x585b70,
             // emphasis: active borders, markers, value fills
             .accent = 0x89b4fa,
+            // a thing worked: a success toast's bar, a passing check
+            .success = 0xa6e3a1,
+            // still working, wants attention: a warning toast's bar
+            .warning = 0xf9e2af,
+            // a thing failed: the error band's text, an error toast's bar
+            .@"error" = 0xf38ba8,
         },
 
         // No gradient ships by default: a default gradient is a look, and the

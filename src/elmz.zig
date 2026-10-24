@@ -767,6 +767,12 @@ pub const Theme = struct {
     selected: Color = Color.rgbHex(0x585b70),
     /// emphasis: active borders, markers, value fills
     accent: Color = Color.rgbHex(0x89b4fa),
+    /// a thing worked: a success toast's bar, a passing check
+    success: Color = Color.rgbHex(0xa6e3a1),
+    /// a thing still works but wants attention: a warning toast's bar
+    warning: Color = Color.rgbHex(0xf9e2af),
+    /// a thing failed: the error band's text, an error toast's bar
+    @"error": Color = Color.rgbHex(0xf38ba8),
 };
 
 // ---------------------------------------------------------------------------
@@ -1285,13 +1291,23 @@ pub fn Element(comptime M: type) type {
         pad: f32 = 0,
         /// gap between children, uniform by definition
         gap: f32 = 0,
-        /// spacing added immediately BEFORE this child, on top of the
-        /// container's `gap`. This is how uneven spacing is expressed: as a
-        /// number on the child, not as a phantom spacer element in the child
-        /// list. Nothing in layout walks a child that draws nothing.
-        space_before: f32 = 0,
-        /// spacing added AFTER this child, for trailing space.
-        space_after: f32 = 0,
+        /// Space reserved AROUND this child inside the slot its container gives
+        /// it. Four fields rather than a before/after pair because the pair
+        /// could only ever name the parent's MAIN axis -- a row read it as left,
+        /// a column as top, and neither could express "3px above this swatch"
+        /// inside a row at all.
+        ///
+        /// MAIN axis: a row spends `margin_left` then `margin_right`; a column
+        /// `margin_top` then `margin_bottom`. They replace `gap` for this one
+        /// child, which is how uneven spacing is expressed: a number on the
+        /// child, never a phantom spacer element in the child list.
+        /// CROSS axis: the margins shrink the slot the child is aligned inside,
+        /// so `.center` centres between them and `.stretch` fills what is left.
+        /// Either way a margin is space the child does not get.
+        margin_left: f32 = 0,
+        margin_right: f32 = 0,
+        margin_top: f32 = 0,
+        margin_bottom: f32 = 0,
         /// overrides the measured width (useful inside rows)
         width: ?f32 = null,
         height: ?f32 = null,
@@ -1503,12 +1519,12 @@ pub fn Element(comptime M: type) type {
                     fit.total_min += gap;
                     fit.fixed_w += gap;
                 }
-                fit.total_w += ch.space_before + cs.w + ch.space_after;
-                fit.total_min += ch.space_before + cs.min_w + ch.space_after;
+                fit.total_w += ch.margin_left + cs.w + ch.margin_right;
+                fit.total_min += ch.margin_left + cs.min_w + ch.margin_right;
                 if (ch.grow) {
                     fit.n_grow += 1;
                 } else {
-                    fit.fixed_w += ch.space_before + cs.w + ch.space_after;
+                    fit.fixed_w += ch.margin_left + cs.w + ch.margin_right;
                 }
             }
             return fit;
@@ -1550,11 +1566,11 @@ pub fn Element(comptime M: type) type {
                     var y = self.pad;
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) y += self.gap;
-                        y += ch.space_before;
+                        y += ch.margin_top;
                         const cs = ch.measure(r, inner_w);
                         if (ch.textBaseline(r, ch.width orelse inner_w, cs.h)) |b| return y + b;
                         y += cs.h;
-                        y += ch.space_after;
+                        y += ch.margin_bottom;
                     }
                     return null;
                 },
@@ -1562,7 +1578,7 @@ pub fn Element(comptime M: type) type {
                     const inner_w = w - 2 * self.pad;
                     for (c.children) |ch| {
                         const cs = ch.measure(r, inner_w);
-                        if (ch.textBaseline(r, ch.width orelse inner_w, cs.h)) |b| return self.pad + b;
+                        if (ch.textBaseline(r, ch.width orelse inner_w, cs.h)) |b| return self.pad + ch.margin_top + b;
                     }
                     return null;
                 },
@@ -1616,14 +1632,17 @@ pub fn Element(comptime M: type) type {
                     for (c.children, 0..) |ch, i| {
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, inner_avail);
-                        w = @max(w, cs.w);
+                        // Cross-axis margins: a column never competes over width,
+                        // so they simply make this child's slot wider and the
+                        // child narrower inside it.
+                        w = @max(w, ch.margin_left + cs.w + ch.margin_right);
                         // A column stacks, so it is only as squeezable as its
                         // widest floor. Children do not compete for width.
-                        min_w = @max(min_w, cs.min_w);
+                        min_w = @max(min_w, ch.margin_left + cs.min_w + ch.margin_right);
                         if (i > 0) h += self.gap;
-                        h += ch.space_before;
+                        h += ch.margin_top;
                         h += cs.h;
-                        h += ch.space_after;
+                        h += ch.margin_bottom;
                     }
                     break :blk .{ .w = w + 2 * self.pad, .h = h + 2 * self.pad, .min_w = min_w + 2 * self.pad };
                 },
@@ -1656,8 +1675,11 @@ pub fn Element(comptime M: type) type {
                             // it is the answer that keeps a colour swatch or a
                             // divider level with the label beside it instead of
                             // floating at the top.
+                            // The margin is part of the slot, so the baseline to
+                            // line up against sits `margin_top` below the slot's
+                            // top edge.
                             const b = ch.textBaseline(r, cw, at.h) orelse at.h;
-                            max_base = @max(max_base, b);
+                            max_base = @max(max_base, ch.margin_top + b);
                         }
                     }
                     var h: f32 = 0;
@@ -1674,9 +1696,11 @@ pub fn Element(comptime M: type) type {
                             // child: dropping a short child moves it down, and
                             // its bottom edge can end up below its neighbour's.
                             const b = ch.textBaseline(r, cw, at.h) orelse at.h;
-                            h = @max(h, (max_base - b) + at.h);
+                            h = @max(h, (max_base - ch.margin_top - b) + ch.margin_top + at.h + ch.margin_bottom);
                         } else {
-                            h = @max(h, at.h);
+                            // Cross-axis margins are height the row must find,
+                            // exactly as if the child were that much taller.
+                            h = @max(h, at.h + ch.margin_top + ch.margin_bottom);
                         }
                     }
                     // A grow child eats the leftover, so the row claims the
@@ -1994,13 +2018,15 @@ pub fn Element(comptime M: type) type {
                     const inner_w = (self.width orelse rect.w) - 2 * self.pad;
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) y += self.gap;
-                        y += ch.space_before;
+                        y += ch.margin_top;
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, inner_w);
-                        const w = ch.width orelse inner_w;
-                        try ch.paint(r, .{ .x = rect.x + self.pad, .y = y, .w = w, .h = cs.h }, child_clip, ptr, hits, gpa, hov, th);
+                        // Cross-axis: the margin is taken off the width, so the
+                        // child cannot paint over the space it asked to reserve.
+                        const w = @max(0, (ch.width orelse inner_w) - ch.margin_left - ch.margin_right);
+                        try ch.paint(r, .{ .x = rect.x + self.pad + ch.margin_left, .y = y, .w = w, .h = cs.h }, child_clip, ptr, hits, gpa, hov, th);
                         y += cs.h;
-                        y += ch.space_after;
+                        y += ch.margin_bottom;
                     }
                 },
 
@@ -2032,28 +2058,32 @@ pub fn Element(comptime M: type) type {
                     }
                     for (c.children, 0..) |ch, i| {
                         if (i > 0) x += self.gap;
-                        x += ch.space_before;
+                        x += ch.margin_left;
                         if (self.disabled) ch.disabled = true;
                         const cs = ch.measure(r, avail_w);
                         const w = rowWidth(cs, ch, fit);
                         // Measured again only when the placement actually needs
                         // it: `stretch` paints the full height regardless, and
                         // an extra measure per child per frame is not free.
-                        const ch_h: f32 = if (self.row_align == .stretch) inner_h else blk_h: {
+                        // The slot a child is aligned inside: the row's inner
+                        // box minus its cross-axis margins.
+                        const slot_y = rect.y + self.pad + ch.margin_top;
+                        const slot_h = @max(0, inner_h - ch.margin_top - ch.margin_bottom);
+                        const ch_h: f32 = if (self.row_align == .stretch) slot_h else blk_h: {
                             const at = if (w < cs.w) ch.measure(r, w) else cs;
                             break :blk_h at.h;
                         };
                         const y = switch (self.row_align) {
-                            .center => rect.y + self.pad + @max(0, (inner_h - ch_h) * 0.5),
+                            .center => slot_y + @max(0, (slot_h - ch_h) * 0.5),
                             .baseline => blk_b: {
                                 const b = ch.textBaseline(r, w, ch_h) orelse ch_h;
-                                break :blk_b rect.y + self.pad + (max_base - b);
+                                break :blk_b slot_y + (max_base - ch.margin_top - b);
                             },
-                            .stretch, .start => rect.y + self.pad,
+                            .stretch, .start => slot_y,
                         };
                         try ch.paint(r, .{ .x = x, .y = y, .w = w, .h = ch_h }, child_clip, ptr, hits, gpa, hov, th);
                         x += w;
-                        x += ch.space_after;
+                        x += ch.margin_right;
                     }
                 },
 
@@ -2371,8 +2401,12 @@ pub fn Ui(comptime M: type) type {
         /// save a library-internal repetition the caller never sees.
         fn finish(self: *Self, e: *Elem, o: anytype) *Elem {
             _ = self;
-            e.space_before += o.space_before;
-            e.space_after += o.space_after;
+            // Every margin an options struct happens to offer is applied.
+            // @hasField rather than a required set: a builder that never wants
+            // margins should not have to declare four zeroes to say so.
+            inline for (.{ "margin_left", "margin_right", "margin_top", "margin_bottom" }) |m| {
+                if (@hasField(@TypeOf(o), m)) @field(e, m) += @field(o, m);
+            }
             if (o.key) |k| e.key = k;
             if (o.disabled) e.disabled = true;
             // Any element is pressable once it carries a message; that is the
@@ -2405,8 +2439,10 @@ pub fn Ui(comptime M: type) type {
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
-            space_before: f32 = 0,
-            space_after: f32 = 0,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
             clips: bool = false,
@@ -2426,8 +2462,10 @@ pub fn Ui(comptime M: type) type {
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
-            space_before: f32 = 0,
-            space_after: f32 = 0,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
             clips: bool = false,
@@ -2452,8 +2490,10 @@ pub fn Ui(comptime M: type) type {
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
-            space_before: f32 = 0,
-            space_after: f32 = 0,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
             clips: bool = false,
@@ -2472,8 +2512,10 @@ pub fn Ui(comptime M: type) type {
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
-            space_before: f32 = 0,
-            space_after: f32 = 0,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
             clips: bool = false,
@@ -2491,8 +2533,10 @@ pub fn Ui(comptime M: type) type {
             /// geometry: hover usually swaps the geometry, not just the tint.
             hover_halo: ?Halo = null,
             style: Style = .{},
-            space_before: f32 = 0,
-            space_after: f32 = 0,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
             key: ?u64 = null,
             disabled: bool = false,
             clips: bool = false,
@@ -2539,8 +2583,10 @@ pub fn Ui(comptime M: type) type {
             /// scrolling possible at all.
             height: ?f32 = null,
             style: Style = .{},
-            space_before: f32 = 0,
-            space_after: f32 = 0,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
             /// Required for a scrollable viewport: the offset is stored under
             /// this key, so an unkeyed viewport sits at zero forever.
             key: ?u64 = null,
@@ -2615,18 +2661,109 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
-        /// Uneven spacing lives on the child it separates, so no spacer ever
-        /// occupies a slot in the child list: `gap` covers the uniform case and
-        /// these two cover the rest.
-        pub fn spaceBefore(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.space_before += size;
+        /// A rule between things: decoration, so no key, no message and no
+        /// focus. Anything clickable is a control, not this.
+        ///
+        /// Orientation is EXPLICIT, not inferred from the parent. A builder
+        /// cannot see the container it will land in, and inferring it would mean
+        /// answering at paint time a question the call site already knows.
+        /// `.vertical = true` is the row case.
+        pub const SeparatorOpts = struct {
+            vertical: bool = false,
+            /// Whole pixels: at 1.5 density a 1px rule is already the thinnest
+            /// line that draws without going soft.
+            thickness: f32 = 1,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+        };
+
+        pub fn separator(self: *Self, o: SeparatorOpts) *Elem {
+            const t = @max(1.0, o.thickness);
+            const e = self.rect(.{ .width = t, .height = t, .style = .{ .bg = self.theme.border } });
+            // The CROSS axis stretches. An unset extent is what both a column's
+            // child and a row's child read as "fill the slot you were given", so
+            // clearing one side here is the whole of the orientation.
+            if (o.vertical) e.height = null else e.width = null;
+            e.margin_left = o.margin_left;
+            e.margin_right = o.margin_right;
+            e.margin_top = o.margin_top;
+            e.margin_bottom = o.margin_bottom;
             return e;
         }
 
+        /// Determinate only. An indeterminate bar is an animation, and this
+        /// widget would then need the frame clock to mean anything at all.
+        pub const ProgressOpts = struct {
+            /// 0 to 1. Clamped, not asserted: a progress value is usually
+            /// derived from data the app does not fully control.
+            value: f32,
+            width: ?f32 = null,
+            height: f32 = 6,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+        };
+
+        pub fn progress(self: *Self, o: ProgressOpts) *Elem {
+            // NaN survives every comparison, and @min/@max keep the OTHER
+            // operand, so an unguarded clamp turns NaN into 1.0 and paints a
+            // full bar for a value that has no answer. Guard the input.
+            const v = if (std.math.isFinite(o.value)) std.math.clamp(o.value, 0.0, 1.0) else 0.0;
+            const e = self.bar(.{ .value = v, .width = o.width, .height = o.height });
+            e.margin_left = o.margin_left;
+            e.margin_right = o.margin_right;
+            e.margin_top = o.margin_top;
+            e.margin_bottom = o.margin_bottom;
+            return e;
+        }
+
+        /// Uneven spacing lives on the child it separates, so no spacer ever
+        /// occupies a slot in the child list: `gap` covers the uniform case and
+        /// these cover the rest. One helper per side, because which side a gap
+        /// belongs on is the call site's decision and nobody else can make it.
+        pub fn marginTop(self: *Self, e: *Elem, size: f32) *Elem {
+            _ = self;
+            e.margin_top += size;
+            return e;
+        }
+
+        pub fn marginLeft(self: *Self, e: *Elem, size: f32) *Elem {
+            _ = self;
+            e.margin_left += size;
+            return e;
+        }
+
+        pub fn marginRight(self: *Self, e: *Elem, size: f32) *Elem {
+            _ = self;
+            e.margin_right += size;
+            return e;
+        }
+
+        pub fn marginBottom(self: *Self, e: *Elem, size: f32) *Elem {
+            _ = self;
+            e.margin_bottom += size;
+            return e;
+        }
+
+        /// Sets the margin on BOTH axes' leading edge. Kept for call sites that
+        /// predate the four-field form and are correct either way: only the axis
+        /// the parent actually lays out along is ever read, so a column sees the
+        /// top margin and ignores the left one. New code should name the side.
+        pub fn spaceBefore(self: *Self, e: *Elem, size: f32) *Elem {
+            _ = self;
+            e.margin_left += size;
+            e.margin_top += size;
+            return e;
+        }
+
+        /// Trailing counterpart of `spaceBefore`, same reasoning.
         pub fn spaceAfter(self: *Self, e: *Elem, size: f32) *Elem {
             _ = self;
-            e.space_after += size;
+            e.margin_right += size;
+            e.margin_bottom += size;
             return e;
         }
 
@@ -2636,6 +2773,433 @@ pub fn Ui(comptime M: type) type {
             e.width = o.width;
             e.height = o.height;
             return self.finish(e, o);
+        }
+
+        pub const SliderOpts = struct {
+            key: u64,
+            /// Into the Model, not the arena: a drag outlives the frame that
+            /// started it, and app state is the one thing that does.
+            value: *f32,
+            min: f32 = 0,
+            max: f32 = 1,
+            /// null = continuous. Allowed, never enforced: a drag quantises as
+            /// it goes, and a click is a nudge of one step toward the pointer.
+            step: ?f32 = null,
+            orientation: Orientation = .horizontal,
+            msg: M,
+            /// Travel along the long axis.
+            length: f32 = 120,
+            /// Thickness of the TRACK. The knob is twice this, and the hit
+            /// rect is the knob's diameter.
+            thickness: f32 = 6,
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+            disabled: bool = false,
+        };
+
+        /// A value control: track, filled portion and knob, composed from rects
+        /// because none of the three is a primitive worth adding.
+        ///
+        /// The value is read at view time, so every child's geometry is known
+        /// before layout. None of the children sets `on_press` or `focusable`,
+        /// so none of them records a hit region and the stack's own region is
+        /// the only claim on the rect -- which is why composing cannot create a
+        /// z-order argument against the pointers that are meant to hit it.
+        ///
+        /// The hit rect is the KNOB's diameter in the thin axis, not the
+        /// track's thickness. A 6px track is ungrabbable otherwise, and the
+        /// runtime drags whatever region it is given, so widening the region is
+        /// the whole fix.
+        pub fn slider(self: *Self, o: SliderOpts) *Elem {
+            const span = o.max - o.min;
+            const raw: f32 = if (span == 0) 0 else (o.value.* - o.min) / span;
+            // clamp, not @min/@max by hand: it maps NaN to a bound instead of
+            // letting it through, and a NaN here would place the knob and the
+            // fill at a coordinate the rasteriser has to defend against.
+            const f = std.math.clamp(raw, 0, 1);
+            const d = o.thickness * 2;
+            const inset = (d - o.thickness) / 2;
+            const along = o.length * f;
+            const knob_max = @max(o.length - d, 0);
+
+            const track = self.rect(.{
+                .width = if (o.orientation == .horizontal) o.length else o.thickness,
+                .height = if (o.orientation == .horizontal) o.thickness else o.length,
+                .style = .{ .bg = self.theme.control, .radius = o.thickness / 2 },
+            });
+            const fill = self.rect(.{
+                .width = if (o.orientation == .horizontal) along else o.thickness,
+                .height = if (o.orientation == .horizontal) o.thickness else along,
+                .style = .{ .bg = self.theme.accent, .radius = o.thickness / 2 },
+            });
+            const knob = self.rect(.{
+                .width = d,
+                .height = d,
+                .style = .{ .bg = self.theme.bg, .border = self.theme.border, .radius = d / 2 },
+            });
+
+            switch (o.orientation) {
+                // Vertical is INVERTED: a fader is loudest at the top, so a
+                // control that grew upward but increased downward would be the
+                // surprising one.
+                .horizontal => {
+                    track.offset = .{ 0, inset };
+                    fill.offset = .{ 0, inset };
+                    knob.offset = .{ std.math.clamp(along - d / 2, 0, knob_max), 0 };
+                },
+                .vertical => {
+                    track.offset = .{ inset, 0 };
+                    fill.offset = .{ inset, o.length - along };
+                    knob.offset = .{ 0, std.math.clamp(o.length - along - d / 2, 0, knob_max) };
+                },
+            }
+
+            const root = self.stack(.{
+                .children = &.{ track, fill, knob },
+                .width = if (o.orientation == .horizontal) o.length else d,
+                .height = if (o.orientation == .horizontal) d else o.length,
+            });
+            root.key = o.key;
+            root.margin_left = o.margin_left;
+            root.margin_right = o.margin_right;
+            root.margin_top = o.margin_top;
+            root.margin_bottom = o.margin_bottom;
+            root.disabled = o.disabled;
+            // A key plus `focusable` is what makes the region exist at all;
+            // without them the payload would never reach the runtime.
+            root.focusable = true;
+            root.widget = self.payload(.{ .slider = .{
+                .value = o.value,
+                .min = o.min,
+                .max = o.max,
+                .step = o.step,
+                .orientation = o.orientation,
+                .msg = o.msg,
+            } });
+            return root;
+        }
+
+        pub const SelectOpts = struct {
+            key: u64,
+            open: bool,
+            selected: u16,
+            /// A pointer into the Model so hover, arrows and typeahead write one
+            /// number. Two copies would let the highlight disagree with what
+            /// Enter activates.
+            active: *?u16,
+            options: []const Choice(M),
+            /// Emitted by the closed field, to toggle.
+            msg: M,
+            /// Shows when nothing is selected, and when `selected` is out of
+            /// range -- which is a state a caller can reach without meaning to.
+            placeholder: []const u8 = "",
+            size: f32 = 16,
+            width: ?f32 = null,
+            style: Style = .{},
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+            disabled: bool = false,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+        };
+
+        /// A collapsed list of options. The field is a button because that is
+        /// what it is: a focusable, clickable box showing the current value.
+        /// Placement, dismissal and typeahead belong to the runtime popup
+        /// layer, which needs the anchor's real laid-out rect -- something
+        /// `view` cannot know, because layout runs after `view` returns.
+        pub fn select(self: *Self, o: SelectOpts) *Elem {
+            const label = if (o.selected < o.options.len)
+                o.options[o.selected].label
+            else
+                o.placeholder;
+            const e = self.button(.{
+                .label = label,
+                .msg = o.msg,
+                .size = o.size,
+                .width = o.width,
+                .style = o.style,
+                .margin_left = o.margin_left,
+                .margin_right = o.margin_right,
+                .margin_top = o.margin_top,
+                .margin_bottom = o.margin_bottom,
+                .disabled = o.disabled,
+                .hover_bg = o.hover_bg,
+                .press_bg = o.press_bg,
+            });
+            e.key = o.key;
+            e.focusable = true;
+            e.widget = self.payload(.{ .select = .{
+                .open = o.open,
+                .selected = o.selected,
+                .active = o.active,
+                .options = o.options,
+                .msg = o.msg,
+            } });
+            return e;
+        }
+
+        pub const MenuOpts = struct {
+            key: u64,
+            /// The trigger's own caption. `Widget.menu` deliberately carries no
+            /// label: a menu is commands plus the button that reveals them, and
+            /// the caption belongs to the button.
+            label: []const u8,
+            open: bool,
+            active: *?u16,
+            items: []const Choice(M),
+            toggle: M,
+            size: f32 = 16,
+            width: ?f32 = null,
+            style: Style = .{},
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+            disabled: bool = false,
+            hover_bg: ?Fill = null,
+            press_bg: ?Fill = null,
+        };
+
+        /// The menu node IS its trigger, so its laid-out rect is the popup's
+        /// anchor with no cross-node key lookup and no "anchor is not in this
+        /// frame" case. Same rule as select, different geometry: a menu drops
+        /// below its trigger and flips, where a select grows centred on field.
+        pub fn menu(self: *Self, o: MenuOpts) *Elem {
+            const e = self.button(.{
+                .label = o.label,
+                .msg = o.toggle,
+                .size = o.size,
+                .width = o.width,
+                .style = o.style,
+                .margin_left = o.margin_left,
+                .margin_right = o.margin_right,
+                .margin_top = o.margin_top,
+                .margin_bottom = o.margin_bottom,
+                .disabled = o.disabled,
+                .hover_bg = o.hover_bg,
+                .press_bg = o.press_bg,
+            });
+            e.key = o.key;
+            e.focusable = true;
+            e.widget = self.payload(.{ .menu = .{
+                .open = o.open,
+                .active = o.active,
+                .items = o.items,
+                .toggle = o.toggle,
+            } });
+            return e;
+        }
+
+        pub const ControlKind = enum { checkbox, radio, @"switch" };
+
+        pub const ControlOpts = struct {
+            key: u64,
+            label: []const u8,
+            kind: ControlKind = .checkbox,
+            /// Drawn from the Model, never held by the widget: a control that
+            /// remembered its own state would disagree with the value the app
+            /// fed back on the next frame.
+            checked: bool,
+            /// Emitted on activation. The Model flips `checked`; nothing here
+            /// does, so the same builder works for a value derived from
+            /// somewhere else entirely.
+            msg: M,
+            /// Set membership for a radio. Nothing reads it at paint time -- it
+            /// exists so a later roving group can find its members without
+            /// needing a container element to hang them on.
+            group: u16 = 0,
+            box: f32 = 16,
+            gap: f32 = 8,
+            size: f32 = 14,
+            style: Style = .{},
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+        };
+
+        /// Checkbox, radio and switch: one builder because the three differ in
+        /// shape and in nothing else. All three take `checked` in and emit a
+        /// message out, so none of them owns state.
+        ///
+        /// The WHOLE ROW is the hit region -- box, gap and label -- because a
+        /// 16px box is a small target and the label is what the reader is
+        /// actually aiming at. That is why the row carries the key and the
+        /// message rather than the box.
+        pub fn control(self: *Self, o: ControlOpts) *Elem {
+            const th = self.theme;
+            const mark = if (o.checked) th.accent else th.control;
+            const box: *Elem = switch (o.kind) {
+                .checkbox => blk: {
+                    const outer = self.rect(.{
+                        .width = o.box,
+                        .height = o.box,
+                        .style = .{ .bg = mark, .border = th.border, .radius = 3 },
+                    });
+                    if (!o.checked) break :blk outer;
+                    // A filled square alone reads as "loud" without saying what
+                    // it is. The tick is a square in the page colour for now --
+                    // at 16px the silhouette is the whole legibility budget, and
+                    // a real check needs path data this library does not have.
+                    const tick = o.box * 0.5;
+                    // `offset` is on the Element, not on RectOpts: it is
+                    // placement, and a rect builder that took it would be
+                    // deciding where its parent puts it.
+                    const mark_e = self.rect(.{
+                        .width = tick,
+                        .height = tick,
+                        .style = .{ .bg = th.bg, .radius = 1 },
+                    });
+                    mark_e.offset = .{ (o.box - tick) * 0.5, (o.box - tick) * 0.5 };
+                    break :blk self.stack(.{ .width = o.box, .height = o.box, .children = &.{ outer, mark_e } });
+                },
+                .radio => blk: {
+                    const outer = self.rect(.{
+                        .width = o.box,
+                        .height = o.box,
+                        .style = .{
+                            .bg = th.control,
+                            .border = if (o.checked) th.accent else th.border,
+                            .radius = o.box * 0.5,
+                        },
+                    });
+                    if (!o.checked) break :blk outer;
+                    const dot = o.box * 0.4;
+                    const dot_e = self.rect(.{
+                        .width = dot,
+                        .height = dot,
+                        .style = .{ .bg = th.accent, .radius = dot * 0.5 },
+                    });
+                    dot_e.offset = .{ (o.box - dot) * 0.5, (o.box - dot) * 0.5 };
+                    break :blk self.stack(.{ .width = o.box, .height = o.box, .children = &.{ outer, dot_e } });
+                },
+                .@"switch" => blk: {
+                    const w = o.box * 2;
+                    const knob = o.box - 4;
+                    const track = self.rect(.{
+                        .width = w,
+                        .height = o.box,
+                        .style = .{ .bg = mark, .border = th.border, .radius = o.box * 0.5 },
+                    });
+                    // The knob travels rather than the track changing shape: a
+                    // track that grew would move the label every time the value
+                    // flipped, which is the one thing a toggle must not do.
+                    const knob_e = self.rect(.{
+                        .width = knob,
+                        .height = knob,
+                        .style = .{ .bg = th.bg, .radius = knob * 0.5 },
+                    });
+                    knob_e.offset = .{ if (o.checked) w - knob - 2 else 2, 2 };
+                    break :blk self.stack(.{ .width = w, .height = o.box, .children = &.{ track, knob_e } });
+                },
+            };
+            const line = self.row(.{
+                .children = &.{ box, self.text(.{ .label = o.label, .size = o.size }) },
+                .gap = o.gap,
+                .key = o.key,
+                .on_press = o.msg,
+                .style = o.style,
+                .margin_left = o.margin_left,
+                .margin_right = o.margin_right,
+                .margin_top = o.margin_top,
+                .margin_bottom = o.margin_bottom,
+            });
+            // Start, not the middle: the box sits on the FIRST LINE's box, so a
+            // label that wraps keeps the box beside its opening words instead of
+            // drifting to the centre of the paragraph. Set afterwards because
+            // `row_align` is a property of the row element, not an option of the
+            // container builders.
+            line.row_align = .start;
+            // A Tab stop, unlike a toast: this is a control the keyboard must
+            // be able to reach. `row` has no `focusable` option because a row is
+            // a container -- being focusable is the one thing a control asks for
+            // that its container kind cannot express.
+            line.focusable = true;
+            return line;
+        }
+
+        pub const ToastOpts = struct {
+            key: u64,
+            text: []const u8,
+            severity: Severity = .info,
+            ttl_ms: u32 = 4000,
+            /// Emitted on expiry and on a click. The same message both ways on
+            /// purpose: "the reader closed it" and "it timed out" are one
+            /// decision for the Model, which is to forget it.
+            msg: M,
+            size: f32 = 13,
+            /// Width of the severity bar down the left edge.
+            bar_width: f32 = 3,
+            style: Style = .{},
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+        };
+
+        /// The colour a severity is drawn in. Public because an app composing
+        /// its own notification -- a banner, a status line -- should not have to
+        /// repeat the mapping to stay in step with the toast.
+        pub fn severityColor(self: *Self, s: Severity) Color {
+            return switch (s) {
+                .info => self.theme.accent,
+                .success => self.theme.success,
+                .warning => self.theme.warning,
+                .@"error" => self.theme.@"error",
+            };
+        }
+
+        /// A notification. The Model owns whether it exists; the runtime owns
+        /// when it stops, because the clock is the one thing `view` cannot see.
+        ///
+        /// Carries `key` and `on_press` for two separate reasons: a click is how
+        /// a reader dismisses it early, and the keyed hit region is also how the
+        /// runtime finds the rect it needs to pause the countdown while the
+        /// pointer is over it. NOT focusable -- a notification must never take
+        /// a Tab stop away from the thing underneath.
+        pub fn toast(self: *Self, o: ToastOpts) *Elem {
+            // Height 0 on purpose. A stretched row paints every child at the
+            // row's inner height regardless of what the child measured, so the
+            // stripe takes no part in sizing the row (the label does that) and
+            // still spans it exactly -- including a label that wraps. Giving it
+            // an explicit height would instead make a two-line toast shorter
+            // than the label inside it.
+            const stripe = self.rect(.{
+                .width = o.bar_width,
+                .height = 0,
+                .style = .{ .bg = self.severityColor(o.severity) },
+            });
+            const e = self.row(.{
+                .children = &.{ stripe, self.text(.{ .label = o.text, .size = o.size }) },
+                .gap = 8,
+                .style = .{
+                    .bg = self.theme.panel,
+                    .border = self.theme.border,
+                    .radius = 6,
+                    .pad = 8,
+                },
+                .margin_left = o.margin_left,
+                .margin_right = o.margin_right,
+                .margin_top = o.margin_top,
+                .margin_bottom = o.margin_bottom,
+            });
+            // Caller style last, like every other builder, but before the
+            // payload: a style that changes the fill must not be able to drop
+            // the widget and leave a toast the runtime never expires.
+            e.mergeStyle(o.style);
+            e.key = o.key;
+            e.on_press = o.msg;
+            e.widget = self.payload(.{ .toast = .{
+                .severity = o.severity,
+                .ttl_ms = o.ttl_ms,
+                .msg = o.msg,
+            } });
+            return e;
         }
     };
 }
@@ -5433,6 +5997,24 @@ test "activation is derived from the message, so a value control falls through" 
     try std.testing.expect(f.activate(9999) == null);
 }
 
+/// How many prims are filled with exactly `c`. A colour reaching paint is the
+/// only proof a mapping is not crossed: a builder can name the right role and
+/// still hand back the neighbouring one, and a severity that paints in the
+/// warning colour is a defect no payload assertion would notice.
+fn countSolidPrims(prims: anytype, c: Color) usize {
+    var n: usize = 0;
+    for (prims) |p| switch (p) {
+        .quad => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = c })) n += 1;
+        },
+        .rrect => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = c })) n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
 fn countAccentPrims(prims: anytype, th: Theme) usize {
     var n: usize = 0;
     for (prims) |p| switch (p) {
@@ -5912,6 +6494,99 @@ test "a baseline row lines up the type, not the boxes" {
         defer f.deinit();
         try std.testing.expect(@abs(textYOf(f, "tall") - textYOf(f, "caption")) > 0.5);
     }
+}
+
+const MarginMsg = enum { a, b };
+const MarginState = struct { alignment: RowAlign = .stretch, column: bool = false };
+
+fn marginUpdate(m: *MarginState, msg: MarginMsg) Action(MarginMsg) {
+    _ = m;
+    _ = msg;
+    return .{};
+}
+
+fn marginView(s: *MarginState, ui: *Ui(MarginMsg)) *Element(MarginMsg) {
+    const a = ui.button(.{ .label = "a", .msg = .a, .key = 1, .width = 100, .height = 20 });
+    // Uneven on purpose: a symmetric test passes whether or not the sides are
+    // distinguished, which is the whole reason there are four fields.
+    a.margin_left = 5;
+    a.margin_right = 15;
+    a.margin_top = 10;
+    a.margin_bottom = 4;
+    const b = ui.button(.{ .label = "b", .msg = .b, .key = 2, .width = 100, .height = 20 });
+    if (s.column) return ui.column(.{ .children = &.{ a, b } });
+    const row = ui.row(.{ .children = &.{ a, b } });
+    row.row_align = s.alignment;
+    return row;
+}
+
+test "a row spends the main-axis margins around the child it belongs to" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(MarginState, MarginMsg).init(gpa, .{}, marginUpdate, marginView);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+    defer f.deinit();
+
+    const a = rectOfKey(f, 1);
+    const b = rectOfKey(f, 2);
+    // Left margin offsets the child; the right one is space after it, so the
+    // next child starts past BOTH the child and its right margin.
+    try std.testing.expectApproxEqAbs(@as(f32, 5), a.x, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), a.w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 120), b.x, 0.5);
+}
+
+test "a row's cross-axis margins shrink the slot the child is aligned in" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(MarginState, MarginMsg).init(gpa, .{}, marginUpdate, marginView);
+    defer rt.deinit();
+
+    // Stretch fills what the margins leave, and starts below the top one. A
+    // margin is space the child does NOT get, so it cannot be overridden by
+    // the alignment -- the two compose.
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectApproxEqAbs(@as(f32, 10), rectOfKey(f, 1).y, 0.5);
+        try std.testing.expectApproxEqAbs(@as(f32, 46), rectOfKey(f, 1).h, 0.5);
+        // The un-margined neighbour still fills the whole row, which is what
+        // makes the 46 above a margin effect and not the row being short.
+        try std.testing.expectApproxEqAbs(@as(f32, 0), rectOfKey(f, 2).y, 0.5);
+        try std.testing.expectApproxEqAbs(@as(f32, 60), rectOfKey(f, 2).h, 0.5);
+    }
+    // Center: the child keeps its own height and centres INSIDE the reduced
+    // slot, so the margins are still respected rather than being centred away.
+    rt.state.alignment = .center;
+    {
+        var f = try rt.frame(.{ .w = 300, .h = 60 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectApproxEqAbs(@as(f32, 20), rectOfKey(f, 1).h, 0.5);
+        try std.testing.expectApproxEqAbs(@as(f32, 23), rectOfKey(f, 1).y, 0.5);
+    }
+}
+
+test "a column spends the margins on the other axis, and its cross-axis margins shrink width" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(MarginState, MarginMsg).init(gpa, .{}, marginUpdate, marginView);
+    defer rt.deinit();
+    rt.state.column = true;
+
+    var f = try rt.frame(.{ .w = 300, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+
+    const a = rectOfKey(f, 1);
+    const b = rectOfKey(f, 2);
+    // Top margin below nothing, so it is the child's y; the bottom margin plus
+    // the gap pushes the next child down.
+    try std.testing.expectApproxEqAbs(@as(f32, 10), a.y, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), a.h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), b.y, 0.5);
+    // Same four numbers, the other pair of sides.
+    try std.testing.expectApproxEqAbs(@as(f32, 5), a.x, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 80), a.w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), b.x, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), b.w, 0.5);
 }
 
 test "a grow child takes the leftover width and the others keep theirs" {
@@ -6701,4 +7376,301 @@ test "a burst of commands cannot grow threads without bound" {
 
     ex.reap();
     try std.testing.expectEqual(@as(usize, 0), ex.handles.items.len);
+}
+
+const WgMsg = enum { moved, toggled, pick_a, pick_b };
+const WgState = struct {
+    v: f32 = 0.25,
+    active: ?u16 = null,
+    open: bool = false,
+};
+
+fn wgUpdate(s: *WgState, m: WgMsg) Action(WgMsg) {
+    _ = s;
+    _ = m;
+    return .{};
+}
+
+const wg_options = [_]Choice(WgMsg){
+    .{ .label = "alpha", .msg = .pick_a },
+    .{ .label = "beta", .msg = .pick_b },
+};
+
+fn wgView(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    return ui.column(.{ .children = &.{
+        ui.slider(.{ .key = 80, .value = &s.v, .msg = .moved }),
+        ui.select(.{
+            .key = 81,
+            .open = s.open,
+            .selected = 1,
+            .active = &s.active,
+            .options = &wg_options,
+            .msg = .toggled,
+        }),
+        ui.menu(.{
+            .key = 82,
+            .label = "File",
+            .open = false,
+            .active = &s.active,
+            .items = &wg_options,
+            .toggle = .toggled,
+        }),
+    } });
+}
+
+fn wgControls(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    return ui.column(.{ .gap = 6, .children = &.{
+        ui.control(.{ .key = 101, .label = "Remember", .checked = true, .msg = .toggled }),
+        ui.control(.{ .key = 102, .label = "Small", .kind = .radio, .checked = false, .msg = .pick_a }),
+        ui.control(.{ .key = 103, .label = "Enabled", .kind = .@"switch", .checked = true, .msg = .moved }),
+    } });
+}
+
+test "a control claims its whole row, and only the checked one is marked" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgControls);
+    defer rt.deinit();
+
+    const th = Theme{};
+    var f = try rt.frame(.{ .w = 240, .h = 140 }, nominalRenderer());
+    defer f.deinit();
+
+    // The BOX is at the left edge; the label follows it. Both must resolve to
+    // the control, because a 16px box is not a target anyone can hit reliably.
+    const on_box = f.hit(.{ 6, 6 }).?;
+    try std.testing.expectEqual(@as(?u64, 101), on_box.key);
+    try std.testing.expectEqual(WgMsg.toggled, on_box.msg.?);
+    try std.testing.expect(on_box.focusable);
+    // Far right of the same row, past the end of the word.
+    try std.testing.expectEqual(@as(?u64, 101), f.hit(.{ 200, 6 }).?.key);
+    // And the row below is a different control, not the same region stretched.
+    try std.testing.expectEqual(@as(?u64, 102), f.hit(.{ 6, 30 }).?.key);
+
+    // One accent fill for the checked checkbox's box and one for the checked
+    // switch's track; the unchecked radio contributes none, which is what
+    // "checked is drawn from the Model" has to mean in pixels.
+    try std.testing.expectEqual(@as(usize, 2), countSolidPrims(f.prims, th.accent));
+}
+
+fn wgToastOnly(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    return ui.column(.{ .children = &.{
+        ui.toast(.{ .key = 91, .text = "Saved", .severity = .success, .ttl_ms = 1500, .msg = .toggled }),
+    } });
+}
+
+test "a toast carries the severity and ttl the runtime expires it by, and a click dismisses it" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgToastOnly);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 220, .h = 120 }, nominalRenderer());
+    defer f.deinit();
+
+    // A click dismisses: the panel is pressable AND keyed, which is the same
+    // hit region the runtime reads the countdown's rect from. A toast with no
+    // region would never have its timer paused, and one with no key would never
+    // be matched to a slot at all.
+    const h = f.hit(.{ 10, 10 }).?;
+    try std.testing.expectEqual(@as(?u64, 91), h.key);
+    try std.testing.expectEqual(WgMsg.toggled, h.msg.?);
+    // Not a Tab stop. A notification that steals focus interrupts whatever the
+    // reader was doing, which is the opposite of what a notification is for.
+    try std.testing.expect(!h.focusable);
+    // Padded, so the panel is taller than the single line of text inside it.
+    try std.testing.expect(h.rect.h >= 16);
+
+    // By key, not off the hit: `hit` hands back a copy with the payload
+    // stripped, which is what keeps a public Region from borrowing frame memory.
+    const w = f.widgetAt(91) orelse return error.TestUnexpectedResult;
+    switch (w.*) {
+        .toast => |t| {
+            try std.testing.expectEqual(Severity.success, t.severity);
+            try std.testing.expectEqual(@as(u32, 1500), t.ttl_ms);
+            try std.testing.expectEqual(WgMsg.toggled, t.msg);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The stripe reaches paint in the SUCCESS colour, not merely in "a" colour.
+    // Success, warning and error are one line each in `severityColor`, so a
+    // copy-paste that leaves two severities sharing a colour is likely, and it
+    // would look like a working toast.
+    const th = Theme{};
+    try std.testing.expectEqual(@as(usize, 1), countSolidPrims(f.prims, th.success));
+    try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, th.warning));
+    try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, th.@"error"));
+    // `info` is the accent, so a toast that ignores its severity entirely --
+    // the other way to get this wrong -- is caught by the success count above
+    // only while the default stays `info`.
+    try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, th.accent));
+}
+
+fn wgSliderOnly(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    // Inside a column, not as the root: the root is stretched to the canvas, so
+    // a slider placed there claims the whole window and a point below the band
+    // still hits it. Here the band is the only thing with a rect.
+    return ui.column(.{ .children = &.{
+        ui.slider(.{ .key = 80, .value = &s.v, .msg = .moved, .length = 100, .thickness = 6 }),
+    } });
+}
+
+test "the widget builders hand the runtime what a call site used to assemble" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgView);
+    defer rt.deinit();
+
+    {
+        var f = try rt.frame(.{ .w = 240, .h = 240 }, nominalRenderer());
+        defer f.deinit();
+        // Three payloads, one per builder, each reachable by the key its
+        // builder was given -- which is the whole contract: the runtime looks
+        // widgets up by key AFTER layout.
+        try std.testing.expect(f.widgetAt(80).?.* == .slider);
+        try std.testing.expect(f.widgetAt(81).?.* == .select);
+        try std.testing.expect(f.widgetAt(82).?.* == .menu);
+        const sel = switch (f.widgetAt(81).?.*) {
+            .select => |v| v,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(@as(u16, 1), sel.selected);
+        // Nothing is open, so the popup layer has nothing to place.
+        try std.testing.expect(f.openPopup(null) == null);
+    }
+
+    // Opening the select is what the popup layer looks for, and the rows it
+    // highlights are the options the builder was handed -- not a copy.
+    rt.state.open = true;
+    {
+        var f = try rt.frame(.{ .w = 240, .h = 240 }, nominalRenderer());
+        defer f.deinit();
+        const popup = f.openPopup(null).?;
+        const rows = Frame(WgMsg).popupRows(popup).?;
+        try std.testing.expectEqual(@as(usize, 2), rows.items.len);
+        try std.testing.expectEqualStrings("beta", rows.items[1].label);
+    }
+}
+
+test "a slider is composed, and claims its knob's height rather than its track's" {
+    const gpa = std.testing.allocator;
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgSliderOnly);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 120 }, nominalRenderer());
+    defer f.deinit();
+
+    // Track, fill, and the knob -- which is two prims, because a bordered
+    // rounded rect is a face plus its stroke. A single rect would be 1, so this
+    // catches the builder collapsing to the bare element the runtime would still
+    // drag happily; the test would otherwise pass on a control nobody can see.
+    try std.testing.expectEqual(@as(usize, 4), f.primitiveCount());
+    try std.testing.expectEqual(@as(?u64, 80), f.hit(.{ 5, 11 }).?.key);
+    // thickness 6 => the band is 12 tall; 13 is past it, and the column above
+    // it carries no press and no key, so nothing claims the point.
+    try std.testing.expect(f.hit(.{ 5, 13 }) == null);
+}
+
+fn collectSolid(prims: anytype, c: Color, out: []Rect) usize {
+    var n: usize = 0;
+    for (prims) |p| switch (p) {
+        .quad => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = c }) and n < out.len) {
+                out[n] = q.rect;
+                n += 1;
+            }
+        },
+        .rrect => |q| {
+            if (std.meta.eql(q.fill, Fill{ .solid = c }) and n < out.len) {
+                out[n] = q.rect;
+                n += 1;
+            }
+        },
+        else => {},
+    };
+    return n;
+}
+
+fn wgSeparator(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    return ui.column(.{ .children = &.{
+        ui.text(.{ .label = "above", .size = 12 }),
+        ui.separator(.{}),
+        ui.text(.{ .label = "below", .size = 12 }),
+    } });
+}
+
+fn wgSeparatorVertical(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    return ui.column(.{ .children = &.{
+        ui.row(.{ .children = &.{
+            ui.text(.{ .label = "left", .size = 12 }),
+            ui.separator(.{ .vertical = true }),
+            ui.text(.{ .label = "right", .size = 12 }),
+        } }),
+    } });
+}
+
+test "a separator is one pixel on its thin axis and stretches on the other" {
+    const gpa = std.testing.allocator;
+    const th = Theme{};
+    var rects: [4]Rect = undefined;
+
+    {
+        var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgSeparator);
+        defer rt.deinit();
+        var f = try rt.frame(.{ .w = 200, .h = 100 }, nominalRenderer());
+        defer f.deinit();
+        // One rule, in the border colour, exactly one pixel tall -- and wide
+        // enough to prove the cross axis filled rather than shrank to the 1px
+        // square the rect was constructed with.
+        try std.testing.expectEqual(@as(usize, 1), collectSolid(f.prims, th.border, &rects));
+        try std.testing.expectEqual(@as(f32, 1), rects[0].h);
+        try std.testing.expect(rects[0].w > 100);
+        // Decoration is not a target: a rule that answered a hit would swallow
+        // clicks meant for the row behind it.
+        try std.testing.expectEqual(@as(?Hit(WgMsg), null), f.hit(.{ rects[0].x + 2, rects[0].y }));
+    }
+
+    {
+        var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgSeparatorVertical);
+        defer rt.deinit();
+        var f = try rt.frame(.{ .w = 200, .h = 100 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expectEqual(@as(usize, 1), collectSolid(f.prims, th.border, &rects));
+        // Transposed: the row gives it the row's full height instead.
+        try std.testing.expectEqual(@as(f32, 1), rects[0].w);
+        try std.testing.expect(rects[0].h > 8);
+    }
+}
+
+fn wgProgress(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
+    _ = s;
+    return ui.column(.{ .gap = 4, .children = &.{
+        ui.progress(.{ .value = 0 }),
+        ui.progress(.{ .value = 0.5 }),
+        ui.progress(.{ .value = 1.5 }),
+        ui.progress(.{ .value = std.math.nan(f32) }),
+    } });
+}
+
+test "progress is proportional, clamped at both ends, and a NaN draws nothing" {
+    const gpa = std.testing.allocator;
+    const th = Theme{};
+    var rt = Runtime(WgState, WgMsg).init(gpa, .{}, wgUpdate, wgProgress);
+    defer rt.deinit();
+
+    var f = try rt.frame(.{ .w = 200, .h = 140 }, nominalRenderer());
+    defer f.deinit();
+
+    var rects: [8]Rect = undefined;
+    const n = collectSolid(f.prims, th.accent, &rects);
+    // Four bars, two of which paint a fill: 0 paints none, 0.5 half, 1.5
+    // clamped to full, and NaN paints none rather than the full bar an
+    // unguarded clamp would produce.
+    try std.testing.expectEqual(@as(usize, 2), n);
+    // Half the width of the full one, to within a pixel of rounding.
+    try std.testing.expect(@abs(rects[0].w * 2 - rects[1].w) <= 1);
+    // The clamped one stops at the track, not past it.
+    try std.testing.expect(rects[1].w <= 200);
 }
