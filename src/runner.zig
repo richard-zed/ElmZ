@@ -504,24 +504,6 @@ pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]
     return true;
 }
 
-/// Attach the typeface the theme chain NAMED, resolving the name to a file.
-///
-/// The name is the documented path: a `.zon` says "DejaVu Sans" and the library
-/// finds the file, so the file may move without the theme knowing where fonts
-/// live. Failure keeps whatever face is attached (nothing, at startup) and bands
-/// with the NAME -- naming the file would be advice the author never wrote.
-///
-/// Substituting a different typeface on failure is the one outcome ruled out:
-/// it renders, it looks deliberate, and nobody can tell it happened.
-fn attachFontByName(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io: std.Io, name: []const u8) ?[]u8 {
-    const bytes = software.loadFontByName(gpa, io, name, &.{}) catch {
-        ui.failExternal(.font, "no font named {s}", .{name});
-        return null;
-    };
-    canvas.setFont(bytes);
-    return bytes;
-}
-
 /// Attach the app's declared typeface, or say why it is not there.
 ///
 /// A path the app NAMED and the filesystem cannot produce is a fault: text

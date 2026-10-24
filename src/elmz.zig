@@ -607,22 +607,6 @@ pub const TextMetrics = struct {
     line_height: f32,
 };
 
-fn utf8SeqLen(bytes: []const u8, i: usize) usize {
-    const b = bytes[i];
-    if (b < 0x80) return 1;
-    if ((b & 0xE0) == 0xC0) return 2;
-    if ((b & 0xF0) == 0xE0) return 3;
-    if ((b & 0xF8) == 0xF0) return 4;
-    return 1;
-}
-
-fn utf8Count(bytes: []const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len) : (n += 1) i += utf8SeqLen(bytes, i);
-    return n;
-}
-
 pub const Renderer = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
