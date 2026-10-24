@@ -27,7 +27,6 @@ const software = @import("software");
 const runner = @import("runner");
 
 pub const app = .{
-    .font_path = "src/font.ttf",
     .title = "elmz - panes",
     .size = .{ .w = 720, .h = 520 },
     .Model = Model,
@@ -272,9 +271,12 @@ pub fn main(init: std.process.Init) !void {
     // Owned by us: loadFont hands back the file bytes and nothing else frees
     // them. The defer order matters -- the canvas is torn down first, since it
     // holds a slice into these bytes.
-    const font_bytes = try software.loadFont(gpa, io, "src/font.ttf");
-    defer gpa.free(font_bytes);
-    canvas.setFont(font_bytes);
+    // By NAME, the way an app names a face in its theme: whichever face this
+    // machine has, or none. With no fonts installed every example still runs and
+    // the text falls back to the built-in bitmap face.
+    const font_bytes = software.loadFontByName(gpa, io, "DejaVu Sans", &.{}) catch null;
+    defer if (font_bytes) |fb| gpa.free(fb);
+    if (font_bytes) |fb| canvas.setFont(fb);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);

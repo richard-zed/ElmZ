@@ -1176,7 +1176,139 @@ pub fn Widget(comptime M: type) type {
             /// Emitted on expiry or on click.
             msg: M,
         },
+        /// A text field.
+        ///
+        /// The VALUE, caret and selection live in the Model, not here: the
+        /// reducer rewrites all three in one step (backspace deletes a byte,
+        /// moves the caret and clears the selection atomically), so a caret
+        /// kept beside it in the widget is a second place for the same fact to
+        /// be wrong. Into the Model, then, exactly like `slider.value`.
+        text_input: struct {
+            edit: *reducer.TextEdit,
+            /// What is DRAWN and MEASURED. Masked fields carry the mask here,
+            /// built by the builder, so measure and paint cannot see different
+            /// bytes -- which is the only way a caret cannot drift on a
+            /// password field.
+            display: []const u8,
+            size: f32 = 14,
+            /// Masks imply single line: a wrapped password is not a thing.
+            mask: bool = false,
+            placeholder: []const u8 = "",
+            /// The field's inner inset. Carried in the payload, not read off
+            /// the element, because the caret's origin is needed by the
+            /// RUNTIME when a click lands: by then the element is gone and
+            /// only this record is left.
+            pad: f32 = 6,
+            /// Emitted when the runtime moves the caret (a click).
+            msg: ?M = null,
+        },
     };
+}
+
+/// Draw a text field's CONTENT: the placeholder, the value, the caret.
+///
+/// This lives here rather than in `widgets.zig` because the caret sits at an
+/// ADVANCE, and advances are the renderer's answer. `view` holds no renderer,
+/// so a caret x computed there would be a guess -- which is the whole reason a
+/// text field cannot be assembled out of rects in the tree.
+///
+/// Selection is not painted yet. The caret and the value are.
+fn paintTextInput(
+    r: Renderer,
+    th: Theme,
+    ti: anytype,
+    rect: Rect,
+    clip: Rect,
+    focused: bool,
+    hov: Hover,
+) void {
+    const pad = ti.pad;
+    const ix = rect.x + pad;
+    const iy = rect.y + pad;
+    const iw = rect.w - 2 * pad;
+    if (iw <= 0 or rect.h <= 0) return;
+    const edit = ti.edit;
+    const size = ti.size;
+
+    // The bytes on screen. A masked field draws `display`, which is one `?`
+    // per codepoint by construction, so the caret index has to be converted
+    // into those same units: a caret placed from the real bytes would point
+    // past the end of what is drawn, which is also how a password leaks its
+    // length.
+    const shown = ti.display;
+    var caret = @min(edit.caret, shown.len);
+    if (ti.mask) {
+        const upto = @min(edit.caret, edit.value.len);
+        caret = std.unicode.utf8CountCodepoints(edit.value[0..upto]) catch upto;
+        caret = @min(caret, shown.len);
+    }
+
+    const ts = r.measureText(shown, size);
+    var line_buf: [64][]const u8 = undefined;
+    const nlines = r.wrapText(shown, size, iw, &line_buf);
+    const lines = line_buf[0..nlines];
+
+    // Which line the caret is on, and how far into it, by pointer difference:
+    // `wrapText` hands back slices of the string it was given.
+    var cline: usize = 0;
+    var coff: usize = caret;
+    if (lines.len > 0) {
+        const base = @intFromPtr(shown.ptr);
+        for (lines, 0..) |ln, i| {
+            const off = @intFromPtr(ln.ptr) - base;
+            if (caret >= off and caret <= off + ln.len) {
+                cline = i;
+                coff = caret - off;
+                break;
+            }
+        }
+    }
+
+    if (shown.len == 0) {
+        if (ti.placeholder.len > 0) r.text(ix, iy, size, .{ .solid = th.text_muted }, ti.placeholder, clip);
+    } else {
+        for (lines, 0..) |ln, i| {
+            if (ln.len == 0) continue;
+            r.text(ix, iy + @as(f32, @floatFromInt(i)) * ts.line_height, size, .{ .solid = th.text }, ln, clip);
+        }
+    }
+
+    if (!focused) return;
+    // Not while typing: a caret that blinks mid-keystroke reads as a stutter,
+    // which is what `since_input` is for.
+    const blink_on = hov.since_input < 0.5 or @mod(hov.elapsed, 1.06) < 0.53;
+    if (!blink_on) return;
+    const line_txt = if (lines.len > 0) lines[@min(cline, lines.len - 1)] else shown[0..0];
+    const pre = line_txt[0..@min(coff, line_txt.len)];
+    const cx = ix + r.advanceText(pre, size, pre.len);
+    const cy = iy + @as(f32, @floatFromInt(cline)) * ts.line_height;
+    r.quad(.{ .x = cx, .y = cy, .w = 1, .h = @max(1, ts.line_height - 2) }, .{ .solid = th.text }, clip);
+}
+
+/// Where a click at pixel `x` puts the caret, as a BYTE OFFSET INTO THE VALUE.
+///
+/// `hitText` answers in the units of the string it was given, and for a masked
+/// field that string is the mask -- one `?` per codepoint -- so its answer is a
+/// CODEPOINT count. On a plain field the display IS the value, so the answer is
+/// already a byte offset. Both have to arrive at a boundary of the VALUE,
+/// because the caret indexes the value no matter what is drawn.
+///
+/// Here rather than in the runner so this is reachable from a headless test: it
+/// takes a `Renderer` and a payload, and needs no window.
+pub fn caretAtClick(r: Renderer, ti: anytype, x: f32) usize {
+    const v = ti.edit.value;
+    const raw = @min(r.hitText(ti.display, ti.size, x), ti.display.len);
+    var n: usize = raw; // codepoint index into the value
+    if (!ti.mask) {
+        // `raw` is a byte offset into the value; count the codepoints before it.
+        n = 0;
+        var i: usize = 0;
+        while (i < raw) : (n += 1) i = reducer.nextBoundary(v, i);
+    }
+    var b: usize = 0;
+    var k: usize = 0;
+    while (k < n) : (k += 1) b = reducer.nextBoundary(v, b);
+    return b;
 }
 
 pub fn Hit(comptime M: type) type {
@@ -2490,6 +2622,18 @@ pub fn Element(comptime M: type) type {
                     }
                 },
             }
+            // A widget's CONTENT, drawn after its box. The box itself is the
+            // element's own `geometry`, which is exactly why a widget may not
+            // add a variant there -- this is the one place its payload paints,
+            // and every arm is listed so a new widget variant is a build error
+            // rather than a control that draws nothing.
+            if (self.widget) |wp| {
+                const field_focused = hov.focus != null and self.key != null and hov.focus.? == self.key.?;
+                switch (wp.*) {
+                    .text_input => |ti| paintTextInput(r, th, ti, rect, clip, field_focused, hov),
+                    .slider, .select, .menu, .toast => {},
+                }
+            }
         }
     };
 }
@@ -2499,6 +2643,12 @@ pub fn Element(comptime M: type) type {
 // ---------------------------------------------------------------------------
 
 const widgets = @import("widgets.zig");
+
+/// The text-editing state machine. Imported rather than duplicated so there is
+/// one reducer: an app holds `elmz.TextEdit` in its Model and never names a
+/// file to get it.
+const reducer = @import("reducer.zig");
+pub const TextEdit = reducer.TextEdit;
 
 pub fn Ui(comptime M: type) type {
     return struct {
@@ -3038,6 +3188,10 @@ pub fn Ui(comptime M: type) type {
 
         pub fn select(self: *Self, o: widgets.SelectOpts(M)) *Elem {
             return widgets.select(self, o);
+        }
+
+        pub fn textInput(self: *Self, o: widgets.TextInputOpts(M)) *Elem {
+            return widgets.textInput(self, o);
         }
 
         pub fn menu(self: *Self, o: widgets.MenuOpts(M)) *Elem {
@@ -4079,6 +4233,11 @@ const Hover = struct {
     /// same way hover is: the runtime says which identity holds focus, and each
     /// element decides whether that is it. Nothing is written back.
     focus: ?u64 = null,
+    /// The frame clock, for anything that blinks. Mirrored into paint for the
+    /// same reason `focus` is: a caret's phase is a property of the ELEMENT
+    /// being drawn, so the element has to be able to ask what time it is.
+    elapsed: f32 = 0,
+    since_input: f32 = 0,
 };
 
 /// The platform layer, expressed in elmz terms only. A backend (SDL3, Wayland
@@ -4527,13 +4686,30 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 }
             }
 
-            try root.paint(r, root_rect, Rect.unbounded, view, &hits, a, .{ .target = resolved, .focus = self.focus }, self.ui.theme);
+            try root.paint(r, root_rect, Rect.unbounded, view, &hits, a, .{ .target = resolved, .focus = self.focus, .elapsed = self.elapsed, .since_input = self.since_input }, self.ui.theme);
 
             // Keys are identity, and identity that collides is worse than no
             // identity: `rebind` would bind a press to whichever twin it met
             // first. So it is a bug -- but not one worth taking the app down
             // for. It is reported the same way a failed allocation is, through
             // the band, which keeps the frame usable and names the fault.
+
+            // Does the keyboard belong to a text field this frame? Derived
+            // from the frame that just painted, so a bare-key shortcut cannot
+            // fire on the same frame focus moved into a field. Read through the
+            // widget payload, not from the kind: only the payload knows, and
+            // `hit()` strips it from the copy it hands out.
+            self.text_editing = blk: {
+                const fk = self.focus orelse break :blk false;
+                for (hits.items) |h| {
+                    const k = h.key orelse continue;
+                    if (k != fk) continue;
+                    const wp = h.widget orelse continue;
+                    if (wp.* == .text_input) break :blk true;
+                }
+                break :blk false;
+            };
+
             // ---- popup layer ----
             // Painted last and hit-tested first, and both fall out of the
             // order these lists are appended in: the prim list paints front to
@@ -5375,7 +5551,7 @@ test "a theme diagnostic reaches the band, file and line intact" {
     var rt = Runtime(KState, KMsg).init(gpa, .{}, kUpdate, themeFailView);
     defer rt.deinit();
 
-    var f = try rt.frame(.{ .w = 300, .h = 120 }, nominalRenderer());
+    var f = try rt.frame(.{ .w = 380, .h = 230 }, nominalRenderer());
     defer f.deinit();
 
     var band = false;
@@ -7679,4 +7855,170 @@ test "progress is proportional, clamped at both ends, and a NaN draws nothing" {
     try std.testing.expect(@abs(rects[0].w * 2 - rects[1].w) <= 1);
     // The clamped one stops at the track, not past it.
     try std.testing.expect(rects[1].w <= 200);
+}
+
+// ---------------------------------------------------------------------------
+// text fields: the seams a field needs and no widget can test alone
+// ---------------------------------------------------------------------------
+
+const FieldState = struct { edit: TextEdit = .{ .value = "hi" }, presses: i32 = 0 };
+
+fn fieldUpdate(m: *FieldState, msg: TMsg) Action(TMsg) {
+    _ = msg;
+    m.presses += 1;
+    return .{};
+}
+
+fn fieldView(m: *FieldState, ui: *Ui(TMsg)) *Element(TMsg) {
+    var kids = [_]*Element(TMsg){
+        ui.button(.{ .label = "b", .msg = .inc, .key = 1 }),
+        ui.textInput(.{ .key = 2, .edit = &m.edit }),
+    };
+    return ui.column(.{ .children = &kids });
+}
+
+test "the runtime knows when a text field owns the keyboard" {
+    // `text_editing` is what makes a bare-key shortcut stand down, and it is
+    // derived from the PAINTED hit list every frame. Nothing else in the suite
+    // builds a text field, so without this the whole derivation could be dead
+    // and every shortcut would keep firing while the user types.
+    const gpa = std.testing.allocator;
+    var rt = Runtime(FieldState, TMsg).init(gpa, .{}, fieldUpdate, fieldView);
+    defer rt.deinit();
+
+    rt.focus = 1;
+    {
+        var f = try rt.frame(.{ .w = 160, .h = 80 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expect(!rt.text_editing);
+        // The field painted and registered anyway -- two regions, not one.
+        try std.testing.expect(f.hits.len >= 2);
+    }
+
+    rt.focus = 2;
+    {
+        var f = try rt.frame(.{ .w = 160, .h = 80 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expect(rt.text_editing);
+    }
+
+    // Focus on nothing is still not editing.
+    rt.focus = null;
+    {
+        var f = try rt.frame(.{ .w = 160, .h = 80 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expect(!rt.text_editing);
+    }
+}
+
+test "a masked click lands on a boundary of the value, not of the mask" {
+    // "päss" is four codepoints and five bytes, and the mask draws four `?`.
+    // `hitText` therefore answers in codepoints; the caret indexes the VALUE.
+    // Getting this wrong puts a password caret one byte past where the click
+    // was -- or splits the umlaut.
+    var edit: TextEdit = .{ .value = "päss" };
+    const ti = .{ .edit = &edit, .display = "????", .size = 20, .mask = true };
+    const r = nominalRenderer();
+
+    const x_two = r.measureText("??", 20).width;
+    const off = caretAtClick(r, ti, x_two);
+    try std.testing.expect(off == 3); // after `ä`, which is two bytes
+    try std.testing.expect(off <= edit.value.len);
+
+    // The far right is the end of the value, whatever the mask counted.
+    const far = caretAtClick(r, ti, 10_000);
+    try std.testing.expectEqual(edit.value.len, far);
+
+    // And a plain field answers in bytes directly.
+    const plain = .{ .edit = &edit, .display = "päss", .size = 20, .mask = false };
+    try std.testing.expectEqual(@as(usize, 3), caretAtClick(r, plain, x_two));
+}
+
+test "typing into the focused field is the app's reducer, and it stays put" {
+    // The value lives in the Model and the builder borrows a pointer to it, so
+    // the two cannot drift: this drives the reducer the way an app's `on_text`
+    // hook does, then re-frames and checks the field is holding the new text.
+    const gpa = std.testing.allocator;
+    var rt = Runtime(FieldState, TMsg).init(gpa, .{}, fieldUpdate, fieldView);
+    defer rt.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    // The caret is the insertion POINT, and a value seeded from outside leaves
+    // it where the Model did: 0 here, so typing goes in front. That is the
+    // contract -- `normalize` repairs a caret, it never moves one to the end to
+    // be helpful -- and an app that wants to append says so.
+    _ = rt.state.edit.typeBytes(arena.allocator(), "there");
+    try std.testing.expectEqualStrings("therehi", rt.state.edit.value);
+    try std.testing.expectEqual(@as(usize, 5), rt.state.edit.caret);
+
+    _ = rt.state.edit.moveTo(rt.state.edit.value.len, false);
+    _ = rt.state.edit.typeBytes(arena.allocator(), "!");
+    try std.testing.expectEqualStrings("therehi!", rt.state.edit.value);
+    try std.testing.expectEqual(@as(usize, 8), rt.state.edit.caret);
+
+    rt.focus = 2;
+    {
+        var f = try rt.frame(.{ .w = 200, .h = 80 }, nominalRenderer());
+        defer f.deinit();
+        try std.testing.expect(rt.text_editing);
+    }
+    // The frame painted the value the Model holds, and the Model still owns it.
+    try std.testing.expectEqualStrings("therehi!", rt.state.edit.value);
+}
+
+test "a field paints its box, its mask and its caret where the caret is" {
+    // The builder had no caller for a long time, so none of this had ever run:
+    // the box, the mask string, the caret quad and the hit region are all
+    // asserted here rather than assumed from the code reading.
+    var edit: TextEdit = .{ .value = "hello" };
+    const D = struct {
+        var e: *TextEdit = undefined;
+        fn v(_: *u8, ui: *Ui(TMsg)) *Element(TMsg) {
+            return ui.column(.{ .children = &.{
+                ui.text(.{ .label = "NAME", .size = 11 }),
+                ui.textInput(.{ .key = 1, .edit = e, .size = 16, .msg = .inc }),
+                ui.textInput(.{ .key = 2, .edit = e, .size = 16, .mask = true, .msg = .inc }),
+            } });
+        }
+    };
+    D.e = &edit;
+    const gpa = std.testing.allocator;
+    var rt = Runtime(u8, TMsg).init(gpa, 0, struct {
+        fn u(_: *u8, _: TMsg) Action(TMsg) {
+            return .{};
+        }
+    }.u, D.v);
+    defer rt.deinit();
+    rt.focus = 1;
+
+    var f = try rt.frame(.{ .w = 380, .h = 200 }, nominalRenderer());
+    defer f.deinit();
+
+    // Both fields registered, in tree order, with their own keys.
+    try std.testing.expectEqual(@as(usize, 2), f.hits.len);
+    try std.testing.expectEqual(@as(?u64, 1), f.hits[0].key);
+    try std.testing.expectEqual(@as(?u64, 2), f.hits[1].key);
+
+    // The masked field draws `?` per codepoint and never the value.
+    var saw_mask = false;
+    var saw_value = false;
+    var caret_w: f32 = 0;
+    for (f.prims) |p| switch (p) {
+        .text => |t| {
+            if (std.mem.eql(u8, t.bytes, "?????")) saw_mask = true;
+            if (std.mem.eql(u8, t.bytes, "hello")) saw_value = true;
+        },
+        // The caret: a hairline quad, drawn at the insertion point.
+        .quad => |q| if (q.rect.w <= 2 and q.rect.h > 8) {
+            caret_w = q.rect.w;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_mask);
+    try std.testing.expect(saw_value);
+    try std.testing.expect(caret_w > 0);
+
+    // ...and the runtime agrees the keyboard belongs to a field.
+    try std.testing.expect(rt.text_editing);
 }

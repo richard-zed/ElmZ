@@ -1,2 +1,184 @@
+# elmz
+
+An Elm-shaped GUI runtime in Zig 0.16, sitting **above** its backend.
+
+A `view` returns a tree of values. Layout measures it, paint emits quads and
+text, and a platform turns those into pixels. Nothing survives the frame.
+
 ### Work in Progress
 Very much a work in progress. The API is definitely not final, and everything is very fluid as we try to get basic functionality. Made this public both as a safety backup, had a data scare, and ease of use grabbing changes.
+
+## Layout
+
+| file | role | knows about |
+|---|---|---|
+| `src/elmz.zig` | tree, layout, primitives, events, `Window` vtable | nothing |
+| `src/software.zig` | primitives -> RGBA8888, PNG encoder | `elmz` |
+| `src/cedar.zig` | TrueType metrics + rasterisation, backed by Cedar | `elmz`, `glyfz` |
+| `src/runner.zig` | loop: poll -> hit-test painted frame -> dispatch -> repaint -> present | `elmz`, `software` |
+| `src/platform_sdl3.zig` | SDL3 window / input / present; draws nothing | `elmz` |
+| `examples/tasks.zig` | a complete app: model, messages, update, view | `elmz`, `software` |
+| `examples/tasks_window.zig` | the same app in a window (21 lines) | `runner`, `platform_sdl3` |
+
+Dependencies point downward only. `runner` knows the `Window` vtable, so a
+Wayland `wl_shm` backend is a drop-in.
+
+## Build
+
+```sh
+zig build test      # 67 tests: library, rasteriser, runner loop
+zig build           # counter, gallery, tasks binaries
+zig build run-tasks # writes tasks_0..2.png (no display needed)
+zig build run-gallery
+```
+
+Window builds need SDL3 **and only those** touch it:
+
+```sh
+zig build run-tasks-sdl3
+zig build run-counter-sdl3
+zig build run-gallery-sdl3
+```
+
+If `pkg-config --modversion sdl3` fails, install it (`libsdl3-dev`,
+`SDL3-devel`, `sdl3`) or skip the window targets — everything else builds
+without SDL.
+
+Cedar, the font backend, is its own package (`glyfz`), pinned by commit and
+hash in `build.zig.zon`. The first build fetches it, so it needs network once;
+after that Zig's package cache serves it offline. Nothing is compiled from C.
+
+## Writing an app
+
+```zig
+pub const app = .{
+    .title = "tasks",
+    .size  = .{ .w = 360, .h = 268 },
+    .bg    = elmz.Color.rgbHex(0x141821),
+    .Model = Model, .Msg = Msg,
+    .update = update, .view = view,
+};
+```
+
+`view` is infallible: builders return `*Element(Msg)`, never an error union.
+An allocation failure is recorded on the `Ui` and the frame degrades instead of
+aborting, which is the only sane answer when there is nothing left to do about
+it.
+
+`runner.runApp(app, gpa, window)` derives the canvas, the background and the
+runtime from that one declaration, so size and colour exist in exactly one
+place.
+
+## Commands (async)
+
+`update` returns `Action(Msg)`, which can carry a `cmd`. The runtime runs it on
+a worker thread; the result arrives as an ordinary message, dispatched by the
+loop. While a command is in flight the loop polls with a 5ms timeout instead of
+blocking, so results surface without waiting for input.
+
+```zig
+.start => |job| return .{ .cmd = .{ .ctx = job, .run = compute } },
+```
+
+`ctx` must outlive the job; the runtime joins its workers on `deinit`.
+
+## Text
+
+UTF-8 is decoded to codepoints before glyph lookup, so multibyte text measures
+and draws as characters rather than bytes. `Renderer.measureText` returns
+
+```zig
+TextMetrics{ width, height, ascent, descent, line_height }
+```
+
+with the vertical values taken from the font, so `line_height` is the font's own
+spacing rather than a multiple of the point size.
+
+`ui.paragraph(bytes, size)` wraps: greedy at spaces, honours `\n`, and an
+overlong single word gets its own line rather than looping. It takes no width —
+`measure(self, r, avail_w)` is handed the width the parent is about to give it,
+and the same number is used to lay it out, which is what keeps `measure` and
+`paint` breaking at the same place. Set `e.width` to hold a paragraph narrower
+than its container. Wrapped text is capped at `elmz.max_lines` (32) — beyond
+that lines are dropped, not allocated.
+
+`Renderer.wrapText` is the seam: it writes slices that point into the caller's
+bytes, so wrapping allocates nothing and the core never touches font internals.
+
+## Theme
+
+Two files live beside the binary -- `zig-out/bin/theme.zon` and
+`zig-out/bin/theme.defaults.zon` -- and a relative `theme_path` is resolved
+against the executable's own directory, not the cwd. Launch it from anywhere
+and it looks the same.
+
+- `theme.defaults.zon` -- every legal key, at its library default. It is the
+  listing, not a backup: copy it, delete what you do not want to change, and
+  the rest inherits.
+- `theme.zon` -- the live file. An app that declares `theme_path` loads it
+  before the first frame and re-reads it when it changes on disk, so a window
+  recolours on save. A file that will not parse keeps the last good palette and
+  puts the loader's own `file line:col: reason` in the error band.
+
+It is seeded beside the binary on the first build and then never overwritten,
+so a rebuild will not revert an edit. `zig build theme` is the deliberate
+overwrite: it restores the file from its master, `src/theme.defaults.zon`, which
+makes it the reset button after a bad edit. No live `theme.zon` ships -- you
+write one, and it overrides only the roles it names.
+
+`zig build run-X` runs the *installed* copy, not the cache artifact, so a run
+sees the same files a hand-launched binary does. (`addRunArtifact` spawns
+`.zig-cache/o/<hash>/`, where no theme file exists -- every run used to fall
+back to compiled defaults while `zig-out/bin/showcase` picked the theme up.)
+
+Precedence, from the bottom up: the palette compiled into the library, then
+`theme.defaults.zon` beside the binary (the app author's house palette), then
+`theme.zon` (the end user's override, which inherits anything it omits). An app
+is themed entirely in `.zon` -- nothing here asks anyone to edit Zig. A missing
+defaults file inherits the library's palette; an unparseable one keeps it and
+puts the file:line diagnostic in the error band.
+
+The same two files name the typeface: `.font = "DejaVu Sans"`. It is a NAME and
+never a path -- the library finds the file, so the file may move without a theme
+knowing where fonts live, and a name that resolves to nothing bands on the name
+the author actually wrote.
+
+Both files are watched, and *either* one changing re-resolves the whole chain.
+That is not tidiness: the override is resolved against the base, so reloading a
+`theme.defaults.zon` edit on its own would leave `theme.zon` resolved against a
+palette that no longer exists. One resolver serves startup and reload, so the
+two cannot disagree.
+
+Watching the files costs one bounded poll per loop iteration -- 250ms by
+default, `theme_poll_ms` -- because the stat happens at the top of the loop.
+With an unbounded wait an edit is only noticed when the pointer enters the
+window, which reads as the theme file doing nothing until you touch it. A file
+that disappears is deliberately ignored: editors save by unlinking and
+renaming, so a transient absence is ordinary, and dropping the palette
+mid-save would flash the fallback colours at the worst possible moment.
+
+## Known gaps
+
+- No window has ever been run on a screen from this tree. `platform_sdl3.zig`
+  typechecks against real SDL3 3.5.0 headers, nothing more.
+- No typeface ships with the library, and none should: a font in the tree is a
+  binary with a licence attached, and every app that wanted a different one
+  would carry a second copy. A theme names one instead -- `.font = "DejaVu
+  Sans"` -- and the library resolves the name against the system font
+  directories. A name that resolves to nothing raises a band and keeps the face
+  already attached; substituting a different typeface is the one outcome ruled
+  out, because it renders, it looks deliberate, and nobody can tell it
+  happened. An app that names nothing draws in the built-in 5x6 bitmap face,
+  which is legible and wrong-looking on purpose. If you do ship your own face,
+  note that `fontTools` subsetting drops the legacy `kern` table and rewrites
+  only GPOS, while the shaper reads only `kern`: a subset silently turns
+  kerning off.
+- Coverage is whatever the named face has. UTF-8 decodes any codepoint, but a
+  face without CJK answers with .notdef, and the built-in face spells ASCII.
+- Clip rects are square only. Setting `clips = true` on an element confines its
+  descendants to its rect, and primitives wholly outside are dropped at emit
+  time rather than handed to the rasterizer — so hit testing needs no clip
+  logic of its own. Rounded corners are not cut: a rect clip on a rounded
+  container still leaks into the corners, because a rounded clip cannot be
+  expressed as a clamped rect and would have to travel with the primitive.
+- No diffing: every change rebuilds the whole tree and repaints every pixel.

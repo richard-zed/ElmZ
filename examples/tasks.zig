@@ -11,7 +11,6 @@ const software = @import("software");
 const runner = @import("runner");
 
 pub const app = .{
-    .font_path = "src/font.ttf",
     .title = "tasks",
     .size = .{ .w = 360, .h = 268 },
     .Model = Model,
@@ -107,9 +106,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Caller-owned bytes: the canvas holds a slice into them, so the
     // free is registered first and therefore runs after the teardown.
-    const font_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
-    defer gpa.free(font_bytes);
-    canvas.setFont(font_bytes);
+    // By NAME, the way an app names a face in its theme: whichever face this
+    // machine has, or none. With no fonts installed every example still runs and
+    // the text falls back to the built-in bitmap face.
+    const font_bytes = software.loadFontByName(gpa, init.io, "DejaVu Sans", &.{}) catch null;
+    defer if (font_bytes) |fb| gpa.free(fb);
+    if (font_bytes) |fb| canvas.setFont(fb);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);

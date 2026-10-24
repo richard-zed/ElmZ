@@ -22,9 +22,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Caller-owned bytes: the canvas holds a slice into them, so the
     // free is registered first and therefore runs after the teardown.
-    const c_bytes = try software.loadFont(gpa, init.io, "src/font.ttf");
-    defer gpa.free(c_bytes);
-    c.setFont(c_bytes);
+    // By NAME, the way an app names a face in its theme: whichever face this
+    // machine has, or none. With no fonts installed every example still runs and
+    // the text falls back to the built-in bitmap face.
+    const c_bytes = software.loadFontByName(gpa, init.io, "DejaVu Sans", &.{}) catch null;
+    defer if (c_bytes) |fb| gpa.free(fb);
+    if (c_bytes) |fb| c.setFont(fb);
     defer c.deinit();
     const r = c.renderer();
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = W, .h = H };

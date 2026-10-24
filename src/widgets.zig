@@ -56,6 +56,78 @@ pub fn SliderOpts(comptime M: type) type {
 /// track's thickness. A 6px track is ungrabbable otherwise, and the
 /// runtime drags whatever region it is given, so widening the region is
 /// the whole fix.
+/// A text field.
+///
+/// `key` is required and not defaulted: it is the focus identity, and a field
+/// that cannot take focus cannot be typed into. The VALUE lives in the Model
+/// behind `edit`, so the same document survives any number of rebuilds.
+pub fn TextInputOpts(comptime M: type) type {
+    return struct {
+        key: u64,
+        edit: *elmz.TextEdit,
+        size: f32 = 14,
+        mask: bool = false,
+        placeholder: []const u8 = "",
+        /// Emitted when the runtime moves the caret -- a click. Typing is the
+        /// app's own hook, because that is where the reducer is called.
+        msg: ?M = null,
+        width: ?f32 = null,
+        height: ?f32 = null,
+        style: ?elmz.Style = null,
+    };
+}
+
+pub fn textInput(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
+    // The mask is built HERE and handed to the payload, so measure and paint
+    // are given the same bytes. Building it in paint would mean the caret was
+    // placed against the value and drawn against the mask, which is exactly
+    // how a password field ends up with a caret past its last character.
+    var display: []const u8 = o.edit.value;
+    var mask = o.mask;
+    if (mask) {
+        const n = std.unicode.utf8CountCodepoints(o.edit.value) catch o.edit.value.len;
+        if (ui.alloc().alloc(u8, n)) |buf| {
+            @memset(buf, '?');
+            display = buf;
+        } else |_| {
+            // Shown plainly rather than shown wrong: a field whose mask could
+            // not be allocated still edits, and `mask = false` keeps the caret
+            // in the same units as the text it is drawn in.
+            mask = false;
+        }
+    }
+
+    const pad: f32 = 6;
+    const e = ui.rect(.{
+        .width = 0,
+        .height = 0,
+        .style = o.style orelse .{ .bg = ui.theme.control, .radius = 4 },
+    });
+    // `RectOpts` sizes are non-optional -- a rect always has a box -- but a
+    // FIELD does not: null width means "as wide as the parent gives me", and
+    // passing a number here would pin every field to a size the author never
+    // asked for. So the size is set on the element, where the field is
+    // optional, rather than through the rect constructor.
+    e.width = o.width;
+    e.height = o.height orelse (o.size * 1.35 + 2 * pad);
+    e.pad = pad;
+    e.key = o.key;
+    e.focusable = true;
+    // The click itself dispatches through the ordinary press path, so the
+    // caret move and the message cannot come from two different places.
+    e.on_press = o.msg;
+    e.widget = ui.payload(.{ .text_input = .{
+        .edit = o.edit,
+        .display = display,
+        .size = o.size,
+        .mask = mask,
+        .placeholder = o.placeholder,
+        .pad = pad,
+        .msg = o.msg,
+    } });
+    return e;
+}
+
 pub fn slider(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const span = o.max - o.min;
     const raw: f32 = if (span == 0) 0 else (o.value.* - o.min) / span;

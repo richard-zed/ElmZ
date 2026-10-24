@@ -127,6 +127,9 @@ pub const Options = struct {
     /// animation clock and the theme watcher: `poll_timeout_ms` defaults to -1,
     /// so without this a toast would sit there until the pointer moved.
     toast_poll_ms: i32 = 100,
+    /// How often to wake while a text field holds focus. Enough for a caret to
+    /// blink evenly; not enough to be a spin, since each wake repaints.
+    caret_poll_ms: i32 = 32,
     /// Draw the frame readout over the painted frame. OFF by default here and
     /// turned on by `runApp` when the binary is built in Debug, because the
     /// overlay costs a timestamp pair per repaint and a text render -- fine
@@ -411,7 +414,7 @@ pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8)
 /// Never unbounded while a file is being watched, and a command in flight keeps
 /// its 5ms budget -- blocking for a theme would starve the async result, which
 /// is the same bug in a different costume.
-fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, toasting: bool) i32 {
+fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, toasting: bool, editing: bool) i32 {
     if (busy) return 5;
     // An animation produces frames with no input at all, so blocking here is
     // exactly the bug: it would freeze until the pointer moved.
@@ -419,6 +422,11 @@ fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, 
     // A toast expires on a wall clock with no input to wake the loop, so the
     // wait is bounded whether or not anything else is moving.
     if (toasting) return if (opts.poll_timeout_ms < 0) opts.toast_poll_ms else @min(opts.poll_timeout_ms, opts.toast_poll_ms);
+    // A caret blinks on a wall clock with no input to wake the loop, so the wait
+    // is bounded whether or not anything else is moving. Same trap as the toast
+    // above, and it has now cost time four separate ways: -1 means block
+    // forever, and nothing that changes with time may sit behind it.
+    if (editing) return if (opts.poll_timeout_ms < 0) opts.caret_poll_ms else @min(opts.poll_timeout_ms, opts.caret_poll_ms);
     if (!watching) return opts.poll_timeout_ms;
     if (opts.poll_timeout_ms < 0) return opts.theme_poll_ms;
     return @min(opts.poll_timeout_ms, opts.theme_poll_ms);
@@ -939,7 +947,7 @@ pub fn run(
             }
         }
 
-        const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null, rt.animate, toasts.items.len > 0);
+        const timeout = effectiveTimeout(opts, rt.asyncBusy(), theme_watch != null, rt.animate, toasts.items.len > 0, rt.text_editing);
         const ev = window.poll(timeout) orelse continue;
         stats.events += 1;
 
@@ -977,6 +985,20 @@ pub fn run(
                     // read NOW, not tracked across frames: the grab is relative
                     // to where the thumb was when it was grabbed.
                     if (rt.press.captured) |h| {
+                        // A click places the caret where it landed. The index
+                        // comes from the RENDERER: an advance depends on the
+                        // face, so the same byte offset is a different x in a
+                        // different font and this cannot be arithmetic on
+                        // lengths. Through the payload, because that is what
+                        // carries the Model pointer and the pad.
+                        if (h.widget) |w| switch (w.*) {
+                            .text_input => |ti| {
+                                const off = elmz.caretAtClick(canvas.renderer(), ti, p[0] - (h.rect.x + ti.pad));
+                                _ = ti.edit.moveTo(off, false);
+                                dirty = true;
+                            },
+                            .slider, .select, .menu, .toast => {},
+                        };
                         if (h.drag) |d| switch (d) {
                             .thumb => |t| drag = .{ .thumb = .{
                                 .d = t,
@@ -1482,9 +1504,7 @@ const Fake = struct {
 };
 
 fn testCanvas(gpa: std.mem.Allocator, w: u32, h: u32) !software.Canvas {
-    var cv = try software.Canvas.init(gpa, w, h);
-    cv.setFont(@embedFile("../src/font.ttf"));
-    return cv;
+    return software.Canvas.init(gpa, w, h);
 }
 
 test "runner paints once, then stops when the window says quit" {
@@ -1540,7 +1560,13 @@ test "a resize rebuilds the canvas at the size the window reports" {
 test "density sizes the canvas in device pixels while layout stays logical" {
     const gpa = std.testing.allocator;
     var canvas = try testCanvas(gpa, 200, 120);
+    // Needs outlines: the bitmap face advances in whole cells, so the same text
+    // at 1x and 2x legitimately disagrees by up to a cell and the comparison
+    // below would be measuring quantisation, not the density seam.
     defer canvas.deinit();
+    const any = software.testing_font.anySystemFont(gpa, std.testing.io) orelse return;
+    defer gpa.free(any);
+    canvas.setFont(any);
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, tView);
     defer rt.deinit();
@@ -2528,18 +2554,18 @@ test "bg, border, and both, each emit the number of prims they cost" {
 
 test "the loop never blocks forever while a theme file is being watched" {
     // Nothing watched: an app is allowed to sleep until input, as before.
-    try std.testing.expectEqual(@as(i32, -1), effectiveTimeout(.{}, false, false, false, false));
+    try std.testing.expectEqual(@as(i32, -1), effectiveTimeout(.{}, false, false, false, false, false));
     // Watched: bounded, or an edit waits for the pointer to enter the window.
-    try std.testing.expectEqual(@as(i32, 250), effectiveTimeout(.{ .theme_path = "theme.zon" }, false, true, false, false));
+    try std.testing.expectEqual(@as(i32, 250), effectiveTimeout(.{ .theme_path = "theme.zon" }, false, true, false, false, false));
     // A command in flight keeps its own tighter budget.
-    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{ .theme_path = "theme.zon" }, true, true, false, false));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{ .theme_path = "theme.zon" }, true, true, false, false, false));
     // An app that already asked for less does not get slowed down.
-    try std.testing.expectEqual(@as(i32, 30), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, true, false, false));
+    try std.testing.expectEqual(@as(i32, 30), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, true, false, false, false));
     // Animating outranks an idle block: a frame clock that waits for input is
     // not a clock. Busy still wins, because a command result is due sooner.
-    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{}, false, false, true, false));
-    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, false, true, false));
-    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, true, false));
+    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{}, false, false, true, false, false));
+    try std.testing.expectEqual(@as(i32, 8), effectiveTimeout(.{ .poll_timeout_ms = 30 }, false, false, true, false, false));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, true, false, false));
 }
 
 test "a relative theme path resolves beside the executable, not the cwd" {
@@ -2824,6 +2850,12 @@ test "the overlay paints inside its panel and nowhere else" {
         .hits = 5,
     });
 
+    // Four lines from (3,3), measured with the face in use. There is no panel:
+    // the readout's extent IS its text, so a pixel bound written for one
+    // typeface stops meaning anything the moment a wider face is attached -- the
+    // built-in bitmap face is far wider than DejaVu at the same size.
+    const four_lines: u32 = @intFromFloat(@ceil(c.renderer().measureText("Ag", 10).line_height * 4 + 6));
+
     var painted: usize = 0;
     var outside: usize = 0;
     var corner: usize = 0;
@@ -2837,7 +2869,7 @@ test "the overlay paints inside its panel and nowhere else" {
                 // Four 13px lines from (3,3): the readout ended up far from
                 // the corner it is wedged into, or it escaped onto pixels it
                 // has no business touching.
-                if (x > 210 or y > 60) outside += 1;
+                if (y >= four_lines) outside += 1;
                 if (x < 24 and y < 16) corner += 1;
             }
         }
@@ -3548,6 +3580,11 @@ test "an arrow key moves the roving cursor, not just the frame" {
 fn roveOwnerView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     const owner = ui.button(.{ .label = "list", .msg = .inc, .key = 30 });
     owner.focusable = true;
+    // A fixture, not a layout test: fixed heights keep four rows inside the
+    // window whichever face measures them. A row clipped out of the canvas
+    // never reaches the hit list, which silently shortens the set and makes
+    // "the far end" mean the second-to-last row.
+    owner.height = 24;
     var kids: [4]*elmz.Element(TMsg) = undefined;
     kids[0] = owner;
     var i: u16 = 0;
@@ -3556,6 +3593,7 @@ fn roveOwnerView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
         r.focusable = true;
         r.roving = 30;
         r.roving_index = i;
+        r.height = 24;
         kids[i + 1] = r;
     }
     return ui.column(.{ .children = &kids });
@@ -3563,7 +3601,10 @@ fn roveOwnerView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
 test "an arrow steps into a roving set from the control that owns it" {
     const gpa = std.testing.allocator;
-    var canvas = try testCanvas(gpa, 200, 200);
+    // Four rows of ANY face have to fit inside the window: a row whose region
+    // is clipped away is not a roving candidate, so a face with taller rows
+    // silently shortens the set and the far end stops being the far end.
+    var canvas = try testCanvas(gpa, 200, 400);
     defer canvas.deinit();
 
     var rt = elmz.Runtime(TState, TMsg).init(gpa, .{}, tUpdate, roveOwnerView);
@@ -3638,9 +3679,9 @@ test "a toast expires on the clock with no input at all" {
 }
 
 test "a live toast shortens the poll, and a busy command still wins" {
-    try std.testing.expectEqual(@as(i32, 100), effectiveTimeout(.{}, false, false, false, true));
-    try std.testing.expectEqual(@as(i32, 50), effectiveTimeout(.{ .poll_timeout_ms = 50 }, false, false, false, true));
-    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, false, true));
+    try std.testing.expectEqual(@as(i32, 100), effectiveTimeout(.{}, false, false, false, true, false));
+    try std.testing.expectEqual(@as(i32, 50), effectiveTimeout(.{ .poll_timeout_ms = 50 }, false, false, false, true, false));
+    try std.testing.expectEqual(@as(i32, 5), effectiveTimeout(.{}, true, false, false, true, false));
 }
 
 const PopState = struct {

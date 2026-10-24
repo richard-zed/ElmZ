@@ -16,7 +16,6 @@ const software = @import("software");
 const runner = @import("runner");
 
 pub const app = .{
-    .font_path = "src/font.ttf",
     .title = "elmz fonts",
     .size = .{ .w = 620, .h = 430 },
     .Model = Model,
@@ -94,10 +93,17 @@ pub fn main(init: std.process.Init) !void {
     // The face, loaded at runtime. `loadFont` tries the path as given, then the
     // same basename beside the executable -- a binary in zig-out/bin finds its
     // font without depending on the launch directory.
-    const bytes = try software.loadFont(gpa, io, "src/font.ttf");
-    defer gpa.free(bytes);
-    canvas.setFont(bytes);
-    try out.print("loaded {d} bytes of typeface\n", .{bytes.len});
+    // By NAME, the way an app names a face in its theme: whichever face this
+    // machine has, or none. With no fonts installed every example still runs and
+    // the text falls back to the built-in bitmap face.
+    const bytes = software.loadFontByName(gpa, io, "DejaVu Sans", &.{}) catch null;
+    defer if (bytes) |fb| gpa.free(fb);
+    if (bytes) |fb| canvas.setFont(fb);
+    if (bytes) |fb| {
+        try out.print("loaded {d} bytes of the system face\n", .{fb.len});
+    } else {
+        try out.print("no system face found; drawing in the built-in face\n", .{});
+    }
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
     defer rt.deinit();

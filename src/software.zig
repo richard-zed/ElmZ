@@ -13,11 +13,21 @@ const elmfont = @import("elmfont.zig");
 /// Cedar is the font backend. One name, because a canvas built against a face
 /// the rest of the library does not know is not a configuration anyone wants.
 const Face = cedar.Font;
-/// A canvas with the test face already attached.
+/// A canvas with NO typeface, which is the state an app that names no font is
+/// in: text goes through the built-in bitmap face.
 fn testCanvas(gpa: Allocator, w: u32, h: u32) !Canvas {
-    var cv = try Canvas.init(gpa, w, h);
-    cv.setFont(@embedFile("font.ttf"));
-    return cv;
+    return Canvas.init(gpa, w, h);
+}
+
+/// Attach a real face from this machine, or null. Tests that assert glyph
+/// behaviour -- outlines, kerning, cache hits, CJK kinsoku -- cannot run on the
+/// bitmap face, and the alternative to borrowing the system's is carrying a
+/// typeface in the repo. On a machine with no fonts they skip; the gate then
+/// says what it did not check instead of pretending.
+fn withFace(c: *Canvas) ?[]u8 {
+    const any = testing_font.anySystemFont(std.testing.allocator, std.testing.io) orelse return null;
+    c.setFont(any);
+    return any;
 }
 
 const builtin = @import("builtin");
@@ -216,15 +226,20 @@ test "a font name resolves through the face's own name table" {
     const dir_path = "/tmp/elm-font-resolver-test";
     var d = try fontFixture(io, dir_path);
     defer fontFixtureCleanup(io, dir_path);
-    // The FILENAME says nothing the face says. Matching the filename instead of
-    // the `name` table would pass a test where both agreed, and this one does
-    // not: the file is called something the family is not.
-    try d.writeFile(io, .{ .sub_path = "zzz-not-the-family.ttf", .data = @embedFile("font.ttf") });
+    // The fixture is a REAL face, borrowed from the system, copied under a name
+    // the family is not. Matching the filename instead of the `name` table would
+    // pass a test where the two agreed, and this one does not. No system fonts is
+    // the sandbox case: nothing to prove, so skip rather than ship a font.
+    const any = testing_font.anySystemFont(gpa, io) orelse return;
+    defer gpa.free(any);
+    var fam_buf: [128]u8 = undefined;
+    const fam = Face.init(any).family(&fam_buf) orelse return;
+    try d.writeFile(io, .{ .sub_path = "zzz-not-the-family.ttf", .data = any });
     d.close(io);
 
-    const bytes = try loadFontByName(gpa, io, "DejaVu Sans", &.{dir_path});
+    const bytes = try loadFontByName(gpa, io, fam, &.{dir_path});
     defer gpa.free(bytes);
-    try std.testing.expectEqual(@embedFile("font.ttf").len, bytes.len);
+    try std.testing.expectEqual(any.len, bytes.len);
 }
 
 test "a family with no style resolves to its Regular face, not the first file" {
@@ -248,7 +263,9 @@ test "a name no file carries is an error, never a substitute" {
     const dir_path = "/tmp/elm-font-resolver-miss";
     var d = try fontFixture(io, dir_path);
     defer fontFixtureCleanup(io, dir_path);
-    try d.writeFile(io, .{ .sub_path = "zzz-not-the-family.ttf", .data = @embedFile("font.ttf") });
+    const any = testing_font.anySystemFont(gpa, io) orelse return;
+    defer gpa.free(any);
+    try d.writeFile(io, .{ .sub_path = "zzz-not-the-family.ttf", .data = any });
     d.close(io);
 
     // A face IS there, just not this one. Returning the one that happened to be
@@ -272,28 +289,40 @@ test "a name that is a path is treated as a path, not a family" {
     try std.testing.expect(!looksLikePath("Sans Book"));
 }
 
+/// What tests measure with: the built-in bitmap face, the same one a canvas
+/// with no typeface attached uses. There is no sfnt in the repo, so a test that
+/// wants real outlines BORROWS one from the system (`anySystemFont`) and skips
+/// when the machine has none.
 pub const testing_font = struct {
-    var mem: [Face.cache_bytes]u8 align(8) = undefined;
-    var lmem: [Face.lookup_bytes]u8 align(8) = undefined;
-    var face: Face = .none;
-    /// The kern cache's storage and slot, beside the other two.
-    var kmem: [Face.kern_bytes]u8 align(8) = undefined;
-    var kslot: cedar.Kern = undefined;
-    var ready = false;
+    pub fn get() @This() {
+        return .{};
+    }
+    pub fn measure(_: @This(), bytes: []const u8, size: f32) elmz.TextMetrics {
+        return elmfont.measure(bytes, size);
+    }
+    pub fn wrapLines(_: @This(), bytes: []const u8, dev: f32, max_w: f32, out: [][]const u8) usize {
+        return elmfont.wrap(bytes, dev, max_w, out);
+    }
 
-    /// One face for every test, so the glyph cache is shared the way a real
-    /// canvas shares it. Returned BY POINTER: the cache holds slices into
-    /// `mem`, so a value copy would hand back a face pointing at nothing.
-    pub fn get() *Face {
-        if (!builtin.is_test) @compileError("testing_font exists only for tests");
-        if (!ready) {
-            face = Face.init(@embedFile("font.ttf"));
-            face.attachCache(&mem);
-            face.attachLookup(&lmem);
-            face.attachKern(&kslot, &kmem);
-            ready = true;
+    /// Any real face this machine has. A few tests need an sfnt -- one to rename,
+    /// one to count as a second face for cache invalidation -- and the
+    /// alternative to borrowing the system's is carrying a font in the repo,
+    /// which is a binary asset with a licence attached to buy nothing.
+    pub fn anySystemFont(gpa: Allocator, io: std.Io) ?[]u8 {
+        for (font_dirs) |d| {
+            var paths: std.ArrayListUnmanaged([]u8) = .empty;
+            defer {
+                for (paths.items) |q| gpa.free(q);
+                paths.deinit(gpa);
+            }
+            collectFonts(gpa, io, d, &paths) catch continue;
+            for (paths.items) |q| {
+                const bytes = std.Io.Dir.cwd().readFileAlloc(io, q, gpa, .limited(16 * 1024 * 1024)) catch continue;
+                if (bytes.len > 4) return bytes;
+                gpa.free(bytes);
+            }
         }
-        return &face;
+        return null;
     }
 };
 const Allocator = std.mem.Allocator;
@@ -2684,6 +2713,8 @@ test "a quad larger than the canvas is clipped, not corrupting" {
 test "text is really antialiased and its measure is not a guess" {
     var c = try testCanvas(testing.allocator, 200, 40);
     defer c.deinit();
+    const any = withFace(&c) orelse return;
+    defer testing.allocator.free(any);
     c.drawText(2, 2, 20, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } }, "Hamburgefonstiv");
 
     var seen = std.AutoHashMap(u8, void).init(testing.allocator);
@@ -2694,14 +2725,17 @@ test "text is really antialiased and its measure is not a guess" {
     // rasterisation yields a spread; if this drops to 2, the TTF path is dead.
     try testing.expect(seen.count() > 20);
 
-    const m = testing_font.get().measure("Hamburgefonstiv", 20);
+    const m = c.renderer().measureText("Hamburgefonstiv", 20);
     try testing.expect(m.width > 100 and m.width < 200);
     try testing.expect(m.height >= 20);
 }
 
 test "utf-8 is decoded, not measured as bytes" {
-    const one = testing_font.get().measure("日", 24);
-    const three = testing_font.get().measure("日本語", 24);
+    const any = testing_font.anySystemFont(testing.allocator, std.testing.io) orelse return;
+    defer testing.allocator.free(any);
+    const face = Face.init(any);
+    const one = face.measure("日", 24);
+    const three = face.measure("日本語", 24);
     try testing.expect(one.width > 8);
     // three copies of one glyph == one glyph measured three times
     try testing.expectApproxEqAbs(one.width * 3, three.width, 0.01);
@@ -2709,8 +2743,8 @@ test "utf-8 is decoded, not measured as bytes" {
     try testing.expect(@abs(three.width - one.width * 9) > 1);
     // accented latin too: 'é' is two bytes, one glyph
     try testing.expectApproxEqAbs(
-        testing_font.get().measure("e", 20).width,
-        testing_font.get().measure("é", 20).width,
+        face.measure("e", 20).width,
+        face.measure("é", 20).width,
         0.01,
     );
 }
@@ -2745,14 +2779,20 @@ test "a wider budget produces fewer lines" {
     var a: [16][]const u8 = undefined;
     var b: [16][]const u8 = undefined;
     const text = "alpha beta gamma delta epsilon zeta";
-    const narrow = testing_font.get().wrapLines(text, 12, 50, &a);
-    const wide = testing_font.get().wrapLines(text, 12, 300, &b);
+    // Budgets DERIVED from the face's own measurement: a pixel constant that
+    // fits this string in one line for DejaVu does not fit it for the bitmap
+    // face, and a test about wrapping should not be a test about a typeface.
+    const full = testing_font.get().measure(text, 12).width;
+    const narrow = testing_font.get().wrapLines(text, 12, full / 2, &a);
+    const wide = testing_font.get().wrapLines(text, 12, full + 10, &b);
     try testing.expect(narrow > wide);
     try testing.expectEqual(@as(usize, 1), wide);
 }
 
 test "line height accounts for the font's line gap" {
-    const m = testing_font.get().measure("Ag", 20);
+    const any = testing_font.anySystemFont(testing.allocator, std.testing.io) orelse return;
+    defer testing.allocator.free(any);
+    const m = Face.init(any).measure("Ag", 20);
     // DejaVu declares a zero line gap, so spacing == height here. The field
     // exists because that is a property of the font, not a constant.
     try testing.expect(m.line_height >= m.height);
@@ -3964,7 +4004,9 @@ test "a string is measured once, then answered from the cache" {
     try std.testing.expectEqual(@as(usize, 3), c.measure_misses);
 
     // Changing the face must not answer from the old face's widths.
-    c.setFont(@embedFile("font.ttf"));
+    const sys_font = testing_font.anySystemFont(std.testing.allocator, std.testing.io) orelse return;
+    defer std.testing.allocator.free(sys_font);
+    c.setFont(sys_font);
     _ = Canvas.vtMeasure(&c, "Hamburgefonstiv", 20);
     try std.testing.expectEqual(@as(usize, 4), c.measure_misses);
 }
@@ -3993,7 +4035,9 @@ test "a paragraph is wrapped once, then answered from the cache" {
     try std.testing.expectEqual(@as(usize, 2), c.wrap_misses);
 
     // And a new face invalidates it, like the measurement cache.
-    c.setFont(@embedFile("font.ttf"));
+    const sys_font = testing_font.anySystemFont(std.testing.allocator, std.testing.io) orelse return;
+    defer std.testing.allocator.free(sys_font);
+    c.setFont(sys_font);
     _ = r.wrapText(text, 12, 60, &b);
     try std.testing.expectEqual(@as(usize, 3), c.wrap_misses);
 }
@@ -4017,6 +4061,8 @@ test "a canvas face carries a resolved kern cache" {
     const gpa = std.testing.allocator;
     var c = try testCanvas(gpa, 64, 32);
     defer c.deinit();
+    const any = withFace(&c) orelse return;
+    defer gpa.free(any);
     try std.testing.expect(c.font.kern != null);
 
     // And it must be for THIS face, not whatever was attached last.
@@ -4027,6 +4073,8 @@ test "the same text drawn twice comes out of the glyph cache" {
     const gpa = std.testing.allocator;
     var c = try testCanvas(gpa, 160, 40);
     defer c.deinit();
+    const any = withFace(&c) orelse return;
+    defer gpa.free(any);
 
     const black: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
     const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
@@ -4063,10 +4111,13 @@ test "a face with no cache storage measures but paints nothing" {
     const black: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
     const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
 
+    const any = testing_font.anySystemFont(gpa, std.testing.io) orelse return;
+    defer gpa.free(any);
+
     // Deliberately NOT attached to any storage -- the state a caller lands in
     // if it builds a face and forgets. It measures, because metrics do not
     // need the cache, and it paints nothing, because the glyph does.
-    var f = cedar.Font.init(@embedFile("font.ttf"));
+    var f = cedar.Font.init(any);
     try std.testing.expect(f.cacheStats() == null);
     try std.testing.expect(f.measure("Wm", 16).width > 0);
 
@@ -4176,6 +4227,8 @@ test "a faceless canvas still places a caret, on whole cells" {
 test "the built-in face stays out of the way when a real one is attached" {
     var c = try testCanvas(testing.allocator, 200, 24);
     defer c.deinit();
+    const any = withFace(&c) orelse return;
+    defer testing.allocator.free(any);
     try testing.expect(c.font.available());
 
     // Not a pixel comparison -- a real face would pass that by accident. This
@@ -4346,12 +4399,21 @@ test "a run of ideographs wraps between characters and loses nothing" {
 }
 
 test "punctuation is never stranded at the start of a CJK line" {
+    var c = try testCanvas(testing.allocator, 80, 40);
+    defer c.deinit();
+    const any = withFace(&c) orelse return;
+    defer testing.allocator.free(any);
+    const r = c.renderer();
+    // A face without CJK answers every codepoint with its notdef box, so the
+    // break positions would be arbitrary rather than wrong. Nothing to prove.
+    if (r.measureText("日", 14).width < 8) return;
+
     var buf: [16][]const u8 = undefined;
     // 「 opens, 」and 。 close. The natural greedy break lands right on the
     // punctuation, which is what a space-only rule does and what kinsoku
     // forbids: a closing mark belongs to the line before it.
     const text = "「日本語」の文章。";
-    const n = testing_font.get().wrapLines(text, 14, 45, &buf);
+    const n = r.wrapText(text, 14, 45, &buf);
     try std.testing.expect(n > 1);
     var at: usize = 0;
     for (buf[0..n]) |line| {

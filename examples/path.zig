@@ -71,9 +71,12 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     var c = try software.Canvas.init(gpa, W, H);
-    const c_bytes = try software.loadFont(gpa, io, "src/font.ttf");
-    defer gpa.free(c_bytes);
-    c.setFont(c_bytes);
+    // By NAME, the way an app names a face in its theme: whichever face this
+    // machine has, or none. With no fonts installed every example still runs and
+    // the text falls back to the built-in bitmap face.
+    const c_bytes = software.loadFontByName(gpa, io, "DejaVu Sans", &.{}) catch null;
+    defer if (c_bytes) |fb| gpa.free(fb);
+    if (c_bytes) |fb| c.setFont(fb);
     defer c.deinit();
     const r = c.renderer();
     const clip = elmz.Rect{ .x = 0, .y = 0, .w = W, .h = H };
