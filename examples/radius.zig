@@ -50,11 +50,16 @@ fn view(_: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         caption,
     }, .width = 300 + 2 * 14, .gap = 6, .style = .{ .pad = 14, .bg = ui.theme.panel, .border = ui.theme.text_muted, .radius = 18 } });
 
+    const line0 = cards(ui, true);
+    line0.margin_top = 4;
+    const line1 = cards(ui, false);
+    line1.margin_top = 6;
+    inner.margin_top = 10;
     const col = ui.column(.{ .children = &.{
         ui.text(.{ .label = "corner radii", .size = 22 }),
-        ui.spaceBefore(cards(ui, true), 4),
-        ui.spaceBefore(cards(ui, false), 6),
-        ui.spaceBefore(inner, 10),
+        line0,
+        line1,
+        inner,
     }, .gap = 4, .style = .{ .pad = 24, .bg = ui.theme.bg } });
     return col;
 }

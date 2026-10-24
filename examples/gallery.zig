@@ -74,12 +74,15 @@ fn overviewBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
 
     const meter = ui.bar(.{ .value = @as(f32, @floatFromInt(m.level)) / 10.0, .height = 12 });
 
+    const line0 = ui.textFmt("level {d} of 10", .{m.level}, 14);
+    line0.margin_top = 6;
+    controls.margin_top = 10;
     return ui.column(.{ .children = &.{
         ui.text(.{ .label = "PRIMITIVES", .size = 10, .tone = .muted }),
         ui.text(.{ .label = "text / quad / bar", .size = 14 }),
-        ui.spaceBefore(ui.textFmt("level {d} of 10", .{m.level}, 14), 6),
+        line0,
         meter,
-        ui.spaceBefore(controls, 10),
+        controls,
     } });
 }
 
@@ -104,13 +107,16 @@ fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
         rows[i] = line;
     }
 
+    rows[0].margin_top = 2;
+    const line1 = ui.textFmt("selected {s}", .{names[m.selected]}, 10);
+    line1.margin_top = 4;
     return ui.column(.{ .children = &.{
         ui.text(.{ .label = "A LIST", .size = 10, .tone = .muted }),
-        ui.spaceBefore(rows[0], 2),
+        rows[0],
         rows[1],
         rows[2],
         rows[3],
-        ui.spaceBefore(ui.textFmt("selected {s}", .{names[m.selected]}, 10), 4),
+        line1,
     } });
 }
 
@@ -118,7 +124,7 @@ fn aboutBody(ui: *elmz.Ui(Msg)) !*elmz.Element(Msg) {
     return ui.column(.{ .children = &.{
         ui.text(.{ .label = "HOW IT WORKS", .size = 10, .tone = .muted }),
         ui.text(.{ .label = "NO RETAINED TREE", .size = 14 }),
-        ui.spaceBefore(ui.text(.{ .label = "view returns a tree of values.", .size = 10, .tone = .muted }), 4),
+        ui.text(.{ .label = "view returns a tree of values.", .size = 10, .tone = .muted, .margin_top = 4 }),
         ui.text(.{ .label = "no widgets; just elements, gaps, pads.", .size = 10, .tone = .muted }),
         ui.text(.{ .label = "layout measures it, paint emits", .size = 10, .tone = .muted }),
         ui.text(.{ .label = "quads and text, and the backend", .size = 10, .tone = .muted }),
@@ -142,14 +148,18 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const panel = ui.column(.{ .children = &.{body}, .gap = 6, .style = .{ .pad = 16, .bg = ui.theme.panel, .border = ui.theme.border } });
 
+    nav.margin_top = 8;
+    panel.margin_top = 6;
+    const line2 = ui.textFmt("clicks {d}   view {s}   level {d}", .{
+        m.clicks, @tagName(m.tab), m.level,
+    }, 10);
+    line2.margin_top = 8;
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ GALLERY", .size = 22 }),
         ui.text(.{ .label = "a runtime above its backend", .size = 10, .tone = .muted }),
-        ui.spaceBefore(nav, 8),
-        ui.spaceBefore(panel, 6),
-        ui.spaceBefore(ui.textFmt("clicks {d}   view {s}   level {d}", .{
-            m.clicks, @tagName(m.tab), m.level,
-        }, 10), 8),
+        nav,
+        panel,
+        line2,
     }, .gap = 4, .style = .{ .pad = 22 } });
     return root;
 }

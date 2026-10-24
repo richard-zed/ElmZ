@@ -213,15 +213,19 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     }
     const fan_row = ui.row(.{ .children = &cards, .gap = 22 });
 
+    note.margin_top = 18;
+    renderer_row.margin_top = 14;
+    mode_row.margin_top = 14;
+    fan_row.margin_top = 14;
     const body = ui.column(.{ .children = &.{
         title,
-        ui.spaceBefore(note, 18),
-        ui.spaceBefore(ui.text(.{ .label = "same halo, two renderers", .size = 15 }), 26),
-        ui.spaceBefore(renderer_row, 14),
-        ui.spaceBefore(ui.text(.{ .label = "one ramp, three cuts", .size = 15 }), 30),
-        ui.spaceBefore(mode_row, 14),
-        ui.spaceBefore(ui.text(.{ .label = "one ramp, thrown", .size = 15 }), 30),
-        ui.spaceBefore(fan_row, 14),
+        note,
+        ui.text(.{ .label = "same halo, two renderers", .size = 15, .margin_top = 26 }),
+        renderer_row,
+        ui.text(.{ .label = "one ramp, three cuts", .size = 15, .margin_top = 30 }),
+        mode_row,
+        ui.text(.{ .label = "one ramp, thrown", .size = 15, .margin_top = 30 }),
+        fan_row,
     } });
 
     // The root FILLS the window. Without a height it is content-sized, the

@@ -80,7 +80,8 @@ fn listRow(ui: *elmz.Ui(Msg), label: []const u8, meta: []const u8, msg: Msg, key
 
     const note = ui.text(.{ .label = meta, .size = 11, .tone = .muted });
 
-    const row = ui.row(.{ .children = &.{ name, ui.spaceBefore(note, 10) }, .style = .{ .pad = 6, .radius = 6 } });
+    note.margin_left = 10;
+    const row = ui.row(.{ .children = &.{ name, note }, .style = .{ .pad = 6, .radius = 6 } });
     return row;
 }
 
@@ -135,11 +136,14 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const usage = ui.text(.{ .label = "62% of a week of frames", .size = 11, .tone = .muted });
 
+    rows.margin_top = 10;
+    progress.margin_top = 14;
+    usage.margin_top = 8;
     const left = ui.column(.{ .children = &.{
         card_head,
-        ui.spaceBefore(rows, 10),
-        ui.spaceBefore(progress, 14),
-        ui.spaceBefore(usage, 8),
+        rows,
+        progress,
+        usage,
     }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } });
 
     // -- right card: actions, one of them inert ----------------------------
@@ -151,11 +155,14 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const inert_note = ui.text(.{ .label = "the second button stays in the hit list with active = false, so a click cannot land on whatever is behind it", .size = 11, .tone = .muted, .wrap = true, .width = 188 });
 
+    primary.margin_top = 10;
+    inert.margin_top = 8;
+    inert_note.margin_top = 12;
     const right = ui.column(.{ .children = &.{
         actions_head,
-        ui.spaceBefore(primary, 10),
-        ui.spaceBefore(inert, 8),
-        ui.spaceBefore(inert_note, 12),
+        primary,
+        inert,
+        inert_note,
     }, .width = 216, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border_grad = edge_fill } });
 
     // -- body and page -----------------------------------------------------
@@ -163,11 +170,14 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const footer = ui.text(.{ .label = "frames: showcase.png, showcase-hover.png, showcase-error.png", .size = 11, .tone = .muted });
 
+    nav.margin_top = 16;
+    body.margin_top = 14;
+    footer.margin_top = 16;
     const root = ui.column(.{ .children = &.{
         head,
-        ui.spaceBefore(nav, 16),
-        ui.spaceBefore(body, 14),
-        ui.spaceBefore(footer, 16),
+        nav,
+        body,
+        footer,
     }, .style = .{ .pad = 24 } });
     return root;
 }

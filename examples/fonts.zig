@@ -48,32 +48,18 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
                 .size = 13,
                 .tone = .muted,
             }),
-            ui.spaceBefore(ui.bar(.{ .value = 1 }), 16),
+            ui.bar(.{ .value = 1, .margin_top = 16 }),
 
-            ui.spaceBefore(ui.text(.{ .label = "34px  Handgloves", .size = 34 }), 20),
-            ui.spaceBefore(ui.text(.{ .label = "24px  Handgloves", .size = 24 }), 12),
-            ui.spaceBefore(ui.text(.{ .label = "18px  Handgloves", .size = 18 }), 10),
-            ui.spaceBefore(ui.text(.{ .label = "14px  Handgloves", .size = 14 }), 8),
-            ui.spaceBefore(ui.text(.{ .label = "11px  Handgloves", .size = 11, .tone = .muted }), 8),
+            ui.text(.{ .label = "34px  Handgloves", .size = 34, .margin_top = 20 }),
+            ui.text(.{ .label = "24px  Handgloves", .size = 24, .margin_top = 12 }),
+            ui.text(.{ .label = "18px  Handgloves", .size = 18, .margin_top = 10 }),
+            ui.text(.{ .label = "14px  Handgloves", .size = 14, .margin_top = 8 }),
+            ui.text(.{ .label = "11px  Handgloves", .size = 11, .tone = .muted, .margin_top = 8 }),
 
-            ui.spaceBefore(ui.text(.{
-                .label = "0123456789 + - * / = ( ) [ ] { } % $ #",
-                .size = 17,
-            }), 18),
-            ui.spaceBefore(ui.text(.{
-                .label = "The quick brown fox jumps over the lazy dog.",
-                .size = 17,
-            }), 8),
-            ui.spaceBefore(ui.text(.{
-                .label = "MIXED case, muted tone, tabular-ish 1,234.56",
-                .size = 17,
-                .tone = .muted,
-            }), 8),
-            ui.spaceBefore(ui.text(.{
-                .label = "rtl/arabic, CJK and emoji are NOT here yet -- one face, no fallback chain",
-                .size = 12,
-                .tone = .muted,
-            }), 14),
+            ui.text(.{ .label = "0123456789 + - * / = ( ) [ ] { } % $ #", .size = 17, .margin_top = 18 }),
+            ui.text(.{ .label = "The quick brown fox jumps over the lazy dog.", .size = 17, .margin_top = 8 }),
+            ui.text(.{ .label = "MIXED case, muted tone, tabular-ish 1,234.56", .size = 17, .tone = .muted, .margin_top = 8 }),
+            ui.text(.{ .label = "rtl/arabic, CJK and emoji are NOT here yet -- one face, no fallback chain", .size = 12, .tone = .muted, .margin_top = 14 }),
         },
         .style = .{ .pad = 28, .bg = th.bg },
     });

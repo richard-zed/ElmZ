@@ -115,7 +115,8 @@ fn listRow(ui: *elmz.Ui(Msg), i: usize) *elmz.Element(Msg) {
         .key = 100 + i,
     });
     const meta = ui.text(.{ .label = ui.fmt("{d} prims", .{(i * 7) % 41}), .size = 11, .tone = .muted });
-    return ui.row(.{ .children = &.{ name, ui.spaceBefore(meta, 10) }, .style = .{ .pad = 5, .radius = 6 } });
+    meta.margin_left = 10;
+    return ui.row(.{ .children = &.{ name, meta }, .style = .{ .pad = 5, .radius = 6 } });
 }
 
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
@@ -167,46 +168,37 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // baseline, which is the alignment a line of type actually wants.
     const big = ui.text(.{ .label = "24", .size = 26 });
     const cap = ui.text(.{ .label = "rows in the list", .size = 12, .tone = .muted });
-    const stats = ui.row(.{ .children = &.{ big, ui.spaceBefore(cap, 8) } });
+    const stats = ui.row(.{ .children = &.{ big, cap } });
+    cap.margin_left = 8;
+    stats.margin_top = 16;
     stats.row_align = .baseline;
 
+    primary.margin_top = 10;
+    inert.margin_top = 8;
     const panel: *elmz.Element(Msg) = switch (m.tab) {
         1 => ui.column(.{ .children = &.{
             ui.text(.{ .label = "four sizes, one face", .size = 26 }),
-            ui.spaceBefore(ui.text(.{ .label = "18 - a section heading", .size = 18 }), 10),
-            ui.spaceBefore(ui.text(.{ .label = "13 - body text, the size the list rows use", .size = 13 }), 8),
-            ui.spaceBefore(ui.text(.{ .label = "11 - captions and metadata", .size = 11, .tone = .muted }), 8),
-            ui.spaceBefore(ui.text(.{
-                .label = "A second FACE is not reachable from here yet: the canvas holds one, so per-element type waits for the font roadmap.",
-                .size = 11,
-                .tone = .muted,
-                .wrap = true,
-            }), 14),
+            ui.text(.{ .label = "18 - a section heading", .size = 18, .margin_top = 10 }),
+            ui.text(.{ .label = "13 - body text, the size the list rows use", .size = 13, .margin_top = 8 }),
+            ui.text(.{ .label = "11 - captions and metadata", .size = 11, .tone = .muted, .margin_top = 8 }),
+            ui.text(.{ .label = "A second FACE is not reachable from here yet: the canvas holds one, so per-element type waits for the font roadmap.", .size = 11, .tone = .muted, .wrap = true, .margin_top = 14 }),
         }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } }),
         2 => ui.column(.{ .children = &.{
             ui.text(.{ .label = "notes", .size = 18 }),
-            ui.spaceBefore(ui.text(.{
-                .label = "Wrapped text breaks at spaces and at newlines and is measured at the width it is given, so this paragraph reflows with the panel rather than running past it. A single word wider than the box is elided, not spilled.",
-                .size = 13,
-                .wrap = true,
-            }), 10),
-            ui.spaceBefore(stats, 16),
+            ui.text(.{ .label = "Wrapped text breaks at spaces and at newlines and is measured at the width it is given, so this paragraph reflows with the panel rather than running past it. A single word wider than the box is elided, not spilled.", .size = 13, .wrap = true, .margin_top = 10 }),
+            stats,
         }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } }),
         else => ui.column(.{ .children = &.{
             actions_head,
-            ui.spaceBefore(primary, 10),
-            ui.spaceBefore(inert, 8),
-            ui.spaceBefore(stats, 16),
-            ui.spaceBefore(ui.text(.{
-                .label = "The disabled button stays in the hit list with active = false, so a click cannot fall through to whatever is behind it.",
-                .size = 11,
-                .tone = .muted,
-                .wrap = true,
-            }), 12),
+            primary,
+            inert,
+            stats,
+            ui.text(.{ .label = "The disabled button stays in the hit list with active = false, so a click cannot fall through to whatever is behind it.", .size = 11, .tone = .muted, .wrap = true, .margin_top = 12 }),
         }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } }),
     };
 
-    const body = ui.row(.{ .children = &.{ vp, ui.spaceBefore(panel, 16) }, .gap = 4 });
+    panel.margin_left = 16;
+    const body = ui.row(.{ .children = &.{ vp, panel }, .gap = 4 });
 
     const footer = ui.text(.{
         .label = "Tab walks the named controls; Escape or a click on empty space closes the menu",
@@ -214,11 +206,14 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .tone = .muted,
     });
 
+    nav.margin_top = 14;
+    body.margin_top = 14;
+    footer.margin_top = 14;
     const page = ui.column(.{ .children = &.{
         head,
-        ui.spaceBefore(nav, 14),
-        ui.spaceBefore(body, 14),
-        ui.spaceBefore(footer, 14),
+        nav,
+        body,
+        footer,
     }, .style = .{ .pad = 20 } });
 
     // -- the popup ---------------------------------------------------------

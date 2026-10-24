@@ -75,7 +75,8 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 92 });
 
-    const pair = ui.row(.{ .children = &.{ a, ui.spaceBefore(b, 16) } });
+    b.margin_left = 16;
+    const pair = ui.row(.{ .children = &.{ a, b } });
 
     const tally = ui.text(.{ .label = ui.fmt("last fired: {s}      total: {d}", .{ whichName(m.last), m.total }), .size = 12, .tone = .muted });
 
@@ -84,15 +85,21 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         "stays dark, because the press owns the click. Release " ++
         "elsewhere and nothing fires; release back on it and it does.", .size = 12, .tone = .muted, .wrap = true });
 
+    pair.margin_top = 14;
+    const line0 = ui.textFmt("A fired {d}  ·  B fired {d}", .{ m.a, m.b }, 18);
+    line0.margin_top = 14;
+    tally.margin_top = 4;
+    reset.margin_top = 16;
+    body.margin_top = 18;
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ", .size = 22 }),
         ui.text(.{ .label = "the press owns the click, not the release", .size = 12, .tone = .muted }),
-        ui.spaceBefore(pair, 14),
-        ui.spaceBefore(ui.textFmt("A fired {d}  ·  B fired {d}", .{ m.a, m.b }, 18), 14),
-        ui.spaceBefore(tally, 4),
-        ui.spaceBefore(reset, 16),
-        ui.spaceBefore(body, 18),
-        ui.spaceBefore(ui.text(.{ .label = "Esc quits.", .size = 12, .tone = .muted }), 12),
+        pair,
+        line0,
+        tally,
+        reset,
+        body,
+        ui.text(.{ .label = "Esc quits.", .size = 12, .tone = .muted, .margin_top = 12 }),
     }, .style = .{ .pad = 24 } });
     return root;
 }

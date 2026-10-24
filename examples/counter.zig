@@ -48,15 +48,22 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const inc = ui.button(.{ .label = "+", .msg = .inc, .width = 56 });
     const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 92 });
 
-    const acts = ui.row(.{ .children = &.{ dec, ui.spaceBefore(inc, 8), ui.spaceBefore(reset, 14) } });
+    inc.margin_left = 8;
+    reset.margin_left = 14;
+    const acts = ui.row(.{ .children = &.{ dec, inc, reset } });
 
+    const line0 = ui.textFmt("{d}", .{m.count}, 42);
+    line0.margin_top = 10;
+    acts.margin_top = 8;
+    const line1 = ui.textFmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }, 12);
+    line1.margin_top = 10;
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ", .size = 22 }),
         ui.text(.{ .label = "an elm-shaped runtime, zig 0.16", .size = 12, .tone = .muted }),
-        ui.spaceBefore(ui.textFmt("{d}", .{m.count}, 42), 10),
-        ui.spaceBefore(acts, 8),
-        ui.spaceBefore(ui.bar(.{ .value = @as(f32, @floatFromInt(m.count + 3)) / 8.0 }), 16),
-        ui.spaceBefore(ui.textFmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }, 12), 10),
+        line0,
+        acts,
+        ui.bar(.{ .value = @as(f32, @floatFromInt(m.count + 3)) / 8.0, .margin_top = 16 }),
+        line1,
     }, .style = .{ .pad = 24 } });
     return root;
 }

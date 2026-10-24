@@ -1813,9 +1813,10 @@ fn sView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
         ui.button(.{ .label = "inc", .msg = .inc }),
     }, .gap = 6, .style = .{ .pad = 4, .border = ui.theme.accent } });
 
+    inner.margin_top = 4;
     const box = ui.column(.{ .children = &.{
         ui.text(.{ .label = "stress", .size = 14 }),
-        ui.spaceBefore(inner, 4),
+        inner,
         ui.bar(.{ .value = 0.5 }),
     }, .gap = 2, .style = .{ .pad = 10, .bg = ui.theme.panel, .border = ui.theme.text_muted } });
     return box;
@@ -2225,7 +2226,8 @@ fn clipView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     const a = ui.rect(.{ .width = 600, .height = 60, .style = .{ .bg = ui.theme.accent } });
     const b = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = ui.theme.accent } });
     const c = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = ui.theme.accent } }); // starts at y = 90, wholly outside
-    const box = ui.column(.{ .children = &.{ a, b, ui.spaceBefore(c, 10) }, .width = 120, .height = 80 });
+    c.margin_top = 10;
+    const box = ui.column(.{ .children = &.{ a, b, c }, .width = 120, .height = 80 });
     box.clips = true;
     // nested, so the box is painted at the size it measured
     return ui.column(.{ .children = &.{box} });

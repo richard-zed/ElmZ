@@ -71,17 +71,22 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 68 });
 
+    const line0 = ui.textFmt("{d}/{d} done", .{ done, m.items.len }, 10);
+    line0.margin_left = 10;
+    reset.margin_left = 10;
     const foot = ui.row(.{ .children = &.{
         ui.text(.{ .label = "click a row to toggle", .size = 10, .tone = .muted }),
-        ui.spaceBefore(ui.textFmt("{d}/{d} done", .{ done, m.items.len }, 10), 10),
-        ui.spaceBefore(reset, 10),
+        line0,
+        reset,
     } });
 
+    list.margin_top = 10;
+    foot.margin_top = 10;
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "TASKS", .size = 20 }),
         ui.text(.{ .label = "one model, one update, one view", .size = 10, .tone = .muted }),
-        ui.spaceBefore(list, 10),
-        ui.spaceBefore(foot, 10),
+        list,
+        foot,
     }, .gap = 4, .style = .{ .pad = 18 } });
     return root;
 }

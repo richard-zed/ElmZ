@@ -3147,17 +3147,6 @@ pub fn Ui(comptime M: type) type {
             return e;
         }
 
-        /// Sets the margin on BOTH axes' leading edge. Kept for call sites that
-        /// predate the four-field form and are correct either way: only the axis
-        /// the parent actually lays out along is ever read, so a column sees the
-        /// top margin and ignores the left one. New code should name the side.
-        pub fn spaceBefore(self: *Self, e: *Elem, size: f32) *Elem {
-            _ = self;
-            e.margin_left += size;
-            e.margin_top += size;
-            return e;
-        }
-
         /// A plain sized box. Formerly you had to abuse `bar` for this.
         pub fn rect(self: *Self, o: RectOpts) *Elem {
             const e = self.mk(.rect);

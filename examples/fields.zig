@@ -91,6 +91,10 @@ pub fn onKey(m: *Model, k: elmz.keys.Key) ?Msg {
 }
 
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
+    const line0 = ui.textFmt("{d} edit(s), {d} name byte(s), {d} secret byte(s)", .{
+        m.edits, m.name.value.len, m.pass.value.len,
+    }, 12);
+    line0.margin_top = 14;
     return ui.column(.{
         .children = &.{
             ui.text(.{ .label = "NAME", .size = 11, .tone = .muted }),
@@ -102,7 +106,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
                 .msg = .focus_name,
                 .placeholder = "your name",
             }),
-            ui.spaceBefore(ui.text(.{ .label = "PASSPHRASE", .size = 11, .tone = .muted }), 12),
+            ui.text(.{ .label = "PASSPHRASE", .size = 11, .tone = .muted, .margin_top = 12 }),
             // `mask` builds a display string of one `?` per codepoint in the
             // BUILDER, so the caret is placed and drawn in the same units.
             ui.textInput(.{
@@ -114,9 +118,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
                 .msg = .focus_pass,
                 .placeholder = "secret",
             }),
-            ui.spaceBefore(ui.textFmt("{d} edit(s), {d} name byte(s), {d} secret byte(s)", .{
-                m.edits, m.name.value.len, m.pass.value.len,
-            }, 12), 14),
+            line0,
         },
         .style = .{ .pad = 18 },
     });

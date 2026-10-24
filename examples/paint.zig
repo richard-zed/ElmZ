@@ -67,13 +67,18 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const note = ui.text(.{ .label = "backgrounds, borders (square and rounded) and text all take a Fill", .size = 12, .tone = .muted });
 
+    bg_row.margin_top = 10;
+    border_row.margin_top = 14;
+    grad_text.margin_top = 16;
+    bar.margin_top = 10;
+    note.margin_top = 12;
     const root = ui.column(.{ .children = &.{
         title,
-        ui.spaceBefore(bg_row, 10),
-        ui.spaceBefore(border_row, 14),
-        ui.spaceBefore(grad_text, 16),
-        ui.spaceBefore(bar, 10),
-        ui.spaceBefore(note, 12),
+        bg_row,
+        border_row,
+        grad_text,
+        bar,
+        note,
     }, .style = .{ .pad = 20 } });
     return root;
 }
