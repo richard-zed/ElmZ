@@ -3774,10 +3774,7 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
             if (cur == .b2 and ant == .b2) return false;
             // LB15 `x QU` with a closing quote after the space: the quote
             // hangs on the previous line rather than starting a new one.
-            if (cur == .qu and inSet(f[i].cp, &pf)) {
-                std.debug.print("HIT pf {x}\n", .{f[i].cp});
-                return false;
-            }
+            if (cur == .qu and inSet(f[i].cp, &pf)) return false;
         }
         return true; // LB18
     }
