@@ -85,7 +85,9 @@ fn looksLikePath(name: []const u8) bool {
 }
 
 fn hasFontExt(name: []const u8) bool {
-    inline for ([_][]const u8{ ".ttf", ".otf" }) |ext| {
+    // ".ttc" included: CJK faces ship as collections and are frequently the
+    // ONLY CJK typeface on a stock system. Font.init already handles "ttcf".
+    inline for ([_][]const u8{ ".ttf", ".otf", ".ttc" }) |ext| {
         if (name.len > ext.len and std.ascii.eqlIgnoreCase(name[name.len - ext.len ..], ext)) return true;
     }
     return false;
@@ -341,7 +343,12 @@ pub const testing_font = struct {
             }
             collectFonts(gpa, io, d, &paths) catch continue;
             for (paths.items) |q| {
-                const bytes = std.Io.Dir.cwd().readFileAlloc(io, q, gpa, .limited(16 * 1024 * 1024)) catch continue;
+                // 64MB, not 16: a CJK collection is 19-27MB, and the old cap
+                // dropped every one of them at `catch continue` without a word.
+                // The only faces left mapped neither Latin nor CJK, so every
+                // test that draws real glyphs took its `orelse return` and
+                // passed having proved nothing.
+                const bytes = std.Io.Dir.cwd().readFileAlloc(io, q, gpa, .limited(64 * 1024 * 1024)) catch continue;
                 if (bytes.len <= 4) {
                     gpa.free(bytes);
                     continue;

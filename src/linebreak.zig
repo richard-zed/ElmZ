@@ -50,6 +50,20 @@ pub fn breakClass(cp: u32) BreakClass {
         0x30FC, // ・ー
         0x2026,
         0x2025, // …‥
+        // Iteration marks and repetition: they continue the character before
+        // them, so a line may no more start with one than with a closing
+        // punctuation mark. The standard classes these ID/NS; ours only needs
+        // "never at a line start".
+        0x3005, // 々  ideographic iteration mark
+        0x3007, // 〇  ideographic number zero (reads as a digit, not a break)
+        0x303B, // 〻  vertical ideographic iteration mark
+        0x303C, // 〼  masu mark
+        0x30FD, // ヽ  katakana iteration mark
+        0x30FE, // ヾ  katakana voiced iteration mark
+        0x309D, // ゝ  hiragana iteration mark
+        0x309E, // ゞ  hiragana voiced iteration mark
+        0xFF70, // ｰ  halfwidth katakana-hiragana prolonged sound mark
+        0x30A0, // ゠  katakana double hyphen
         => .close,
         // Opening: no line may END with one of these.
         0x3008,
@@ -92,14 +106,21 @@ pub fn breakClass(cp: u32) BreakClass {
     };
 }
 
+/// Characters a line may break between freely: ideographs, kana, hangul.
+///
+/// DELIBERATELY NARROW. The first version swept 0x2E80-0x303E and 0xFF01-0xFF60
+/// wholesale, which swallowed CJK punctuation into the "breakable on both sides"
+/// class. `々`, `〇`, `ヽ`, `ヾ`, `〜`, `〝` and the halfwidth block then became
+/// legal line starts -- exactly what kinsoku forbids -- because a class that
+/// breaks on both sides will happily begin a line. Punctuation is classified by
+/// the explicit lists in `breakClass` and must never reach this fallback.
 fn isIdeographic(cp: u32) bool {
-    return (cp >= 0x2E80 and cp <= 0x303E) // radicals through CJK punctuation
-    or (cp >= 0x3041 and cp <= 0x30FF) // kana
+    return (cp >= 0x3041 and cp <= 0x3096) // hiragana letters (not 3099+ marks)
+    or (cp >= 0x30A1 and cp <= 0x30FA) // katakana letters (not 30FB+ punctuation)
     or (cp >= 0x3400 and cp <= 0x4DBF) // extension A
     or (cp >= 0x4E00 and cp <= 0x9FFF) // unified ideographs
     or (cp >= 0xF900 and cp <= 0xFAFF) // compatibility ideographs
     or (cp >= 0xAC00 and cp <= 0xD7A3) // hangul syllables
-    or (cp >= 0xFF01 and cp <= 0xFF60) // fullwidth forms
     or (cp >= 0x20000 and cp <= 0x2FA1F); // extensions B and beyond
 }
 
@@ -107,7 +128,14 @@ fn isIdeographic(cp: u32) bool {
 /// ideographs on either side, strict about the cases that make CJK look wrong
 /// under a naive greedy loop.
 pub fn canBreak(prev: BreakClass, cur: BreakClass) bool {
-    if (cur == .close or cur == .small) return false;
+    // No line may START with these (kinsoku shori). `other` is in the list on
+    // purpose: it is the class for punctuation with no break behaviour of its
+    // own -- symbols, marks, `〝〟`, `〽` -- and `.ideo or .other` used to read as
+    // "breakable", so an ideograph before one of them licensed a break and let
+    // it open a line. Anything unrecognised must be INERT at a line start, not
+    // permissive: a missed break opportunity is invisible, a stranded mark is
+    // not.
+    if (cur == .close or cur == .small or cur == .other) return false;
     if (prev == .open) return false;
     if (prev == .digit and cur == .digit) return false;
     return prev == .ideo or cur == .ideo;
@@ -129,4 +157,47 @@ test "the CJK break classes refuse every kinsoku case" {
     try T.expect(canBreak(breakClass(0x65E5), breakClass(0x672C))); // 日本
     // And the Latin path is unchanged: two letters are not a break.
     try T.expect(!canBreak(.other, .other));
+}
+
+test "iteration marks and symbols never start a line" {
+    // These were breakable until the classification was narrowed: they sat
+    // inside a broad 0x2E80-0x303E range that `isIdeographic` claimed wholesale,
+    // and `prev == .ideo or cur == .ideo` then allowed a break before them. A
+    // stray `々` at the head of a line is the exact failure kinsoku exists to
+    // prevent, and nothing here noticed because no test named one.
+    const T = std.testing;
+    const marks = [_]u32{
+        0x3005, // 々  ideographic iteration mark
+        0x3007, // 〇
+        0x303B, // 〻
+        0x30FD, // ヽ
+        0x30FE, // ヾ
+        0x309D, // ゝ
+        0x309E, // ゞ
+        0x301C, // 〜  wave dash
+        0x30A0, // ゠
+        0xFF70, // ｰ  halfwidth prolonged sound mark
+        0x303D, // 〽
+        0x301F, // 〟
+    };
+    for (marks) |cp| {
+        // Neither after an ideograph nor after another symbol may a line start.
+        try T.expect(!canBreak(.ideo, breakClass(cp)));
+        try T.expect(!canBreak(.other, breakClass(cp)));
+        try T.expect(!canBreak(.close, breakClass(cp)));
+    }
+}
+
+test "an unmapped character is inert at a line start, not permissive" {
+    // The default branch of canBreak must refuse. Before this, the final
+    // expression was `prev == .ideo or cur == .ideo`, so every class that fell
+    // through -- including `.other`, where unrecognised punctuation lands --
+    // permitted a break whenever an ideograph was adjacent.
+    const T = std.testing;
+    try T.expect(!canBreak(.ideo, .other));
+    try T.expect(!canBreak(.other, .other));
+    try T.expect(!canBreak(.small, .other));
+    // The permissive direction is still reachable, or the guard would have
+    // swallowed the one break CJK actually needs.
+    try T.expect(canBreak(.other, .ideo));
 }
