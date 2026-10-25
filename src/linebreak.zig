@@ -3699,6 +3699,14 @@ fn isExtPictReserved(cp: u21) bool {
 }
 
 const ext_pict_unassigned = [_]struct { first: u21, last: u21 }{
+    // Reserve-emoji gaps with no LineBreak assignment. Extended_Pictographic
+    // marks them, so LB30b joins them to an emoji modifier like any other
+    // pictograph; no class-level rule can, since they default to XX.
+    .{ .first = 0x1F02C, .last = 0x1F02C },
+    .{ .first = 0x1FFFD, .last = 0x1FFFD },
+    // Reserve-emoji gaps not in the ranges below.
+    .{ .first = 0x1F02C, .last = 0x1F02C },
+    .{ .first = 0x1FFFD, .last = 0x1FFFD },
     .{ .first = 0x1F80C, .last = 0x1F80F },
     .{ .first = 0x1F848, .last = 0x1F84F },
     .{ .first = 0x1F85A, .last = 0x1F85F },
@@ -3760,6 +3768,7 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
             if (ant == .qu and baseIn(f, i, &pi)) return false;
             // LB16: `CL|CP|NU SP* x NS` also joins.
             if (cur == .ns and (ant == .cl or ant == .cp or ant == .nu)) return false;
+
             // LB17: `B2 SP* x B2` reaches across the run like LB14/LB16,
             // and outranks the LB18 break this branch would otherwise take.
             if (cur == .b2 and ant == .b2) return false;
@@ -3898,7 +3907,7 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
     var bok: usize = 0;
     var fails: usize = 0;
     var buf: [512]Folded = undefined;
-    for (cases.cases) |cs| {
+    for (cases.cases, 0..) |cs, li| {
         const n = cs.cps.len;
         Folded.fold(cs.cps, buf[0..n]);
         var all = true;
@@ -3923,6 +3932,7 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
                 while (z < n) : (z += 1) {
                     const g2 = if (inSet(cs.cps[z - 1], &pi)) false else canBreak(buf[0..n], z);
                     if (g2 == cs.breaks[z]) continue;
+                    std.debug.print("B {d} {d}\n", .{ li, z });
                 }
             }
         }
