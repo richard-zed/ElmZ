@@ -25,9 +25,28 @@ fn testCanvas(gpa: Allocator, w: u32, h: u32) !Canvas {
 /// typeface in the repo. On a machine with no fonts they skip; the gate then
 /// says what it did not check instead of pretending.
 fn withFace(c: *Canvas) ?[]u8 {
-    const any = testing_font.anySystemFont(std.testing.allocator, std.testing.io) orelse return null;
-    c.setFont(any);
-    return any;
+    return withFaceIf(c, 'H');
+}
+
+/// A real face from this machine that maps `cp`, or null. Tests that assert on
+/// actual glyphs ask for the character they are about to draw: taking whatever
+/// font the directory lists first meant a Noto Arabic subset was handed to a
+/// Latin assertion, which fails on valid data and reads like a bug in us.
+fn withFaceIf(c: *Canvas, cp: u21) ?[]u8 {
+    const all = testing_font.systemFonts(testing.allocator, std.testing.io) orelse return null;
+    defer {
+        for (all) |q| testing.allocator.free(q);
+        testing.allocator.free(all);
+    }
+    for (all) |bytes| {
+        var f = Face.init(bytes);
+        if (!f.hasGlyph(cp)) continue;
+        // The canvas borrows; give it its own copy so the loop can free the rest.
+        const copy = testing.allocator.dupe(u8, bytes) catch return null;
+        c.setFont(copy);
+        return copy;
+    }
+    return null;
 }
 
 const builtin = @import("builtin");
@@ -308,6 +327,31 @@ pub const testing_font = struct {
     /// one to count as a second face for cache invalidation -- and the
     /// alternative to borrowing the system's is carrying a font in the repo,
     /// which is a binary asset with a licence attached to buy nothing.
+    /// Every readable face on this machine; caller frees each and the slice.
+    /// `anySystemFont` returns only the first, which is fine for "is there a
+    /// face at all" but wrong for anything that needs a CAPABILITY -- a machine
+    /// holding only Noto Arabic/CJK still has fonts and still has no Latin.
+    pub fn systemFonts(gpa: Allocator, io: std.Io) ?[][]u8 {
+        var out: std.ArrayListUnmanaged([]u8) = .empty;
+        for (font_dirs) |d| {
+            var paths: std.ArrayListUnmanaged([]u8) = .empty;
+            defer {
+                for (paths.items) |q| gpa.free(q);
+                paths.deinit(gpa);
+            }
+            collectFonts(gpa, io, d, &paths) catch continue;
+            for (paths.items) |q| {
+                const bytes = std.Io.Dir.cwd().readFileAlloc(io, q, gpa, .limited(16 * 1024 * 1024)) catch continue;
+                if (bytes.len <= 4) {
+                    gpa.free(bytes);
+                    continue;
+                }
+                out.append(gpa, bytes) catch gpa.free(bytes);
+            }
+        }
+        return out.toOwnedSlice(gpa) catch null;
+    }
+
     pub fn anySystemFont(gpa: Allocator, io: std.Io) ?[]u8 {
         for (font_dirs) |d| {
             var paths: std.ArrayListUnmanaged([]u8) = .empty;
