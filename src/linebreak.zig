@@ -3759,6 +3759,12 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
             // LB17: `B2 SP* x B2` reaches across the run like LB14/LB16,
             // and outranks the LB18 break this branch would otherwise take.
             if (cur == .b2 and ant == .b2) return false;
+            // LB15 `x QU` with a closing quote after the space: the quote
+            // hangs on the previous line rather than starting a new one.
+            if (cur == .qu and inSet(f[i].cp, &pf)) {
+                std.debug.print("HIT pf {x}\n", .{f[i].cp});
+                return false;
+            }
         }
         return true; // LB18
     }
@@ -3799,7 +3805,18 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     // LB21 [20.1]: no break after a hyphen before an AL. Measured: the guard
     // must test what precedes the hyphen, not the hyphen alone -- `-ti...` in
     // running text joins, but `2630 - ...` breaks.
-    if (prev == .hy and cur == .al and !baseWasAi(f, i - 1)) return false;
+    // A closer or CP in front of the hyphen breaks the glue: the reference
+    // splits `0029 002D 006C`, since LB13 already refused in front of the
+    // `)` and a hyphen cannot re-glue past it. `ante(f, i - 1)` is the
+    // character BEFORE the hyphen -- `ante(f, i)` would return the hyphen.
+    // A closer or CP in front of the hyphen breaks the glue: the reference
+    // splits `0029 002D 006C`, since LB13 already refused in front of the
+    // `)` and a hyphen cannot re-glue past it. `ante(f, i - 1)` is the
+    // character BEFORE the hyphen -- `ante(f, i)` would return the hyphen.
+    if (prev == .hy and cur == .al) {
+        if (Folded.ante(f, i - 1)) |ant| if (ant == .cl or ant == .cp) return true;
+        if (!baseWasAi(f, i - 1)) return false;
+    }
     // LB21 also refuses a break before CJ and HH, but ONLY when they do not
     // follow a space -- LB18 has already broken after one by this point.
     if (cur == .cj) return false;
@@ -3849,6 +3866,9 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     // LB28.11: a PRE-VOWEL joins the vowel that follows it: AP x AK and
     // AP x AS. Measured against the data -- adding AL to the consequent LOST
     // 12 cases, so AL is not part of this rule despite the DottedCircle case.
+    // A dotted circle stands in for a missing AK, so `AP x <dotted circle>`
+    // joins exactly as `AP x AK` does. `f[i].cp` is the right operand.
+    if (prev == .ap and f[i].cp == 0x25CC) return false;
     if (prev == .ap and (cur == .ak or cur == .ak_syllable_as)) return false;
     // LB28a `[AK] x [VI|VF]`. Scoped to AK, not AL: the earlier AL-wide
     // attempt measured -18 because AL must keep breaking before VI.
@@ -3900,6 +3920,9 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
                     const g2 = if (inSet(cs.cps[z - 1], &pi)) false else canBreak(buf[0..n], z);
                     if (g2 == cs.breaks[z]) continue;
                     std.debug.print("B {d} {d}\n", .{ li, z });
+                    if (z == 2 and n == 3) {
+                        for (buf[0..n]) |ff| std.debug.print("  cp={x} cls={} res={}\n", .{ ff.cp, ff.cls, ff.resolved });
+                    }
                 }
             }
         }
