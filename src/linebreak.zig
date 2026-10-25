@@ -3085,10 +3085,28 @@ fn baseIn(f: []const Folded, i: usize, set: []const u21) bool {
     return false;
 }
 
+fn baseIsExtPictReserved(f: []const Folded, i: usize) bool {
+    var j = i;
+    while (j > 0 and (f[j].resolved == .cm or f[j].resolved == .zwj)) j -= 1;
+    return isExtPictReserved(f[j].cp);
+}
+
+fn baseIsDottedCircle(f: []const Folded, i: usize) bool {
+    var j = i;
+    while (j > 0 and (f[j].resolved == .cm or f[j].resolved == .zwj)) j -= 1;
+    return f[j].cp == 0x25CC;
+}
+
 fn baseWasAi(f: []const Folded, i: usize) bool {
     var j = i;
     while (j > 0 and (f[j].resolved == .cm or f[j].resolved == .zwj)) j -= 1;
     return wasAi(f[j].cp);
+}
+
+fn b2Follows(f: []const Folded, i: usize) bool {
+    var j = i + 1;
+    while (j < f.len and f[j].resolved == .sp) j += 1;
+    return j < f.len and f[j].resolved == .b2;
 }
 
 fn wasAi(cp: u21) bool {
@@ -3664,6 +3682,28 @@ pub fn canBreakPair(prev: BreakClass, cur: BreakClass) bool {
 
 /// May a line break fall between `f[i-1]` and `f[i]`?
 /// `cp_cur` is the raw codepoint, needed by the East-Asian / QU-split rules.
+/// Unassigned codepoints that sit inside an Extended_Pictographic block.
+///
+/// Generated from `emoji-data.txt` (Extended_Pictographic) intersected with the
+/// gaps in `LineBreak.txt`. They default to XX, and LB30b distinguishes them
+/// from ordinary unassigned characters, which no class-level rule can do.
+fn isExtPictReserved(cp: u21) bool {
+    for (ext_pict_unassigned) |r| {
+        if (cp >= r.first and cp <= r.last) return true;
+    }
+    return false;
+}
+
+const ext_pict_unassigned = [_]struct { first: u21, last: u21 }{
+    .{ .first = 0x1F80C, .last = 0x1F80F },
+    .{ .first = 0x1F848, .last = 0x1F84F },
+    .{ .first = 0x1F85A, .last = 0x1F85F },
+    .{ .first = 0x1F888, .last = 0x1F88F },
+    .{ .first = 0x1F8BC, .last = 0x1F8BF },
+    .{ .first = 0x1F8C2, .last = 0x1F8CF },
+    .{ .first = 0x1F8D9, .last = 0x1F8FF },
+};
+
 pub fn canBreak(f: []const Folded, i: usize) bool {
     const prev = f[i - 1].cls;
     const cur = f[i].cls;
@@ -3683,7 +3723,10 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
         return false; // LB6 beats LB18
     // Nothing breaks BEFORE a hard break either (the reference's `a != 'OP'`
     // guard); LB14 above already claimed the open-bracket case.
-    if (cur == .bk or cur == .cr or cur == .lf or cur == .nl or cur == .zw) return false;
+    // ...unless the antecedent is itself a hard break: LB4/LB5 outrank the
+    // no-break-before rule, so `CR ÷ BK` breaks while `AL × BK` does not.
+    if ((cur == .bk or cur == .cr or cur == .lf or cur == .nl or cur == .zw) and
+        prev != .cr and prev != .lf and prev != .nl and prev != .bk) return false;
     if (prev == .cr and cur == .lf) return false;
     if (cur == .cr) return true;
     // LB5 outranks LB7: after CR/LF/NL a break falls even before a space.
@@ -3691,6 +3734,10 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     if (cur == .sp or cur == .zw) return false; // LB7
 
     if (prev == .sp) {
+        // LB8 `ZW SP* /` forces a break and outranks LB13. It has to be
+        // tested here, inside the space branch, because that branch returns
+        // before any later rule can see the antecedent.
+        if (a != null and a.? == .zw) return true;
         if (cur == .cl or cur == .cp or cur == .ex or cur == .is or cur == .sy) return false;
         // LB21 `x CJ` after a CLOSER outranks LB18 -- but only after a closer.
         // Blanket `x CJ` cost 121 cases because plain `SP / CJ` does break.
@@ -3709,10 +3756,16 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
             if (ant == .qu and baseIn(f, i, &pi)) return false;
             // LB16: `CL|CP|NU SP* x NS` also joins.
             if (cur == .ns and (ant == .cl or ant == .cp or ant == .nu)) return false;
+            // LB17: `B2 SP* x B2` reaches across the run like LB14/LB16,
+            // and outranks the LB18 break this branch would otherwise take.
+            if (cur == .b2 and ant == .b2) return false;
         }
         return true; // LB18
     }
-    if (prev == .zw) return true; // LB8
+    if (f[i - 1].resolved == .zw) return true; // LB8 (the SP* case is in the space branch)
+    // LB8a `ZWJ x`. Keyed on the RAW class: ZWJ folds into its neighbour
+    // under LB9, so `.cls` never reads back as ZWJ.
+    if (f[i - 1].resolved == .zwj) return false; // LB8a
     if (prev == .cr) return true;
 
     // LB14 folds into the space run: nothing breaks after an open bracket.
@@ -3729,21 +3782,20 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     // LB28 prohibits a break before VI only after an AL that ORIGINATED as an
     // East-Asian ambiguous character. A plain AL or HL breaks normally here --
     // the reference does it for `0023` (ALorigmEastAsian) and for bare HL.
-    if (prev == .al and cur == .vi and baseWasAi(f, i - 1)) return false;
     if (prev == .gl) return false; // LB12
-    // LB12a. The HH exception is real, not decorative: `00AD ÷ 2011` breaks
-    // after a healing hyphen, so a hyphen followed by glue is the one case
-    // that does not refuse.
-    if (cur == .gl and prev != .sp and prev != .hh) return false; // LB12a
+    // LB12a. The HH and HY exceptions are real, not decorative: the reference
+    // splits `00AD ÷ 2011` (healing hyphen) and `002D ÷ 200B` at the
+    // East-Asian-ambiguous hyphen, so glue after either does not refuse.
+    if (cur == .gl and prev != .sp and prev != .hh and prev != .hy) return false; // LB12a
     if (cur == .cl or cur == .cp or cur == .ex or cur == .is or cur == .sy) return false; // LB13
     if (prev == .op) return false; // LB14
     if (cur == .ns and a != null and a.? == .op) return false; // LB16
     if (prev == .qu or cur == .qu) return false; // LB19
+    // LB17 `B2 SP* x B2`. The antecedent is tested through the space run,
+    // so `2014 SP x 2014` joins while `AI SP / 2014` still breaks.
+    if (cur == .b2 and (prev == .b2 or (a != null and a.? == .b2))) return false; // LB17
     if (prev == .cb or cur == .cb) return true; // LB20
     if (cur == .ba or cur == .hy or cur == .ns) return false; // LB21
-    // LB21 [20.1]: no break AFTER a hyphen before an AL. Measured against the
-    // data, not the rule text -- the reference joins `-ti...` and breaks only
-    // when the hyphen follows an East-Asian ambiguous character.
     // LB21 [20.1]: no break after a hyphen before an AL. Measured: the guard
     // must test what precedes the hyphen, not the hyphen alone -- `-ti...` in
     // running text joins, but `2630 - ...` breaks.
@@ -3766,6 +3818,14 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     if (prev == .sy and cur == .nu) return false;
     if ((prev == .al or prev == .hl) and cur == .nu) return false;
     if (prev == .nu and (cur == .al or cur == .hl)) return false;
+    // LB30b `[ID] x [ExtPictUnassigned]`. Unassigned codepoints inside an
+    // Extended_Pictographic block default to XX, so a class-level rule cannot
+    // tell them from any other unassigned character -- the reference breaks
+    // after ID before plain XX and joins before the emoji-reserved tails.
+    // LB30b `[ExtPict] x EM`. The chart shows the emoji-modifier case, not
+    // `ID x ExtPict`: unassigned emoji-reserved codepoints (which default
+    // to XX) must not break before an emoji modifier.
+    if (cur == .em and baseIsExtPictReserved(f, i - 1)) return false;
     if (prev == .pr and (cur == .id or cur == .eb or cur == .em)) return false; // LB23a
     if ((prev == .id or prev == .eb or prev == .em) and cur == .po) return false;
     if ((prev == .pr or prev == .po) and (cur == .al or cur == .hl)) return false; // LB24
@@ -3778,7 +3838,9 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     if ((prev == .jv or prev == .h2) and (cur == .jv or cur == .jt)) return false;
     if ((prev == .jt or prev == .h3) and cur == .jt) return false;
     if (isHangul(prev) and (cur == .in or cur == .po)) return false; // LB27
-    if ((prev == .pr or prev == .po) and isHangul(cur)) return false;
+    // LB27 [27.1]: only PR joins a following Hangul, NOT PO. Measured against
+    // the data -- the wider `pr|po` form cost 14 cases.
+    if (prev == .pr and isHangul(cur)) return false; // LB27 [27.1]
     if ((prev == .al or prev == .hl) and (cur == .al or cur == .hl)) return false; // LB28
     if (prev == .is and (cur == .al or cur == .hl)) return false; // LB29
     // LB30 applies only to a NON-East-Asian OP; a wide bracket breaks normally.
@@ -3788,6 +3850,13 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     // AP x AS. Measured against the data -- adding AL to the consequent LOST
     // 12 cases, so AL is not part of this rule despite the DottedCircle case.
     if (prev == .ap and (cur == .ak or cur == .ak_syllable_as)) return false;
+    // LB28a `[AK] x [VI|VF]`. Scoped to AK, not AL: the earlier AL-wide
+    // attempt measured -18 because AL must keep breaking before VI.
+    if (prev == .ak and (cur == .vi or cur == .vf)) return false;
+    // The dotted circle is the Brahmic base stand-in, so it takes AK's side
+    // of LB28a. It is classed AL in LineBreak.txt, which is why it needed
+    // its own test -- 14 cases turned on it.
+    if ((cur == .vi or cur == .vf) and baseIsDottedCircle(f, i - 1)) return false;
     if (prev == .eb and cur == .em) return false; // LB30b
     // LB30a: an ODD run of regional indicators joins to the next one, so flags
     // pair up. Counting starts from the boundary, so a run of 1 joins and a
@@ -3802,9 +3871,10 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
 
     var cok: usize = 0;
     var total: usize = 0;
-    var ok: usize = 0;
+    var bok: usize = 0;
+    var fails: usize = 0;
     var buf: [512]Folded = undefined;
-    for (cases.cases) |cs| {
+    for (cases.cases, 0..) |cs, li| {
         const n = cs.cps.len;
         Folded.fold(cs.cps, buf[0..n]);
         var all = true;
@@ -3819,16 +3889,27 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
             else
                 canBreak(buf[0..n], i);
             total += 1;
-            if (got) ok += 1;
+            if (got == cs.breaks[i]) bok += 1;
             if (got != cs.breaks[i]) all = false;
         }
-        if (all) cok += 1;
+        if (all) cok += 1 else {
+            fails += 1;
+            if (fails <= 400) {
+                var z: usize = 1;
+                while (z < n) : (z += 1) {
+                    const g2 = if (inSet(cs.cps[z - 1], &pi)) false else canBreak(buf[0..n], z);
+                    if (g2 == cs.breaks[z]) continue;
+                    std.debug.print("B {d} {d}\n", .{ li, z });
+                }
+            }
+        }
     }
 
     // The floor is a REGRESSION GUARD, not a claim of conformance. Raise it
     // when the rule engine improves; never lower it to make a change pass.
     const pct = 100.0 * @as(f64, @floatFromInt(cok)) / @as(f64, @floatFromInt(cases.cases.len));
     std.debug.print("\nlinebreak: {d}/{d} cases = {d:.2}%\n", .{ cok, cases.cases.len, pct });
+    std.debug.print("linebreak: boundaries {d}/{d} = {d:.2}%\n", .{ bok, total, 100.0 * @as(f64, @floatFromInt(bok)) / @as(f64, @floatFromInt(total)) });
     try T.expect(total > 19000);
     try T.expect(pct > 91.0);
 }
