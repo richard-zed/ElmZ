@@ -34,8 +34,10 @@ const linebreak = @import("linebreak.zig");
 // its own file and is tested as pure functions. Re-exported because callers of
 // this module reach for these names here.
 pub const BreakClass = linebreak.BreakClass;
-pub const breakClass = linebreak.breakClass;
-pub const canBreak = linebreak.canBreak;
+/// The RESOLVED class (LB1 applied), which is what wrapping wants: a raw table
+/// lookup leaves AI/SA/XX unresolved and every rule keyed on AL then misses.
+pub const breakClass = linebreak.resolveClass;
+pub const canBreakPair = linebreak.canBreakPair;
 
 /// The resolved `kern` lookup list, which `shape` can be handed instead of
 /// rebuilding it per call.
@@ -409,7 +411,11 @@ pub const Font = struct {
             var last_break_end: usize = 0;
             var last_break_next: usize = 0;
             var have_break = false;
-            var prev_class: BreakClass = .other;
+            // Seeded with AL: the pre-merge 7-class enum had an `.other`
+            // catch-all, and the merged resolver maps the unknown classes
+            // (xx, sg) onto AL, so that is its honest equivalent. Only ever
+            // read once `at > start`, so the seed cannot decide a real break.
+            var prev_class: BreakClass = .al;
 
             while (i < bytes.len) {
                 const at = i;
@@ -419,12 +425,14 @@ pub const Font = struct {
                     break_next = i;
                     break;
                 }
-                const cls = breakClass(cp);
-                if (cls == .space) {
+                // `decode` yields u32 for a whole-UTF-8 codepoint; the class
+                // table is indexed by u21, which holds every assignable one.
+                const cls = breakClass(@intCast(cp));
+                if (cls == .sp) {
                     last_break_end = at;
                     last_break_next = i;
                     have_break = true;
-                } else if (at > start and canBreak(prev_class, cls)) {
+                } else if (at > start and canBreakPair(prev_class, cls)) {
                     // A break BETWEEN two characters: the next line begins at
                     // this one, so no codepoint is consumed by the break. A
                     // space is the other kind -- it is consumed.
