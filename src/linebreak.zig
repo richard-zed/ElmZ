@@ -3826,7 +3826,7 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     // splits `0029 002D 006C`, since LB13 already refused in front of the
     // `)` and a hyphen cannot re-glue past it. `ante(f, i - 1)` is the
     // character BEFORE the hyphen -- `ante(f, i)` would return the hyphen.
-    if (prev == .hy and cur == .al) {
+    if (prev == .hy and (cur == .al or cur == .hl)) {
         if (Folded.ante(f, i - 1)) |ant| if (ant == .cl or ant == .cp) return true;
         if (!baseWasAi(f, i - 1)) return false;
     }
@@ -3898,6 +3898,15 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     return true; // LB31
 }
 
+/// The rule engine plus the LB15 quote split, which depends on whether the
+/// quote OPENS or CLOSES -- a fact the resolved class does not carry, so it is
+/// applied here, at the rule, not globally.
+fn expected(f: []const Folded, cps: []const u21, i: usize) bool {
+    if (f[i - 1].cls == .sp and inSet(cps[i], &pf)) return false;
+    if (inSet(cps[i - 1], &pi)) return false;
+    return canBreak(f, i);
+}
+
 test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
     const cases = @import("linebreak_cases.zig");
     const T = std.testing;
@@ -3905,37 +3914,19 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
     var cok: usize = 0;
     var total: usize = 0;
     var bok: usize = 0;
-    var fails: usize = 0;
     var buf: [512]Folded = undefined;
-    for (cases.cases, 0..) |cs, li| {
+    for (cases.cases) |cs| {
         const n = cs.cps.len;
         Folded.fold(cs.cps, buf[0..n]);
         var all = true;
         var i: usize = 1;
         while (i < n) : (i += 1) {
-            // LB15 splits a quote by whether it OPENS or CLOSES, which the
-            // resolved class does not carry. Applied at the rule, not globally.
-            const got = if (buf[i - 1].cls == .sp and inSet(cs.cps[i], &pf))
-                false
-            else if (inSet(cs.cps[i - 1], &pi))
-                false
-            else
-                canBreak(buf[0..n], i);
+            const got = expected(buf[0..n], cs.cps, i);
             total += 1;
             if (got == cs.breaks[i]) bok += 1;
             if (got != cs.breaks[i]) all = false;
         }
-        if (all) cok += 1 else {
-            fails += 1;
-            if (fails <= 400) {
-                var z: usize = 1;
-                while (z < n) : (z += 1) {
-                    const g2 = if (inSet(cs.cps[z - 1], &pi)) false else canBreak(buf[0..n], z);
-                    if (g2 == cs.breaks[z]) continue;
-                    std.debug.print("B {d} {d}\n", .{ li, z });
-                }
-            }
-        }
+        if (all) cok += 1;
     }
 
     // The floor is a REGRESSION GUARD, not a claim of conformance. Raise it
