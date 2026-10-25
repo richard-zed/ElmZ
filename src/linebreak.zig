@@ -11,8 +11,12 @@
 //! load-bearing, because an identical class pair (`AL AL`) is decided by
 //! whichever rule is reached first.
 //!
-//! NOT CONFORMANT. ~91% of LineBreakTest.txt's 19,346 cases. The residue is a
-//! long tail of individual rules, not a structural gap.
+//! CONFORMANCE: 99.78% of LineBreakTest.txt's 19,346 cases (99.83% of
+//! boundaries). The residue is a long tail of individual rules -- 72
+//! boundaries over 16 tags -- not a structural gap. The `_EastAsian` and
+//! `DottedCircle` sub-classes cannot be derived from codepoint properties
+//! (00A7 appears as both AI_EastAsian and AImEastAsian), so what is left of
+//! that cluster needs transcription, not a better table.
 
 const std = @import("std");
 
@@ -3894,7 +3898,7 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
     var bok: usize = 0;
     var fails: usize = 0;
     var buf: [512]Folded = undefined;
-    for (cases.cases, 0..) |cs, li| {
+    for (cases.cases) |cs| {
         const n = cs.cps.len;
         Folded.fold(cs.cps, buf[0..n]);
         var all = true;
@@ -3919,10 +3923,6 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
                 while (z < n) : (z += 1) {
                     const g2 = if (inSet(cs.cps[z - 1], &pi)) false else canBreak(buf[0..n], z);
                     if (g2 == cs.breaks[z]) continue;
-                    std.debug.print("B {d} {d}\n", .{ li, z });
-                    if (z == 2 and n == 3) {
-                        for (buf[0..n]) |ff| std.debug.print("  cp={x} cls={} res={}\n", .{ ff.cp, ff.cls, ff.resolved });
-                    }
                 }
             }
         }
@@ -3934,7 +3934,7 @@ test "UAX #14 conformance against Unicode 18.0.0 LineBreakTest.txt" {
     std.debug.print("\nlinebreak: {d}/{d} cases = {d:.2}%\n", .{ cok, cases.cases.len, pct });
     std.debug.print("linebreak: boundaries {d}/{d} = {d:.2}%\n", .{ bok, total, 100.0 * @as(f64, @floatFromInt(bok)) / @as(f64, @floatFromInt(total)) });
     try T.expect(total > 19000);
-    try T.expect(pct > 91.0);
+    try T.expect(pct > 99.7);
 }
 
 fn breaks(cps: []const u21, at: usize) bool {
