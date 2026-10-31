@@ -778,16 +778,22 @@ const testing = std.testing;
 ///
 /// So: name one face, and if it is not there, skip. Downloading it is a small
 /// price for a test that means the same thing everywhere.
-const fixture_face = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+const fixture_face = "/usr/share/fonts/dejavu/DejaVuSans.ttf";
+
+/// A SECOND face, used where the test needs a real font and the box has no
+/// DejaVu. Kept separate from `fixture_face` so a machine WITH DejaVu still
+/// tests the same thing everywhere; `anyFace` prefers the first and falls
+/// back here rather than skipping a test that could have run.
+const fixture_face_alt = "/root/NovusGroteskVF-cff2.otf.ttf";
 
 fn anyFace(bytes_out: []u8) ?[]const u8 {
     // readFile returns the filled slice itself; slicing it again is a type
     // error (usize expected) and was a real one until this fix.
-    return std.Io.Dir.cwd().readFile(
-        std.Io.Threaded.global_single_threaded.io(),
-        fixture_face,
-        bytes_out,
-    ) catch null;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    for ([_][]const u8{ fixture_face, fixture_face_alt }) |path| {
+        if (std.Io.Dir.cwd().readFile(io, path, bytes_out)) |b| return b else |_| {}
+    }
+    return null;
 }
 
 test "two faces of one collection do not share a cache key" {

@@ -10,6 +10,11 @@ const cedar = @import("cedar.zig");
 const gamma = @import("gamma.zig");
 const elmfont = @import("elmfont.zig");
 
+/// Cache identity of the built-in face. Any value works as long as it cannot
+/// collide with a real `instanceKey()` (which is 0 for absent, else a hash of
+/// the bytes plus the instance) -- this is a high bit pattern for that reason.
+const elmfont_face_key: usize = 0xe1f0_0000;
+
 /// Cedar is the font backend. One name, because a canvas built against a face
 /// the rest of the library does not know is not a configuration anyone wants.
 const Face = cedar.Font;
@@ -74,7 +79,31 @@ pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
 /// HOME, which needs environment access this file has no `io`-free way to do.
 /// A caller that has one passes it in `extra_dirs`, searched FIRST, so an app
 /// can prefer its own shipped directory over the system's.
-pub const font_dirs = [_][]const u8{ "/usr/share/fonts", "/usr/local/share/fonts", "/system/fonts" };
+/// Where a face is looked up, in order.
+///
+/// The system entries are absolute and need nothing. The two `~` entries are
+/// resolved per-call against `HOME`, because a user font lives under the
+/// user's home and there is no reading of "the font directory" that excludes
+/// it -- a face installed with `fc-cache` into `~/.local/share/fonts` is a
+/// fully installed font, and a library that only sees `/usr/share/fonts` looks
+/// broken to anyone who has ever installed one. `~/.fonts` is still read
+/// because plenty of installs predate the XDG location and were never moved.
+///
+/// Order is USER before SYSTEM: a font someone put in their own directory was
+/// put there to be used, and the same reasoning applies as for caller-supplied
+/// directories above.
+pub const font_dirs = [_][]const u8{
+    "~/.local/share/fonts",
+    "~/.fonts",
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/system/fonts",
+};
+
+/// True for a directory entry that starts with `~`, meaning "under HOME".
+fn isHomeRelative(dir: []const u8) bool {
+    return dir.len > 0 and dir[0] == '~';
+}
 
 /// The single face the tests measure, and the only one they look for.
 ///
@@ -99,15 +128,26 @@ fn hasFontExt(name: []const u8) bool {
     return false;
 }
 
-fn collectFonts(gpa: Allocator, io: std.Io, dir_path: []const u8, out: *std.ArrayListUnmanaged([]u8)) !void {
-    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+fn collectFonts(gpa: Allocator, io: std.Io, font_home: ?[]const u8, dir_path: []const u8, out: *std.ArrayListUnmanaged([]u8)) !void {
+    // A `~` directory is expanded here rather than at the table, so the
+    // contents of `font_dirs` stay literal and readable. No HOME means no user
+    // fonts -- a daemon with no home directory still gets the system ones, and
+    // that is a skip, not a failure.
+    const root = if (isHomeRelative(dir_path)) blk: {
+        const home = font_home orelse return;
+        const joined = std.fs.path.join(gpa, &.{ home, dir_path[1..] }) catch return;
+        defer gpa.free(joined);
+        break :blk joined;
+    } else dir_path;
+
+    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return;
     defer dir.close(io);
     var walker = try dir.walk(gpa);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!hasFontExt(entry.path)) continue;
-        const full = try std.fs.path.join(gpa, &.{ dir_path, entry.path });
+        const full = try std.fs.path.join(gpa, &.{ root, entry.path });
         errdefer gpa.free(full);
         try out.append(gpa, full);
     }
@@ -158,13 +198,13 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
 }
 
 /// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`.
-fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []const u8) ![]u8 {
+fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []const u8, font_home: ?[]const u8) ![]u8 {
     var paths: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
         for (paths.items) |p| gpa.free(p);
         paths.deinit(gpa);
     }
-    for (dirs) |d| collectFonts(gpa, io, d, &paths) catch {};
+    for (dirs) |d| collectFonts(gpa, io, font_home, d, &paths) catch {};
     if (paths.items.len == 0) return error.FontNotFound;
 
     // A walk's order is undefined, so two machines could otherwise pick
@@ -210,12 +250,12 @@ fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []cons
 /// Returns the bytes of the first match; the caller owns them. Nothing found is
 /// `error.FontNotFound`, which the runner bands rather than papering over with a
 /// substitute face nobody could see was wrong.
-pub fn loadFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8) ![]u8 {
+pub fn loadFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8, font_home: ?[]const u8) ![]u8 {
     if (looksLikePath(name)) return loadFont(gpa, io, name);
 
     // Caller-provided directories win outright, the way PATH order works: an app
     // that ships a face gets it even when the system has the same family.
-    if (searchDirs(gpa, io, extra_dirs, name)) |bytes| {
+    if (searchDirs(gpa, io, extra_dirs, name, font_home)) |bytes| {
         return bytes;
     } else |e| switch (e) {
         // The only failure a search can report: an unreadable file is skipped,
@@ -223,7 +263,15 @@ pub fn loadFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: 
         // good ones next to it.
         error.FontNotFound => {},
     }
-    return searchDirs(gpa, io, &font_dirs, name);
+    return searchDirs(gpa, io, &font_dirs, name, font_home);
+}
+
+/// The search with no home directory, so `~` entries are skipped and only the
+/// system fonts are reachable. Kept because most callers are tests and tools
+/// that have no process `Init`; `loadFontByNameHome` is the one the runner
+/// uses, and the only one that can see a user's own fonts.
+pub fn loadFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8) ![]u8 {
+    return loadFontByNameHome(gpa, io, name, extra_dirs, null);
 }
 
 /// An ABSOLUTE fixture directory.
@@ -347,7 +395,7 @@ pub const testing_font = struct {
                 for (paths.items) |q| gpa.free(q);
                 paths.deinit(gpa);
             }
-            collectFonts(gpa, io, d, &paths) catch continue;
+            collectFonts(gpa, io, null, d, &paths) catch continue;
             for (paths.items) |q| {
                 // 64MB, not 16: a CJK collection is 19-27MB, and the old cap
                 // dropped every one of them at `catch continue` without a word.
@@ -811,6 +859,15 @@ pub const Canvas = struct {
     /// the flag that used to guard it was a field doing the same work.
     pub fn setFont(self: *Self, bytes: []const u8) void {
         self.setFontAt(bytes, 0, &.{});
+    }
+
+    /// Drop the typeface: measurements and glyphs fall back to the built-in
+    /// face. This is the revert a failed load wants -- NOT a blank face, which
+    /// renders invisible text and, because it has no instance key, defeats the
+    /// measure cache.
+    pub fn clearFont(self: *Self) void {
+        self.clearMeasureCache();
+        self.font = .none;
     }
 
     /// Point the canvas at a VARIABLE INSTANCE of a face.
@@ -2443,6 +2500,15 @@ pub const Canvas = struct {
         );
     }
 
+    /// The cache identity of whatever is actually answering measurements.
+    /// A live face reports its instance key; the built-in face reports a
+    /// constant, so its numbers cache like any other face's. Non-zero on
+    /// purpose: 0 is what `instanceKey()` returns for an absent face, and
+    /// reusing it would make "no font" indistinguishable from "not computed".
+    fn faceKey(self: *const Self) usize {
+        return if (self.font.available()) self.font.instanceKey() else elmfont_face_key;
+    }
+
     /// Font metrics for one string, cached. `dev` is the DEVICE size; the
     /// divide-back for HiDPI happens at the call site, so what is stored is the
     /// number the glyphs were actually fitted at.
@@ -2451,7 +2517,14 @@ pub const Canvas = struct {
     /// at the next frame's reset, which is the trap that makes a naive version
     /// corrupt rather than slow.
     fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
-        const face = self.font.instanceKey();
+        // The key must name the face the number CAME FROM, not the face that
+        // was asked for. When no typeface is attached the measurement is
+        // answered by `elmfont`, but `instanceKey()` on a dead face is 0 --
+        // so every string got a fresh key, missed, measured through the
+        // built-in rasteriser, and was evicted before it was ever reused.
+        // That is a permanent double measure for exactly the apps that had a
+        // font go missing, which read as "the font fix made it slow".
+        const face = self.faceKey();
         const probe: MeasureKey = .{ .text = bytes, .dev = dev, .face = face };
         if (self.measure_cache.get(probe)) |m| {
             self.measure_hits += 1;

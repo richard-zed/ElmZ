@@ -101,6 +101,14 @@ pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
 }
 
 pub const Options = struct {
+    /// The user's home directory, for the font search's `~` entries. `null`
+    /// means "no user fonts", which is what a headless run wants: a test must
+    /// not start depending on whatever the machine has installed.
+    ///
+    /// A parameter rather than a `std.process` call inside the search, because
+    /// 0.16 keeps the environment on `process.Init` and the search has no
+    /// business reaching for a global it was not handed.
+    home: ?[]const u8 = null,
     /// Stop after this many events. null = run until the window says quit.
     max_events: ?u32 = null,
     /// Block this long in poll() before looping again. -1 = block forever.
@@ -488,11 +496,11 @@ pub const FontSlot = struct {
 /// Failure leaves the previous face attached and bands the name. That is the
 /// entire rule: a font that cannot be found must never quietly become a
 /// different font, because the render still looks deliberate.
-pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]const u8, slot: *FontSlot) bool {
+pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]const u8, slot: *FontSlot, home: ?[]const u8) bool {
     const name = want orelse return false;
     if (std.mem.eql(u8, name, slot.appliedName())) return false;
 
-    const bytes = software.loadFontByName(gpa, io, name, &.{}) catch {
+    const bytes = software.loadFontByNameHome(gpa, io, name, &.{}, home) catch {
         ui.failExternal(.font, "no font named {s}", .{name});
         return false;
     };
@@ -520,7 +528,19 @@ fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io:
         // typeface that cannot be produced from disk: absent, unreadable or a
         // directory. The band carries the path, because that is the one thing
         // the author can act on.
-        ui.failExternal(.font, "cannot read font: {s}", .{path});
+        //
+        // Then REVERT, do not leave a dead face attached. A failed load used to
+        // leave `Font.none` behind, and an absent face answers nothing: text
+        // measured at zero, every text prim vanished, and the app looked
+        // broken rather than unstyled. Worse, the measure cache keyed on that
+        // absent face, so nothing was ever reused and every string was
+        // re-measured every frame.
+        //
+        // `Font.none` is the right value here: the renderer already falls back
+        // to the built-in face whenever no typeface is attached, so clearing
+        // the slot IS the fallback. Say so in the band and move on.
+        ui.failExternal(.font, "cannot read font, using built-in: {s}", .{path});
+        canvas.clearFont();
         return null;
     };
     canvas.setFont(bytes);
@@ -557,6 +577,11 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     }
 
     var opts: Options = .{ .io = io, .gpa = gpa, .overlay = default_overlay };
+    // User fonts need a home directory, and `runApp` only receives `io`; the
+    // caller that has `init` passes it in through a struct field, same trick as
+    // `state`. Consumed by the font chain, not by `runApp` itself.
+    if (@hasField(@TypeOf(app), "home")) opts.home = app.home;
+    if (@hasField(@TypeOf(app), "font_home")) opts.home = app.font_home;
     // Keystrokes and typed text, same optional-field trick as `state`: an app
     // that declares `on_key` / `on_text` gets them, one that does not never
     // hears about them and pays nothing. Focus stays in the app's Model -- the
@@ -739,7 +764,7 @@ pub fn run(
                     w.poll(&rt.ui, io_arg, g);
                     // Attached after the first resolve, so a theme naming a face
                     // gets it on frame one rather than after the first edit.
-                    _ = applyChainFont(&rt.ui, g, io_arg, w.fontName(), &font_slot);
+                    _ = applyChainFont(&rt.ui, g, io_arg, w.fontName(), &font_slot, opts.home);
                 }
             }
         }
@@ -760,7 +785,7 @@ pub fn run(
                     // Same trigger as the palette: either file changing
                     // re-resolves the whole chain, and the font rides that. A
                     // swap must repaint or nobody sees it.
-                    if (applyChainFont(&rt.ui, gpa_arg, io_arg, w.fontName(), &font_slot)) dirty = true;
+                    if (applyChainFont(&rt.ui, gpa_arg, io_arg, w.fontName(), &font_slot, opts.home)) dirty = true;
                 }
             }
         }
@@ -2486,10 +2511,21 @@ test "a bar paints a track and a value fill, and nothing twice" {
 
     // The two fills must differ: a value fill painted over the whole track
     // would mean the clamp or the width maths ate the fraction.
-    const a = f.prims[0].quad.rect;
-    const b = f.prims[1].quad.rect;
+    // Both are rounded now -- a square value fill over a rounded track left the
+    // track's corners showing through, which is the bug this shape guards.
+    const a = rectOf(f.prims[0]);
+    const b = rectOf(f.prims[1]);
+    try std.testing.expect(f.prims[1] == .rrect);
     try std.testing.expect(a.w > b.w);
     try std.testing.expectEqual(a.x, b.x);
+}
+
+fn rectOf(p: elmz.Primitive) elmz.Rect {
+    return switch (p) {
+        .quad => |q| q.rect,
+        .rrect => |r| r.rect,
+        else => unreachable,
+    };
 }
 
 fn bgView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
@@ -2944,7 +2980,7 @@ test "a declared font path that cannot be read raises the band" {
     // area instead of what the user sees.
     var frame = try paintInto(TState, TMsg, &rt, &canvas);
     defer frame.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, rt.ui.failMessage(), "cannot read font: no-such-font.ttf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rt.ui.failMessage(), "cannot read font, using built-in: no-such-font.ttf") != null);
 }
 
 test "an app that declares no font path stays silent" {

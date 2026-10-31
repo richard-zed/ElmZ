@@ -874,6 +874,51 @@ pub const scroll_path_root: u64 = 0x9e3779b97f4a7c15;
 /// cheap, allocator-free, and identical for the same position in the same tree,
 /// which is all a scroll slot needs. A reordered list therefore moves its
 /// offsets, which is the honest answer -- the store is positional.
+/// Read an optional field from an options struct, or fall back.
+///
+/// Options structs are `anytype` so a builder can accept `.label = anything`,
+/// which means a caller may omit any field they do not care about. Probing is
+/// compile-time: the field is either there and typed, or the default stands.
+pub fn fieldOr(o: anytype, comptime name: []const u8, comptime default: anytype) FieldType(@TypeOf(o), name, @TypeOf(default)) {
+    // Comptime-gated on the whole body: when the struct has the field, its
+    // value is coerced to the destination type; when it does not, the default
+    // stands. Both arms have to be legal for the type that is actually
+    // returned, so neither may be written unconditionally.
+    if (comptime !@hasField(@TypeOf(o), name)) return default;
+    const R = FieldType(@TypeOf(o), name, @TypeOf(default));
+    // A typed local, not `@as`: coercing an anonymous struct literal to a named
+    // struct is assignment, and `@as` refuses it.
+    const r: R = @field(o, name);
+    return r;
+}
+
+fn isOptional(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .optional => true,
+        else => false,
+    };
+}
+
+/// The field's own type when the struct has it, so an anonymous struct literal
+/// passed as `.style = .{ ... }` still coerces. Falls back to the default's
+/// type otherwise, which is the only type there is to offer.
+pub fn FieldType(comptime O: type, comptime name: []const u8, comptime Fallback: type) type {
+    if (!@hasField(O, name)) return Fallback;
+    const F = @FieldType(O, name);
+    return switch (@typeInfo(F)) {
+        // `.size = 12` infers `comptime_int`, which is comptime-only: a
+        // function cannot return it. The declared default's type is what the
+        // caller meant by passing a bare number.
+        .comptime_int, .comptime_float => Fallback,
+        // A caller who writes `.style = .{ .bg = c }` has an anonymous struct
+        // type that is not expressible outside that expression. Comparing it
+        // to anything is unreliable, so a struct-valued field always resolves
+        // to the declared default's type -- which is the destination.
+        .@"struct" => Fallback,
+        else => F,
+    };
+}
+
 pub fn pathChild(parent: u64, index: usize) u64 {
     var h = parent ^ 0xcbf29ce484222325;
     h *%= 0x100000001b3;
@@ -1416,6 +1461,16 @@ pub const Style = struct {
     /// Blur of what is behind this element. Nothing shows unless something is
     /// drawn under it, so it pairs with a translucent `bg`.
     frost: ?Frost = null,
+    /// All four margins at once. A named side wins over this, and this wins
+    /// over whatever the element already carried.
+    ///
+    /// Every field optional, like the rest of `Style`: a merge cannot otherwise
+    /// tell "leave it alone" from "set it to zero", and zero is a real request.
+    margin: ?f32 = null,
+    margin_left: ?f32 = null,
+    margin_right: ?f32 = null,
+    margin_top: ?f32 = null,
+    margin_bottom: ?f32 = null,
 
     pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
         return resolveFill(self.bg, self.bg_grad, fallback);
@@ -1541,6 +1596,11 @@ pub fn Element(comptime M: type) type {
         /// app did not key, and the path is the only one that exists without
         /// asking. Never set this by hand.
         scroll_key: ?u64 = null,
+        /// Every node's position in the tree, stamped before paint. Filled
+        /// for EVERY element, not just containers, so an element without an
+        /// explicit `key` still has an identity: focus, a press that outlives
+        /// a reorder, and tooltip plumbing all need one. Never set by hand.
+        node_path: u64 = 0,
         /// The horizontal half of `scroll_offset`: both axes scroll on every
         /// container kind, so both offsets have to exist.
         scroll_offset_x: f32 = 0,
@@ -1648,6 +1708,16 @@ pub fn Element(comptime M: type) type {
             self.pad = s.pad orelse 0;
             self.halo = s.halo;
             self.frost = s.frost;
+            if (s.margin) |m| {
+                self.margin_left = m;
+                self.margin_right = m;
+                self.margin_top = m;
+                self.margin_bottom = m;
+            }
+            if (s.margin_left) |v| self.margin_left = v;
+            if (s.margin_right) |v| self.margin_right = v;
+            if (s.margin_top) |v| self.margin_top = v;
+            if (s.margin_bottom) |v| self.margin_bottom = v;
         }
 
         /// Overlay `s` on what this element already has: only the fields the
@@ -1669,6 +1739,16 @@ pub fn Element(comptime M: type) type {
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
             if (s.frost) |v| self.frost = v;
+            if (s.margin) |v| {
+                self.margin_left = v;
+                self.margin_right = v;
+                self.margin_top = v;
+                self.margin_bottom = v;
+            }
+            if (s.margin_left) |v| self.margin_left = v;
+            if (s.margin_right) |v| self.margin_right = v;
+            if (s.margin_top) |v| self.margin_top = v;
+            if (s.margin_bottom) |v| self.margin_bottom = v;
         }
 
         /// Totals a row shares out. Computed by ONE function so measure and
@@ -2022,9 +2102,9 @@ pub fn Element(comptime M: type) type {
                 .rect = inner,
                 .clip = f.vp,
                 .msg = self.on_press,
-                .key = self.key,
+                .key = self.key orelse self.scroll_key,
                 .active = !self.disabled,
-                .focusable = self.focusable and self.key != null,
+                .focusable = self.focusable,
                 .scroll = info,
                 .scroll_id = sid,
             });
@@ -2136,6 +2216,13 @@ pub fn Element(comptime M: type) type {
             // Both tests are identity, not overlap. An ancestor overlaps the
             // child it contains, so an overlap test would light up every
             // container with a pressable child in it.
+            // Every element has an identity. An explicit `key` wins; otherwise
+            // the tree path stands in, so `key` is optional everywhere it is
+            // merely needed to BE somebody -- focus, a press that outlives a
+            // reorder, tooltip plumbing. The path is unique per node by
+            // construction, so a synthesized key cannot collide in the
+            // frame-global duplicate-key guard the way an author one can.
+            const kid: u64 = self.key orelse self.node_path;
             var bg_now: ?Fill = self.style().bgFill(null);
             if (!self.disabled) {
                 if (ptr.held) |held| {
@@ -2143,7 +2230,7 @@ pub fn Element(comptime M: type) type {
                         // Rect identity keeps a press through a reflow; key
                         // identity keeps it through a reorder, where the rect
                         // is no longer the one that was pressed.
-                        if (held.eql(rect, clip) or (self.key != null and held.key == self.key)) bg_now = pc;
+                        if (held.eql(rect, clip) or (held.key == kid)) bg_now = pc;
                     }
                 } else if (self.hover_bg) |hc| {
                     if (hov.target) |target| {
@@ -2162,7 +2249,7 @@ pub fn Element(comptime M: type) type {
             // for a DISABLED element -- "why is this greyed out" is the main
             // reason to have a tooltip at all.
             if (self.hover_bg != null or self.tooltip != null) {
-                if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = self.key, .active = !self.disabled, .radius = self.radius, .tooltip = self.tooltip });
+                if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = kid, .active = !self.disabled, .radius = self.radius, .tooltip = self.tooltip });
             }
             // A button or bar always fills, even with no `bg` set, so the
             // geometry default belongs here rather than in the geometry's paint arm.
@@ -2184,7 +2271,7 @@ pub fn Element(comptime M: type) type {
             // An unkeyed element can never match, so `focusable` alone draws
             // nothing -- which is the intended contract, not a special case.
             const focused = self.focusable and !self.disabled and
-                self.key != null and hov.focus != null and hov.focus.? == self.key.?;
+                hov.focus != null and hov.focus.? == kid;
             const border_now: ?Fill = if (focused and !self.disabled) .{ .solid = th.accent } else self.style().borderFill(null);
             const fill_now: ?Fill = bg_now orelse switch (self.geometry) {
                 .button, .bar => .{ .solid = th.control },
@@ -2197,7 +2284,7 @@ pub fn Element(comptime M: type) type {
             // could not leave the box would be a border.
             const hovered = blk: {
                 if (self.disabled) break :blk false;
-                if (ptr.held) |held| break :blk held.eql(rect, clip) or (self.key != null and held.key == self.key);
+                if (ptr.held) |held| break :blk held.eql(rect, clip) or held.key == kid;
                 if (hov.target) |target| break :blk target.eql(rect, clip);
                 if (ptr.pos) |p| break :blk rect.containsRounded(self.radius, p) and clip.contains(p);
                 break :blk false;
@@ -2242,7 +2329,7 @@ pub fn Element(comptime M: type) type {
             // Emitting the generic region as well would put two hits under one
             // key, and the frame-global duplicate-key guard would then report
             // an app for using the feature as documented.
-            const viewport_claims_this = std.meta.activeTag(self.geometry) == .scroll and self.key != null;
+            const viewport_claims_this = std.meta.activeTag(self.geometry) == .scroll;
             // Where the generic region lands. A container that turns out to
             // overflow UPGRADES that region with its scroll extent instead of
             // appending a second one under the same key: two hits per key trips
@@ -2253,15 +2340,15 @@ pub fn Element(comptime M: type) type {
             // and no focus: the runtime has to FIND it to open a popup, move a
             // highlight or start a drag, and a slider produces no message of
             // its own until one of those happens.
-            if (!viewport_claims_this and (self.on_press != null or (self.focusable and self.key != null) or self.widget != null)) {
+            if (!viewport_claims_this and (self.on_press != null or self.focusable or self.widget != null)) {
                 try hitAppend(M, hits, gpa, .{
                     .rect = rect,
                     .clip = clip,
                     .msg = self.on_press,
-                    .key = self.key,
+                    .key = kid,
                     .active = !self.disabled,
                     .radius = self.radius,
-                    .focusable = self.focusable and self.key != null,
+                    .focusable = self.focusable,
                     .widget = self.widget,
                     .roving = self.roving,
                     .roving_index = self.roving_index,
@@ -2350,9 +2437,14 @@ pub fn Element(comptime M: type) type {
 
                 .bar => |b| {
                     // Track came from `fill_now`; only the value overlay here.
+                    //
+                    // ROUNDED, not a quad. A quad ignores `radius`, so a bar
+                    // with one square end and one round end was the visible
+                    // result: the track was drawn as an rrect and the overlay
+                    // as a rectangle on top of it, covering the left corners.
                     var fill = rect;
                     fill.w = rect.w * std.math.clamp(b.value, 0, 1);
-                    r.quad(fill, self.style().fgFill(.{ .solid = th.accent }).?, clip);
+                    r.vtable.rrect(r.ptr, fill, self.radius, self.style().fgFill(.{ .solid = th.accent }).?, false, clip);
                 },
 
                 .rect => {},
@@ -2834,19 +2926,22 @@ pub fn Ui(comptime M: type) type {
             inline for (.{ "margin_left", "margin_right", "margin_top", "margin_bottom" }) |m| {
                 if (@hasField(@TypeOf(o), m)) @field(e, m) += @field(o, m);
             }
-            if (o.key) |k| e.key = k;
-            if (o.disabled) e.disabled = true;
+            // Probed, not assumed: `finish` serves every builder, and not all
+            // of them declare the same fields.
+            if (fieldOr(o, "key", @as(?u64, null))) |k| e.key = k;
+            if (fieldOr(o, "disabled", false)) e.disabled = true;
             // Any element is pressable once it carries a message; that is the
             // generic hit path, not a button privilege. Buttons pass it in as
             // `msg`, everything else through this.
-            if (o.on_press) |msg| e.on_press = msg;
-            if (o.clips) e.clips = true;
-            if (o.hover_bg) |v| e.hover_bg = v;
-            if (o.hover_halo) |v| e.hover_halo = v;
-            if (o.press_bg) |v| e.press_bg = v;
+            if (fieldOr(o, "on_press", @as(?M, null))) |msg| e.on_press = msg;
+            if (fieldOr(o, "clips", false)) e.clips = true;
+            if (fieldOr(o, "hover_bg", @as(?Fill, null))) |v| e.hover_bg = v;
+            if (fieldOr(o, "hover_halo", @as(?Halo, null))) |v| e.hover_halo = v;
+            if (fieldOr(o, "press_bg", @as(?Fill, null))) |v| e.press_bg = v;
             // Caller last: a caller who set a field meant it, and `mergeStyle`
             // writes only the fields they actually set.
-            e.mergeStyle(o.style);
+            const style: Style = fieldOr(o, "style", Style{});
+            e.mergeStyle(style);
             return e;
         }
 
@@ -3044,6 +3139,34 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
+        /// A label is anything that can BE one. A string is used as-is, a
+        /// number or a bool is formatted, and the result lives in the frame
+        /// arena so it outlives `view` the way every other label does.
+        ///
+        /// `anytype` rather than a union: a struct literal cannot call a
+        /// conversion function, and Zig will not coerce "hello", 3 and 3.14
+        /// into one union field without a tag. Accepting `anytype` at the
+        /// builder boundary is the only form that lets `.label = m.count + 1`
+        /// and `.label = "hello"` sit in the same field.
+        pub fn labelOf(self: *Self, v: anytype) []const u8 {
+            return switch (@typeInfo(@TypeOf(v))) {
+                // A literal is known at compile time, so the fastest useful
+                // path is still a static slice where one is expressible.
+                .pointer => |ptr| switch (ptr.size) {
+                    .slice, .one, .many => v,
+                    else => self.labelNum(v),
+                },
+                .optional => v orelse "",
+                .null => "",
+                else => self.labelNum(v),
+            };
+        }
+
+        /// Numbers, bools, enums and anything else with a `format` method.
+        fn labelNum(self: *Self, v: anytype) []const u8 {
+            return self.fmt("{any}", .{v});
+        }
+
         /// Format into the frame arena and hand back the slice.
         ///
         /// This is what makes a formatted label a first-class citizen: it lives
@@ -3063,6 +3186,14 @@ pub fn Ui(comptime M: type) type {
         /// and because `fmt` reads worse when nothing else is set.
         pub fn textFmt(self: *Self, comptime f: []const u8, args: anytype, size: f32) *Elem {
             return self.text(.{ .label = self.fmt(f, args), .size = size });
+        }
+
+        /// `std.debug.print` semantics for a LABEL: the format string is
+        /// comptime and the arguments are checked against it, so a wrong
+        /// argument count or type is a compile error rather than a `{d}` in
+        /// the UI. The result lives in the frame arena, so it outlives `view`.
+        pub fn labelFmt(self: *Self, comptime f: []const u8, args: anytype) []const u8 {
+            return self.fmt(f, args);
         }
 
         pub fn button(self: *Self, o: ButtonOpts) *Elem {
@@ -4542,6 +4673,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             // path is unique per node by construction, which is also why a
             // synthesized key cannot collide in the frame-global duplicate-key
             // guard the way an app-authored one could.
+            e.node_path = path;
             const tag = std.meta.activeTag(e.geometry);
             switch (tag) {
                 .column, .row, .stack, .scroll => {
@@ -5706,6 +5838,10 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     var a: Element(void) = .{ .geometry = .{ .rect = {} } };
     a.applyStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
+        // `margin` is a RESOLVER, not a stored field: applyStyle fans it out
+        // into the four sides, and an Element has no `margin` to compare with.
+        // Its effect is covered by asserting the sides below.
+        if (comptime std.mem.eql(u8, f.name, "margin")) continue;
         if (@typeInfo(f.type).optional.child == f32) {
             // applyStyle defaults an absent radius/pad, so compare as optional
             try std.testing.expect(@field(a, f.name) == @field(full, f.name).?);
@@ -5714,10 +5850,15 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
         }
     }
 
+    // The shorthand really did fan out: one `margin` set every side.
+    try std.testing.expectEqual(@as(f32, 7), a.margin_left);
+    try std.testing.expectEqual(@as(f32, 7), a.margin_top);
+
     // mergeStyle: only the fields the caller set, all of which are set here
     var m: Element(void) = .{ .geometry = .{ .rect = {} } };
     m.mergeStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "margin")) continue;
         if (@typeInfo(f.type).optional.child == f32) {
             try std.testing.expect(@field(m, f.name) == @field(full, f.name).?);
         } else {
@@ -6303,7 +6444,9 @@ fn tabView(s: *TabState, ui: *Ui(TabMsg)) *Element(TabMsg) {
     const c = ui.button(.{ .label = "c", .msg = .c, .key = 3 });
     a.focusable = true;
     b.focusable = true;
-    unkeyed.focusable = true; // focusable but unnamed, so it cannot be landed on
+    // Focusable and unnamed. Keys are automatic now: the tree path stands in,
+    // so this IS landable, and `tabViewUnkeyed` below exposes its identity.
+    unkeyed.focusable = true;
     c.focusable = true;
     return ui.column(.{ .children = &.{ a, b, unkeyed, not_focusable, c } });
 }
@@ -6314,18 +6457,34 @@ test "tab walks document order, skips a disabled control, and wraps" {
     defer rt.deinit();
 
     rt.state.disable_mid = true;
+    var x_key: u64 = 0;
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
 
+        // The unkeyed control's identity is derived, not authored, so the test
+        // reads it off the frame rather than hardcoding a hash.
+        // Second focusable in document order is the unkeyed one.
+        x_key = f.focusStep(1, true) orelse return error.TestUnexpectedResult;
+        std.debug.print("\nDISABLED order: ", .{});
+        var cur: ?u64 = f.focusStep(null, true);
+        while (cur) |c| {
+            std.debug.print("{d} ", .{c});
+            cur = f.focusStep(c, true);
+            if (cur != null and cur.? == 1) break;
+        }
+        std.debug.print("\n", .{});
+        try std.testing.expect(x_key != 1 and x_key != 3);
+
         // Ascending index is document order, not the reverse order hit() uses.
         try std.testing.expectEqual(@as(?u64, 1), f.focusStep(null, true));
-        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(1, true));
+        try std.testing.expectEqual(@as(?u64, x_key), f.focusStep(1, true));
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(x_key, true));
         try std.testing.expectEqual(@as(?u64, 1), f.focusStep(3, true));
 
         // Backwards from nowhere starts at the last candidate.
         try std.testing.expectEqual(@as(?u64, 3), f.focusStep(null, false));
-        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(1, false));
+        try std.testing.expectEqual(@as(?u64, 1), f.focusStep(x_key, false));
 
         // A key that no longer exists is a rebuild, not a dead end.
         try std.testing.expectEqual(@as(?u64, 1), f.focusStep(99, true));
@@ -6341,9 +6500,21 @@ test "tab walks document order, skips a disabled control, and wraps" {
     {
         var f = try rt.frame(.{ .w = 200, .h = 300 }, nominalRenderer());
         defer f.deinit();
+        std.debug.print("\nDIRECT 1->{?d} x->{?d} 2->{?d}\n", .{ f.focusStep(1, true), f.focusStep(x_key, true), f.focusStep(2, true) });
+        std.debug.print("\nENABLED order: ", .{});
+        var cur2: ?u64 = f.focusStep(null, true);
+        while (cur2) |c| {
+            std.debug.print("{d} ", .{c});
+            cur2 = f.focusStep(c, true);
+            if (cur2 != null and cur2.? == 1) break;
+        }
+        std.debug.print("\n", .{});
         try std.testing.expectEqual(@as(?u64, 2), f.focusStep(1, true));
-        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(2, true));
-        try std.testing.expectEqual(@as(?u64, 2), f.focusStep(3, false));
+        try std.testing.expectEqual(@as(?u64, x_key), f.focusStep(2, true));
+        try std.testing.expectEqual(@as(?u64, 3), f.focusStep(x_key, true));
+        // Back from 3 lands on the unkeyed control: it sits between 2 and 3
+        // in document order now that it has a derived identity.
+        try std.testing.expectEqual(@as(?u64, x_key), f.focusStep(3, false));
     }
 
     // Nothing focusable at all: Tab is not ours, so the caller gets null and
