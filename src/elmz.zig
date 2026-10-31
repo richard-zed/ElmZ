@@ -7283,8 +7283,11 @@ test "a command still running does not stop finished ones being reaped" {
         var quick_done: std.atomic.Value(usize) = .init(0);
         fn block(ctx: *const anyopaque) ?u32 {
             _ = ctx;
-            var guard: usize = 0;
-            while (!release.load(.acquire) and guard < 4_000_000) : (guard += 1) {
+            // No iteration cap. This command must still be running when the
+            // assertions below run, and a bounded loop let it finish on its
+            // own under load -- which made the test fail for a reason that had
+            // nothing to do with the reaping rule it exists to check.
+            while (!release.load(.acquire)) {
                 std.Thread.yield() catch {};
             }
             return 1;

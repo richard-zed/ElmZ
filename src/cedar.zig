@@ -55,7 +55,16 @@ pub const Font = struct {
     face: cedar.Font = undefined,
     ok: bool = false,
     /// Cheap identity for caches: which byte buffer this face borrows.
+    ///
+    /// MIXED WITH THE COLLECTION INDEX AND THE VARIATION ID, because neither is
+    /// a property of the bytes. Two faces of one `.ttc` share a pointer and a
+    /// variable face pinned to two weights shares a pointer; a cache keyed on
+    /// the buffer alone would answer one for the other, forever.
     id: usize = 0,
+    /// Which face of a font collection was asked for. Kept so `atCoords` can
+    /// re-open from the same bytes at the same index rather than silently
+    /// dropping to face 0.
+    index: u32 = 0,
 
     cache: cedar.Cache = undefined,
     cache_ok: bool = false,
@@ -71,6 +80,18 @@ pub const Font = struct {
 
     pub fn fingerprint(self: *const Font) usize {
         return if (self.ok) self.id else 0;
+    }
+
+    /// The cache key for the CURRENT instance.
+    ///
+    /// `id` alone identifies the bytes; this folds in the collection index and
+    /// Cedar's variation id so a face pinned to a different point in its design
+    /// space keys differently. Nothing that caches a glyph may key on
+    /// `fingerprint` instead -- that is the bug this exists to prevent.
+    pub fn instanceKey(self: *const Font) usize {
+        if (!self.ok) return 0;
+        const v: usize = @intCast(self.face.variationId());
+        return self.id ^ (@as(usize, self.index) << 3) ^ (v *% 0x9E3779B1);
     }
 
     /// Whether a real typeface is attached.
@@ -116,12 +137,136 @@ pub const Font = struct {
     }
 
     pub fn init(bytes: []const u8) Font {
+        return initIndex(bytes, 0);
+    }
+
+    /// The Nth face of a font collection (`.ttc`).
+    ///
+    /// A collection is one file holding several faces, and on a stock system it
+    /// is frequently the ONLY place a CJK typeface lives -- so a loader that
+    /// accepts `.ttc` and then always reads face 0 hands back the wrong family
+    /// and nothing says so. A non-collection answers face 0 from any index
+    /// rather than refusing, because a caller walking faces has no way to know
+    /// which kind of file it is holding.
+    pub fn initIndex(bytes: []const u8, index: u32) Font {
         var f: Font = .{};
         if (bytes.len == 0) return f;
-        f.face = cedar.Font.init(bytes) catch return f;
+        f.face = cedar.Font.initIndex(bytes, index) catch return f;
         f.ok = true;
         f.id = @intFromPtr(bytes.ptr);
+        f.index = index;
         return f;
+    }
+
+    /// One axis of the design space, e.g. `wght` from 100 to 900.
+    ///
+    /// The tag is Cedar's packed four-byte form, and `tagOf` turns "wght" into
+    /// it -- a caller should not be writing integer literals to name an axis.
+    /// Cedar keeps `Axis` in a module `glyfz` does not re-export, so this is
+    /// the same four fields restated at the seam rather than reaching through
+    /// the backend's internals.
+    pub const Axis = struct {
+        tag: u32,
+        min: f32,
+        default: f32,
+        max: f32,
+    };
+
+    /// Pack four ASCII bytes into the tag layout the tables use.
+    pub fn tagOf(name: *const [4]u8) u32 {
+        return (@as(u32, name[0]) << 24) | (@as(u32, name[1]) << 16) |
+            (@as(u32, name[2]) << 8) | @as(u32, name[3]);
+    }
+
+    /// How many variation axes the face declares. Zero for a static face,
+    /// which is the ordinary case and not a failure.
+    pub fn axisCount(self: *const Font) usize {
+        if (!self.ok) return 0;
+        return self.face.axisCount();
+    }
+
+    pub fn axis(self: *const Font, i: usize) ?Axis {
+        if (!self.ok) return null;
+        const a = self.face.axisInfo(i) orelse return null;
+        return .{ .tag = a.tag, .min = a.min, .default = a.default, .max = a.max };
+    }
+
+    /// This face pinned to a point in its design space.
+    ///
+    /// `user` is in axis order and in USER units -- a `wght` of 700, not a
+    /// normalised -1..1 -- and Cedar normalises it, through `avar` where the
+    /// face has one. Missing values stay at the axis default, so varying one
+    /// axis of a two-axis face is legal.
+    ///
+    /// The returned `Font` BORROWS THE SAME BYTES and answers a different
+    /// `instanceKey`, which is the whole contract: a cache shared between the
+    /// two serves each its own glyphs. Caches and kerns are deliberately NOT
+    /// copied across -- a cache holds slices into caller memory and a second
+    /// owner of the same slice would free or truncate it under the first.
+    /// Re-attach them (`attachCache` and friends) on the instance that draws.
+    pub fn atCoords(self: *const Font, user: []const f32) Font {
+        if (!self.ok) return .{};
+        var f = self.*;
+        f.face = self.face.withCoords(user);
+        f.cache_ok = false;
+        f.lookup_ok = false;
+        f.kern = null;
+        return f;
+    }
+
+    /// One layer of a colour glyph: a glyph id and the palette entry it takes
+    /// its colour from.
+    pub const ColorLayer = struct {
+        glyph: u16,
+        palette_index: u16,
+    };
+    /// A resolved colour, straight out of the face's CPAL palette.
+    pub const Rgba = struct {
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    };
+
+    /// Whether the face carries colour glyphs at all -- what a caller asks
+    /// before deciding to check per glyph.
+    pub fn hasColor(self: *const Font) bool {
+        if (!self.ok) return false;
+        return self.face.hasColor();
+    }
+
+    /// The layers of a colour glyph, or null for "draw this normally".
+    ///
+    /// Null is the ordinary answer, not an error: in every real emoji face most
+    /// glyphs are monochrome, and a caller that treated null as failure would
+    /// draw nothing for the alphabet. `out` is caller storage so this allocates
+    /// nothing; a glyph with more layers than `out` holds reports null, because
+    /// half a glyph is not the glyph.
+    pub fn colorLayers(self: *const Font, gid: u16, out: []ColorLayer) ?[]ColorLayer {
+        if (!self.ok) return null;
+        // Cedar's `Layer` and this one are the same two u16s in the same order,
+        // but they are different types, so the copy is explicit -- a cast would
+        // break silently if either side grew a field. Caller storage, so a
+        // fixed scratch is the only allocation on this path and there is none.
+        const n = @min(out.len, max_layers);
+        var scratch: [max_layers]cedar.Layer = undefined;
+        const got = self.face.colorLayers(gid, scratch[0..n]) orelse return null;
+        for (got, 0..) |l, i| out[i] = .{ .glyph = l.glyph, .palette_index = l.palette_index };
+        return out[0..got.len];
+    }
+
+    /// Largest layer stack accepted. COLRv0 glyphs are a handful of layers;
+    /// the cap exists so the scratch above is fixed-size and this stays
+    /// allocation-free on a per-glyph path.
+    pub const max_layers = 32;
+
+    /// A colour from the face's palette. Null when the face has no CPAL, or
+    /// when that palette entry does not exist -- a layer naming an entry the
+    /// palette lacks is a font bug, and the caller decides what to paint.
+    pub fn paletteColor(self: *const Font, palette: u16, index: u16) ?Rgba {
+        if (!self.ok) return null;
+        const c = self.face.paletteColor(palette, index) orelse return null;
+        return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
     }
 
     /// Point the glyph cache at caller-owned storage. Must be called after the
@@ -608,4 +753,146 @@ fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8)
         const out = a + da * (1.0 - a);
         px[i + 3] = @intFromFloat(@round(out * 255.0));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests.
+//
+// This file had none until the face-index/axes/colour surface landed, which
+// meant a change here was verified only by "the examples still compile" --
+// the green-where-it-never-ran class. They are declared here rather than in
+// software.zig because that is where the behaviour lives; build.zig points a
+// test root at this file so they actually execute.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// The one face the tests use, and where to get it.
+///
+/// Deliberately NOT a search across whatever the machine happens to have. A test
+/// that asserts different things on different machines is not much of a test,
+/// and a search that silently picks the wrong family is worse than none: this
+/// one used to return on its FIRST iteration whatever the result -- there was no
+/// `else` on the loop -- so it queried DejaVu and gave up, and every caller
+/// skipped on a box with no DejaVu while three more paths sat unread.
+///
+/// So: name one face, and if it is not there, skip. Downloading it is a small
+/// price for a test that means the same thing everywhere.
+const fixture_face = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+fn anyFace(bytes_out: []u8) ?[]const u8 {
+    // readFile returns the filled slice itself; slicing it again is a type
+    // error (usize expected) and was a real one until this fix.
+    return std.Io.Dir.cwd().readFile(
+        std.Io.Threaded.global_single_threaded.io(),
+        fixture_face,
+        bytes_out,
+    ) catch null;
+}
+
+test "two faces of one collection do not share a cache key" {
+    // The bug this guards: the cache key was the byte pointer alone, so two
+    // faces of a `.ttc` differed by nothing and a cache served one's glyphs
+    // for the other's -- silently, forever. Built from real faces because the
+    // property is about what `instanceKey` is computed FROM, and fabricating a
+    // `Font` would let the field drop out and still pass.
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+
+    var a = Font.initIndex(bytes, 0);
+    try testing.expect(a.available());
+    var b = a;
+    b.index = 1; // same bytes, different face of the collection
+
+    // Both borrow the SAME buffer, so `fingerprint` cannot tell them apart --
+    // that is the whole point of the change.
+    try testing.expectEqual(a.fingerprint(), b.fingerprint());
+    // `instanceKey` must.
+    try testing.expect(a.instanceKey() != b.instanceKey());
+}
+
+test "a face with no storage answers no axes and no colour" {
+    const f = Font.none;
+    try testing.expectEqual(@as(usize, 0), f.axisCount());
+    try testing.expect(f.axis(0) == null);
+    try testing.expect(!f.hasColor());
+    try testing.expect(f.paletteColor(0, 0) == null);
+    var layers: [4]Font.ColorLayer = undefined;
+    try testing.expect(f.colorLayers(1, &layers) == null);
+    try testing.expectEqual(@as(usize, 0), f.instanceKey());
+}
+
+test "initIndex on a non-collection reads face zero rather than refusing" {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const zero = Font.initIndex(bytes, 0);
+    try testing.expect(zero.available());
+    // A plain .ttf has one face; asking for face 7 must not hand back a valid
+    // face, and must not crash trying.
+    const seventh = Font.initIndex(bytes, 7);
+    try testing.expect(!seventh.available());
+}
+
+test "a static face reports no axes and atCoords returns it unchanged" {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const f = Font.init(bytes);
+    try testing.expect(f.available());
+    // DejaVuSans and Roboto-Regular are both static; if this machine's first
+    // font happens to be variable the test is meaningless, so say so rather
+    // than assert a fact that is not about the code.
+    if (f.axisCount() != 0) return error.SkipZigTest;
+    const pinned = f.atCoords(&.{700});
+    try testing.expect(pinned.available());
+    try testing.expectEqual(f.instanceKey(), pinned.instanceKey());
+    try testing.expectEqual(f.index, pinned.index);
+}
+
+test "atCoords drops the attached caches instead of sharing them" {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    var f = Font.init(bytes);
+    try testing.expect(f.available());
+    f.cache_ok = true;
+    f.lookup_ok = true;
+    const pinned = f.atCoords(&.{});
+    // The caches hold slices into caller storage. Carrying `cache_ok` across
+    // would give one buffer two owners, which is how it gets truncated under
+    // whichever instance draws second.
+    try testing.expect(!pinned.cache_ok);
+    try testing.expect(!pinned.lookup_ok);
+    try testing.expect(pinned.kern == null);
+}
+
+test "a monochrome face has no colour, and asking costs no error" {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const f = Font.init(bytes);
+    try testing.expect(f.available());
+    // Every desktop font is monochrome; an emoji face is not, so a machine that
+    // has one installed would make this assertion wrong about the FACE while
+    // the code under test is still correct.
+    if (f.hasColor()) return error.SkipZigTest;
+    var layers: [4]Font.ColorLayer = undefined;
+    try testing.expect(f.colorLayers(1, &layers) == null);
+    try testing.expect(f.paletteColor(0, 0) == null);
+}
+
+test "colour layers truncate at the cap rather than overrunning caller storage" {
+    // The cap is what keeps this allocation-free. A caller passing more storage
+    // than max_layers must not make the scratch array index past its end.
+    var out: [Font.max_layers + 8]Font.ColorLayer = undefined;
+    const f = Font.none;
+    try testing.expect(f.colorLayers(0, &out) == null);
+    // And a caller passing fewer than the cap is equally null on a dead face --
+    // the point is that neither slice length panics.
+    var small: [2]Font.ColorLayer = undefined;
+    try testing.expect(f.colorLayers(0, &small) == null);
+}
+
+test "axis tags pack the way the tables spell them" {
+    // "wght" is 0x77676874 in the format. A byte-order slip here names an axis
+    // nothing answers to, silently.
+    try testing.expectEqual(@as(u32, 0x77676874), Font.tagOf("wght"));
+    try testing.expectEqual(@as(u32, 0x77647468), Font.tagOf("wdth"));
 }

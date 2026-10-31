@@ -76,6 +76,12 @@ pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
 /// can prefer its own shipped directory over the system's.
 pub const font_dirs = [_][]const u8{ "/usr/share/fonts", "/usr/local/share/fonts", "/system/fonts" };
 
+/// The single face the tests measure, and the only one they look for.
+///
+/// Not a search: a test that asserts different things on different machines is
+/// not much of a test. Absent means the caller skips.
+pub const fixture_face: []const u8 = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
 fn looksLikePath(name: []const u8) bool {
     if (std.mem.indexOfScalar(u8, name, '/') != null) return true;
     inline for ([_][]const u8{ ".ttf", ".otf", ".ttc" }) |ext| {
@@ -359,21 +365,54 @@ pub const testing_font = struct {
         return out.toOwnedSlice(gpa) catch null;
     }
 
-    pub fn anySystemFont(gpa: Allocator, io: std.Io) ?[]u8 {
-        for (font_dirs) |d| {
-            var paths: std.ArrayListUnmanaged([]u8) = .empty;
-            defer {
-                for (paths.items) |q| gpa.free(q);
-                paths.deinit(gpa);
-            }
-            collectFonts(gpa, io, d, &paths) catch continue;
-            for (paths.items) |q| {
-                const bytes = std.Io.Dir.cwd().readFileAlloc(io, q, gpa, .limited(16 * 1024 * 1024)) catch continue;
-                if (bytes.len > 4) return bytes;
+    /// A face that actually maps every one of `cps`, or null.
+    ///
+    /// `anySystemFont` answers "is there a face at all", which is the wrong
+    /// question for a test that measures a specific string: the first face in
+    /// directory order on a stock Linux box is Noto Naskh Arabic, which parses
+    /// perfectly and has no CJK, so a test asserting on \u65e5 measures zero and
+    /// fails for a reason that has nothing to do with the code under test.
+    /// Asking the face is the same rule `Font.hasGlyph` exists for.
+    pub fn fontWith(gpa: Allocator, io: std.Io, cps: []const u21) ?[]u8 {
+        const all = systemFonts(gpa, io) orelse return null;
+        var keep: ?[]u8 = null;
+        for (all) |bytes| {
+            if (keep != null) {
                 gpa.free(bytes);
+                continue;
             }
+            const f = @import("cedar.zig").Font.init(bytes);
+            var ok = f.available();
+            for (cps) |cp| {
+                if (!f.hasGlyph(cp)) ok = false;
+            }
+            if (ok) keep = bytes else gpa.free(bytes);
         }
-        return null;
+        gpa.free(all);
+        return keep;
+    }
+
+    /// One named fixture face, or null to skip.
+    ///
+    /// This used to walk `font_dirs` and return the FIRST readable file, which
+    /// is whatever the filesystem happens to list first -- on a stock Linux box
+    /// that is a Noto Arabic face, which parses fine and draws nothing for
+    /// Latin. A caller that then measured a string got a plausible number for a
+    /// font it never asked for, which is how a test passes while proving
+    /// nothing. Naming one face makes the result the same everywhere, and a
+    /// missing face skips instead of silently substituting a different one.
+    pub fn anySystemFont(gpa: Allocator, io: std.Io) ?[]u8 {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(
+            io,
+            fixture_face,
+            gpa,
+            .limited(16 * 1024 * 1024),
+        ) catch return null;
+        if (bytes.len <= 4) {
+            gpa.free(bytes);
+            return null;
+        }
+        return bytes;
     }
 };
 const Allocator = std.mem.Allocator;
@@ -771,9 +810,29 @@ pub const Canvas = struct {
     /// go with it. Cleared unconditionally: emptying an empty map is free, and
     /// the flag that used to guard it was a field doing the same work.
     pub fn setFont(self: *Self, bytes: []const u8) void {
+        self.setFontAt(bytes, 0, &.{});
+    }
+
+    /// Point the canvas at a VARIABLE INSTANCE of a face.
+    ///
+    /// `coords` is in axis order, in user units -- a `wght` of 700, not a
+    /// normalised value. Empty coords means the face's default instance, which
+    /// is exactly what `setFont` asks for.
+    ///
+    /// Both caches are cleared, and that is not caution: a measurement at 300
+    /// is not the measurement at 900, and the cache key carries the INSTANCE,
+    /// not the byte buffer, precisely so the two cannot collide. A caller who
+    /// varied the weight mid-run without this would lay out the previous
+    /// weight's widths.
+    ///
+    /// The instance borrows `bytes` like every other face here: the same rule
+    /// applies, `bytes` must outlive the canvas.
+    pub fn setFontAt(self: *Self, bytes: []const u8, index: u32, coords: []const f32) void {
         self.clearMeasureCache();
         self.clearWrapCache();
-        self.font = Face.init(bytes);
+        var face = Face.initIndex(bytes, index);
+        if (coords.len > 0) face = face.atCoords(coords);
+        self.font = face;
         if (self.font_mem) |m| {
             self.font.attachCache(&m.bytes);
             self.font.attachLookup(&m.lookup);
@@ -2392,7 +2451,7 @@ pub const Canvas = struct {
     /// at the next frame's reset, which is the trap that makes a naive version
     /// corrupt rather than slow.
     fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
-        const face = self.font.fingerprint();
+        const face = self.font.instanceKey();
         const probe: MeasureKey = .{ .text = bytes, .dev = dev, .face = face };
         if (self.measure_cache.get(probe)) |m| {
             self.measure_hits += 1;
@@ -2430,7 +2489,7 @@ pub const Canvas = struct {
     /// the row fit, then paint), so the second and third ask are now free.
     fn cachedWrap(self: *Self, bytes: []const u8, dev: f32, max_w: f32, out: [][]const u8) usize {
         if (out.len == 0) return 0;
-        const face = self.font.fingerprint();
+        const face = self.font.instanceKey();
         if (self.wrap_cache.get(.{ .text = bytes, .dev = dev, .max_w = max_w, .face = face })) |e| {
             self.wrap_hits += 1;
             const n = @min(e.n, out.len);
@@ -2782,7 +2841,7 @@ test "text is really antialiased and its measure is not a guess" {
 }
 
 test "utf-8 is decoded, not measured as bytes" {
-    const any = testing_font.anySystemFont(testing.allocator, std.testing.io) orelse return;
+    const any = testing_font.fontWith(testing.allocator, std.testing.io, &.{ '日', '本' }) orelse return;
     defer testing.allocator.free(any);
     const face = Face.init(any);
     const one = face.measure("日", 24);
@@ -4478,4 +4537,103 @@ test "punctuation is never stranded at the start of a CJK line" {
     for (buf[0..n]) |line| {
         try std.testing.expect(!std.mem.endsWith(u8, line, "「"));
     }
+}
+
+test "two weights of a variable face differ through the seam" {
+    // The seam, end to end: `setFontAt` asks for an instance, and the renderer
+    // must answer differently for it. Before this test the path did not exist
+    // -- `setFont` took bytes and nothing else, so a variable face could only
+    // ever draw its default instance.
+    //
+    // PIXELS, not advances. An advance comes from `hmtx`/HVAR and can diverge
+    // with a dead variation store, so a width comparison cannot prove the
+    // OUTLINES moved; this face in particular keeps its advance constant across
+    // weight, which makes a width assertion fail for a reason that has nothing
+    // to do with the seam. Rasterising the glyph and counting ink is the
+    // observation that actually tracks the outline. Cedar's own suite proves
+    // the store itself; this proves the seam routes coordinates into it.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/root/NovusGroteskVF-cff2.otf.ttf",
+        std.testing.allocator,
+        .limited(32 * 1024 * 1024),
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(bytes);
+
+    var c = try Canvas.init(std.testing.allocator, 200, 100);
+    defer c.deinit();
+    const r = c.renderer();
+
+    // The face must really be variable, or the test would pass by drawing the
+    // same default twice.
+    const probe = @import("cedar.zig").Font.init(bytes);
+    if (probe.axisCount() == 0) return error.SkipZigTest;
+
+    const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+
+    c.setFontAt(bytes, 0, &.{300});
+    r.text(10, 10, 60, ink, "H", area);
+    const light_hash = std.hash.Wyhash.hash(0, c.px);
+    const light_ink = countInk(c.px);
+
+    @memset(c.px, 0);
+    c.setFontAt(bytes, 0, &.{900});
+    r.text(10, 10, 60, ink, "H", area);
+    const heavy_hash = std.hash.Wyhash.hash(0, c.px);
+    const heavy_ink = countInk(c.px);
+
+    // A weight axis moves the OUTLINE: the heavy instance covers measurably
+    // more area than the light one.
+    try std.testing.expect(light_ink > 0);
+    try std.testing.expect(heavy_ink > light_ink);
+    try std.testing.expect(light_hash != heavy_hash);
+
+    // And the caches must not answer across instances: redrawing the light
+    // instance has to reproduce the light pixels exactly.
+    @memset(c.px, 0);
+    c.setFontAt(bytes, 0, &.{300});
+    r.text(10, 10, 60, ink, "H", area);
+    try std.testing.expectEqual(light_hash, std.hash.Wyhash.hash(0, c.px));
+}
+
+/// Non-zero pixels in a frame. Used by the variation test to compare how much
+/// of the canvas each weight covers.
+fn countInk(px: []const u8) usize {
+    var n: usize = 0;
+    for (px) |p| {
+        if (p != 0) n += 1;
+    }
+    return n;
+}
+
+test "a measurement cache does not answer across variation instances" {
+    // `setFontAt` clears both caches, so rekeying them is invisible through it.
+    // The state that distinguishes `instanceKey` from `fingerprint` is a face
+    // swapped WITHOUT a clear -- which is what this asserts directly: the key
+    // the caches are filed under must separate two weights of one file.
+    //
+    // `fingerprint` hashes the BYTES, and two weights are one file, so it
+    // collides here and the light measurement would be served to the heavy
+    // face. That is precisely the bug the instance key exists to prevent.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/root/NovusGroteskVF-cff2.otf.ttf",
+        std.testing.allocator,
+        .limited(32 * 1024 * 1024),
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(bytes);
+
+    const probe = @import("cedar.zig").Font.init(bytes);
+    if (probe.axisCount() == 0) return error.SkipZigTest;
+
+    const light = probe.atCoords(&.{300});
+    const heavy = probe.atCoords(&.{900});
+
+    // Same file, so the byte identity is the SAME...
+    try std.testing.expectEqual(light.fingerprint(), heavy.fingerprint());
+    // ...and the instance identity must NOT be.
+    try std.testing.expect(light.instanceKey() != heavy.instanceKey());
 }

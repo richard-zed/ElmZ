@@ -415,9 +415,30 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const test_step = b.step("test", "run core + software + runner + reducer tests");
+    // cedar.zig is the font seam and had no test root, so a change there was
+    // verified only by "the examples still compile" -- the same green-where-it-
+    // never-ran class as the reducer below. It needs `elmz` because `Font` is
+    // measured in elmz's units.
+    const cedar_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cedar.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                // cedar.zig imports the decoder directly (`@import("glyfz")`),
+                // so this root needs the module too. Without it only this root
+                // failed to compile, which is why the seam looked green while
+                // its own tests had never run.
+                .{ .name = "glyfz", .module = cedar_mod },
+            },
+        }),
+    });
+
+    const test_step = b.step("test", "run core + software + runner + reducer + font tests");
     test_step.dependOn(&b.addRunArtifact(software_tests).step);
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(cedar_tests).step);
     test_step.dependOn(&b.addRunArtifact(runner_tests).step);
     test_step.dependOn(&b.addRunArtifact(reducer_tests).step);
 

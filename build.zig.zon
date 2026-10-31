@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .glyfz = .{
-            .url = "git+https://github.com/richard-zed/glyfz?ref=v0.5.4b#99190d75df3e784d9f11dcc70ae81a8696c3cd24",
-            .hash = "glyfz-0.5.3-NGxR_ArhBwAbd4LPBoDWso_4FeoCaZXHPSBNu6gRyHt-",
+            .url = "git+https://github.com/richard-zed/glyfz?ref=v0.5.5#612be7e69f71e957443f4e065297a9a1f79f98f3",
+            .hash = "glyfz-0.5.5-NGxR_C7vBwApJs18M47qnlb6MsCKt88GLrqThWBfg-Ks",
         },
     },
     .paths = .{
