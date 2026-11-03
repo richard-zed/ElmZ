@@ -23,5 +23,5 @@ pub fn main(init: std.process.Init) !void {
     // and panics on a null entry. A launcher-supplied environment is not ours to
     // assume well-formed, and nothing about a GUI app's exit should depend on
     // stderr being usable. The window is the output.
-    _ = try runner.runApp(app.app, gpa, init.io, platform.asWindow());
+    _ = try runner.runAppEnv(app.app, gpa, init.io, init.environ_map, platform.asWindow());
 }

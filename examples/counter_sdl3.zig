@@ -56,5 +56,5 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 pub fn main(init: std.process.Init) !void {
     var w = try sdl.Windows.init(app.title, app.size.w, app.size.h);
     defer w.deinit();
-    _ = try runner.runApp(app, init.gpa, init.io, w.asWindow());
+    _ = try runner.runAppEnv(app, init.gpa, init.io, init.environ_map, w.asWindow());
 }

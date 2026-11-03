@@ -29,5 +29,5 @@ pub fn main(init: std.process.Init) !void {
     var platform = try sdl.Windows.init(app.app.title, app.app.size.w, app.app.size.h);
     defer platform.deinit();
 
-    _ = try runner.runApp(app.app, gpa, init.io, platform.asWindow());
+    _ = try runner.runAppEnv(app.app, gpa, init.io, init.environ_map, platform.asWindow());
 }

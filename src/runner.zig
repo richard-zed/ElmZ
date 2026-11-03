@@ -101,13 +101,16 @@ pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
 }
 
 pub const Options = struct {
-    /// The user's home directory, for the font search's `~` entries. `null`
-    /// means "no user fonts", which is what a headless run wants: a test must
-    /// not start depending on whatever the machine has installed.
+    /// The user's home directory, for the font search's `~` entries.
     ///
-    /// A parameter rather than a `std.process` call inside the search, because
-    /// 0.16 keeps the environment on `process.Init` and the search has no
-    /// business reaching for a global it was not handed.
+    /// Resolved from `$HOME` off `process.Init.environ_map` in `runApp`, so an
+    /// app that says nothing still gets user fonts. That is the library's job:
+    /// the font chain needs a home directory, and making every app set a field
+    /// to switch on a baseline feature is how a feature goes missing silently.
+    ///
+    /// Leave `null` to inherit. Set it to override (a test harness pinning the
+    /// search to a fixture tree), or to `""` for "no user fonts" -- a headless
+    /// run must not start depending on whatever the machine has installed.
     home: ?[]const u8 = null,
     /// Stop after this many events. null = run until the window says quit.
     max_events: ?u32 = null,
@@ -556,6 +559,17 @@ fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io:
 /// `app` is a comptime struct literal with: title, size, Model, Msg,
 /// update, view, and optionally `state` (initial model).
 pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Window) !Stats {
+    return runAppEnv(app, gpa, io, null, window);
+}
+
+/// `runApp` with the process environment available to the font search.
+///
+/// The environment is a parameter, not a global lookup: it is handed in at the
+/// one place that has it (`main`'s `init.environ_map`) and threaded down, so
+/// the font chain still reaches for nothing it was not given. `null` means "no
+/// environment", i.e. no user fonts -- the right answer for a headless run or a
+/// test, which must not inherit whatever the machine happens to have installed.
+pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const std.process.Environ.Map, window: elmz.Window) !Stats {
     const S = app.Model;
     const M = app.Msg;
 
@@ -577,11 +591,16 @@ pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Wi
     }
 
     var opts: Options = .{ .io = io, .gpa = gpa, .overlay = default_overlay };
-    // User fonts need a home directory, and `runApp` only receives `io`; the
-    // caller that has `init` passes it in through a struct field, same trick as
-    // `state`. Consumed by the font chain, not by `runApp` itself.
+    // An app may pin the search to its own tree (a fixture in a test); the
+    // environment below is the default, because needing a home directory is the
+    // library's problem, not something every app should have to remember.
     if (@hasField(@TypeOf(app), "home")) opts.home = app.home;
     if (@hasField(@TypeOf(app), "font_home")) opts.home = app.font_home;
+    // Nothing declared: take it from the environment, because a font chain
+    // without a home directory is a feature that silently does nothing.
+    if (opts.home == null) {
+        if (env) |e| opts.home = e.get("HOME");
+    }
     // Keystrokes and typed text, same optional-field trick as `state`: an app
     // that declares `on_key` / `on_text` gets them, one that does not never
     // hears about them and pays nothing. Focus stays in the app's Model -- the
