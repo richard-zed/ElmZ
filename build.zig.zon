@@ -4,9 +4,9 @@
     .fingerprint = 0xcf267a1fad5393f,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .glyfz = .{
-            .url = "git+https://github.com/richard-zed/glyfz?ref=v0.5.6#b50218e5926220451ccfba005334a2e031dd26ce",
-            .hash = "glyfz-0.5.6-NGxR_MjxBwAWoRiMJIsKulIvl0VSgLqLVrs3D7lHgQDd",
+        .inkwell = .{
+            .url = "git+https://github.com/richard-zed/Inkwell?ref=v0.5.7#3df559743c594a68419da2610015bc08f7ae5490",
+            .hash = "inkwell-0.5.7--16WKIe7CAB28GVVFNtbJQjg7RL7ua6eEDp3VvblX_k4",
         },
     },
     .paths = .{

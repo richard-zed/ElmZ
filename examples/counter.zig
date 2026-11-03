@@ -52,10 +52,10 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     reset.margin_left = 14;
     const acts = ui.row(.{ .children = &.{ dec, inc, reset } });
 
-    const line0 = ui.textFmt("{d}", .{m.count}, 42);
+    const line0 = ui.text(.{ .label = ui.fmt("{d}", .{m.count}), .size = 42 });
     line0.margin_top = 10;
     acts.margin_top = 8;
-    const line1 = ui.textFmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }, 12);
+    const line1 = ui.text(.{ .label = ui.fmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }), .size = 12 });
     line1.margin_top = 10;
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ", .size = 22 }),

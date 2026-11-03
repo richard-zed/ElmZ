@@ -37,10 +37,10 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     reset.margin_left = 14;
     const acts = ui.row(.{ .children = &.{ dec, inc, reset } });
 
-    const count = ui.textFmt("{d}", .{m.count}, 42);
+    const count = ui.text(.{ .label = ui.fmt("{d}", .{m.count}), .size = 42 });
     count.margin_top = 10;
     acts.margin_top = 8;
-    const tally = ui.textFmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }, 12);
+    const tally = ui.text(.{ .label = ui.fmt("{d} press(es), {d} primitives-ish", .{ m.presses, m.count }), .size = 12 });
     tally.margin_top = 10;
 
     return ui.column(.{ .children = &.{

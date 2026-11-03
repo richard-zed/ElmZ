@@ -86,7 +86,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         "elsewhere and nothing fires; release back on it and it does.", .size = 12, .tone = .muted, .wrap = true });
 
     pair.margin_top = 14;
-    const line0 = ui.textFmt("A fired {d}  ·  B fired {d}", .{ m.a, m.b }, 18);
+    const line0 = ui.text(.{ .label = ui.fmt("A fired {d}  ·  B fired {d}", .{ m.a, m.b }), .size = 18 });
     line0.margin_top = 14;
     tally.margin_top = 4;
     reset.margin_top = 16;

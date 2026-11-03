@@ -3139,34 +3139,6 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
-        /// A label is anything that can BE one. A string is used as-is, a
-        /// number or a bool is formatted, and the result lives in the frame
-        /// arena so it outlives `view` the way every other label does.
-        ///
-        /// `anytype` rather than a union: a struct literal cannot call a
-        /// conversion function, and Zig will not coerce "hello", 3 and 3.14
-        /// into one union field without a tag. Accepting `anytype` at the
-        /// builder boundary is the only form that lets `.label = m.count + 1`
-        /// and `.label = "hello"` sit in the same field.
-        pub fn labelOf(self: *Self, v: anytype) []const u8 {
-            return switch (@typeInfo(@TypeOf(v))) {
-                // A literal is known at compile time, so the fastest useful
-                // path is still a static slice where one is expressible.
-                .pointer => |ptr| switch (ptr.size) {
-                    .slice, .one, .many => v,
-                    else => self.labelNum(v),
-                },
-                .optional => v orelse "",
-                .null => "",
-                else => self.labelNum(v),
-            };
-        }
-
-        /// Numbers, bools, enums and anything else with a `format` method.
-        fn labelNum(self: *Self, v: anytype) []const u8 {
-            return self.fmt("{any}", .{v});
-        }
-
         /// Format into the frame arena and hand back the slice.
         ///
         /// This is what makes a formatted label a first-class citizen: it lives
@@ -3179,21 +3151,6 @@ pub fn Ui(comptime M: type) type {
                 self.failWith(.layout_allocation);
                 return "";
             };
-        }
-
-        /// The short form for the common case: formatted text at one size, no
-        /// other appearance. Kept because it is two thirds of the call sites,
-        /// and because `fmt` reads worse when nothing else is set.
-        pub fn textFmt(self: *Self, comptime f: []const u8, args: anytype, size: f32) *Elem {
-            return self.text(.{ .label = self.fmt(f, args), .size = size });
-        }
-
-        /// `std.debug.print` semantics for a LABEL: the format string is
-        /// comptime and the arguments are checked against it, so a wrong
-        /// argument count or type is a compile error rather than a `{d}` in
-        /// the UI. The result lives in the frame arena, so it outlives `view`.
-        pub fn labelFmt(self: *Self, comptime f: []const u8, args: anytype) []const u8 {
-            return self.fmt(f, args);
         }
 
         pub fn button(self: *Self, o: ButtonOpts) *Elem {
@@ -5019,7 +4976,7 @@ fn tView(s: *TState, ui: *Ui(TMsg)) *Element(TMsg) {
     const minus = ui.button(.{ .label = "-", .msg = .dec, .width = 40 });
     const plus = ui.button(.{ .label = "+", .msg = .inc, .width = 40 });
     return ui.column(.{ .children = &.{
-        ui.textFmt("{d}", .{s.n}, 20),
+        ui.text(.{ .label = ui.fmt("{d}", .{s.n}), .size = 20 }),
         ui.row(.{ .children = &.{ minus, plus } }),
     } });
 }
@@ -5331,7 +5288,7 @@ fn bandUpdate(_: *u8, _: BandM) Action(BandM) {
 fn bandView(s: *u8, ui: *Ui(BandM)) *Element(BandM) {
     var kids: [200]*Element(BandM) = undefined;
     const n: usize = if (s.* == 0) 1 else kids.len;
-    for (kids[0..n], 0..) |*k, i| k.* = ui.textFmt("{d}", .{i}, 12);
+    for (kids[0..n], 0..) |*k, i| k.* = ui.text(.{ .label = ui.fmt("{d}", .{i}), .size = 12 });
     return ui.column(.{ .children = kids[0..n] });
 }
 

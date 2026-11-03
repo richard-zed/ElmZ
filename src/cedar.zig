@@ -1,7 +1,7 @@
 //! TrueType text: glyph metrics and rasterisation, via Cedar.
 //!
 //! Cedar is the font backend inside Elm. It is a separate project, published as
-//! `glyfz`; that name appears once below, in the import, and nowhere else.
+//! `Inkwell`; that name appears once below, in the import, and nowhere else.
 //!
 //! No C and no stb. Cedar parses the face and rasterises the outline, and the
 //! glyph cache behind `drawText` is the reason the switch pays: stb allocates,
@@ -27,7 +27,7 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const gamma = @import("gamma.zig");
-const cedar = @import("glyfz");
+const cedar = @import("inkwell");
 const linebreak = @import("linebreak.zig");
 
 // Line breaking is pure Unicode logic with no font data in it, so it lives in
@@ -162,7 +162,7 @@ pub const Font = struct {
     ///
     /// The tag is Cedar's packed four-byte form, and `tagOf` turns "wght" into
     /// it -- a caller should not be writing integer literals to name an axis.
-    /// Cedar keeps `Axis` in a module `glyfz` does not re-export, so this is
+    /// Cedar keeps `Axis` in a module `Inkwell` does not re-export, so this is
     /// the same four fields restated at the seam rather than reaching through
     /// the backend's internals.
     pub const Axis = struct {

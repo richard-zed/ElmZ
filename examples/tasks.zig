@@ -71,7 +71,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 68 });
 
-    const line0 = ui.textFmt("{d}/{d} done", .{ done, m.items.len }, 10);
+    const line0 = ui.text(.{ .label = ui.fmt("{d}/{d} done", .{ done, m.items.len }), .size = 10 });
     line0.margin_left = 10;
     reset.margin_left = 10;
     const foot = ui.row(.{ .children = &.{

@@ -1415,7 +1415,7 @@ fn tView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     // A row, so the button is measured at its natural width; a column would
     // stretch every child to the full inner width and hide the metrics.
     const r = ui.row(.{ .children = &.{
-        ui.textFmt("{d}", .{s.n}, 20),
+        ui.text(.{ .label = ui.fmt("{d}", .{s.n}), .size = 20 }),
         ui.button(.{ .label = "inc", .msg = .inc }),
     }, .gap = 10 });
     return r;
@@ -1758,7 +1758,7 @@ fn aUpdate(s: *AState, m: AMsg) elmz.Action(AMsg) {
 }
 
 fn aView(s: *AState, ui: *elmz.Ui(AMsg)) *elmz.Element(AMsg) {
-    return ui.textFmt("{d}", .{s.got}, 12);
+    return ui.text(.{ .label = ui.fmt("{d}", .{s.got}), .size = 12 });
 }
 
 test "a command runs on a worker thread and its result is dispatched" {
@@ -1904,7 +1904,7 @@ fn cUpdate(s: *CState, m: CMsg) elmz.Action(CMsg) {
 
 fn cView(s: *CState, ui: *elmz.Ui(CMsg)) *elmz.Element(CMsg) {
     return ui.row(.{ .children = &.{
-        ui.textFmt("{d}", .{s.got}, 12),
+        ui.text(.{ .label = ui.fmt("{d}", .{s.got}), .size = 12 }),
         ui.button(.{ .label = "go", .msg = .{ .press = {} } }),
     } });
 }
@@ -2914,7 +2914,7 @@ test "keystrokes and typed text reach the app's hooks, and null does not repaint
             return .{};
         }
         fn view(s: *KState, ui: *elmz.Ui(KMsg)) *elmz.Element(KMsg) {
-            return ui.textFmt("{d}", .{s.downs}, 20);
+            return ui.text(.{ .label = ui.fmt("{d}", .{s.downs}), .size = 20 });
         }
         // 'a' is ours, everything else is not. The null path is half the
         // contract, so the test proves that half too.

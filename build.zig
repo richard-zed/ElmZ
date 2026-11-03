@@ -74,8 +74,8 @@ pub fn build(b: *std.Build) void {
     // Cedar, the font backend, comes from its own package. Pinned by commit
     // and hash in build.zig.zon, so a clone builds the same code this tree was
     // verified against -- and no path on one machine is baked into the build.
-    const cedar_dep = b.dependency("glyfz", .{ .target = target, .optimize = optimize });
-    const cedar_mod = cedar_dep.module("glyfz");
+    const cedar_dep = b.dependency("inkwell", .{ .target = target, .optimize = optimize });
+    const cedar_mod = cedar_dep.module("inkwell");
 
     const software_mod = b.addModule("software", .{
         .root_source_file = b.path("src/software.zig"),
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
     });
     // No C in the font path any more: Cedar is Zig, so nothing is compiled
     // from a translation unit and nothing is included from src/.
-    software_mod.addImport("glyfz", cedar_mod);
+    software_mod.addImport("inkwell", cedar_mod);
 
     // the loop: needs elmz + software, knows no platform
     const runner_mod = b.addModule("runner", .{
@@ -426,11 +426,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
-                // cedar.zig imports the decoder directly (`@import("glyfz")`),
+                // cedar.zig imports the decoder directly (`@import("inkwell")`),
                 // so this root needs the module too. Without it only this root
                 // failed to compile, which is why the seam looked green while
                 // its own tests had never run.
-                .{ .name = "glyfz", .module = cedar_mod },
+                .{ .name = "inkwell", .module = cedar_mod },
             },
         }),
     });

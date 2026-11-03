@@ -91,9 +91,9 @@ pub fn onKey(m: *Model, k: elmz.keys.Key) ?Msg {
 }
 
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-    const line0 = ui.textFmt("{d} edit(s), {d} name byte(s), {d} secret byte(s)", .{
+    const line0 = ui.text(.{ .label = ui.fmt("{d} edit(s), {d} name byte(s), {d} secret byte(s)", .{
         m.edits, m.name.value.len, m.pass.value.len,
-    }, 12);
+    }), .size = 12 });
     line0.margin_top = 14;
     return ui.column(.{
         .children = &.{

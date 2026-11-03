@@ -74,7 +74,7 @@ fn overviewBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
 
     const meter = ui.bar(.{ .value = @as(f32, @floatFromInt(m.level)) / 10.0, .height = 12 });
 
-    const line0 = ui.textFmt("level {d} of 10", .{m.level}, 14);
+    const line0 = ui.text(.{ .label = ui.fmt("level {d} of 10", .{m.level}), .size = 14 });
     line0.margin_top = 6;
     controls.margin_top = 10;
     return ui.column(.{ .children = &.{
@@ -98,7 +98,7 @@ fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
 
         // A conditional tint is an optional: unset means "whatever the theme
         // says", so the selected row and the plain row are one construction.
-        const line = ui.row(.{ .children = &.{ marker, ui.textFmt("{d}   {s}", .{ i + 1, name }, 14) }, .gap = 10, .on_press = .{ .select = i }, .style = .{
+        const line = ui.row(.{ .children = &.{ marker, ui.text(.{ .label = ui.fmt("{d}   {s}", .{ i + 1, name }), .size = 14 }) }, .gap = 10, .on_press = .{ .select = i }, .style = .{
             .pad = 8,
             .bg = if (selected) ui.theme.selected else null,
             .border = if (selected) ui.theme.accent else null,
@@ -108,7 +108,7 @@ fn listBody(ui: *elmz.Ui(Msg), m: *Model) !*elmz.Element(Msg) {
     }
 
     rows[0].margin_top = 2;
-    const line1 = ui.textFmt("selected {s}", .{names[m.selected]}, 10);
+    const line1 = ui.text(.{ .label = ui.fmt("selected {s}", .{names[m.selected]}), .size = 10 });
     line1.margin_top = 4;
     return ui.column(.{ .children = &.{
         ui.text(.{ .label = "A LIST", .size = 10, .tone = .muted }),
@@ -150,9 +150,9 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     nav.margin_top = 8;
     panel.margin_top = 6;
-    const line2 = ui.textFmt("clicks {d}   view {s}   level {d}", .{
+    const line2 = ui.text(.{ .label = ui.fmt("clicks {d}   view {s}   level {d}", .{
         m.clicks, @tagName(m.tab), m.level,
-    }, 10);
+    }), .size = 10 });
     line2.margin_top = 8;
     const root = ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ GALLERY", .size = 22 }),
