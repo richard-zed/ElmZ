@@ -97,8 +97,8 @@ fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *
         .style = .{
             .pad = 10,
             .radius = 8,
-            .bg = if (active) ui.theme.selected else ui.theme.control,
-            .fg = if (active) ui.theme.text else ui.theme.text_muted,
+            .bg = elmz.solid(if (active) ui.theme.selected else ui.theme.control),
+            .fg = elmz.solid(if (active) ui.theme.text else ui.theme.text_muted),
         },
     });
     // Focus is a plain field, not a builder option: it only matters to Tab,
@@ -124,7 +124,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const accent_fill = ui.gradients.get("accent") orelse elmz.Fill.hgrad(th.accent, elmz.Color.rgbHex(0xf5c2e7));
 
     // -- header ------------------------------------------------------------
-    const title = ui.text(.{ .label = "panes", .size = 30, .style = .{ .fg_grad = accent_fill } });
+    const title = ui.text(.{ .label = "panes", .size = 30, .style = .{ .fg = accent_fill } });
     const sub = ui.text(.{
         .label = "scroll, tabs, one face at four sizes, and a popup that dismisses on an outside click",
         .size = 12,
@@ -150,7 +150,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .children = &rows_buf,
         .gap = 2,
         .key = scroll_key,
-        .style = .{ .pad = 8, .bg = th.panel, .radius = 12, .border = th.border },
+        .style = .{ .pad = 8, .bg = elmz.solid(th.panel), .radius = 12, .border = elmz.solid(th.border) },
     });
     vp.width = 300;
     vp.height = 268;
@@ -159,8 +159,8 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const actions_head = ui.text(.{ .label = "actions", .size = 11, .tone = .muted });
 
     const primary = ui.button(.{ .label = "Open menu", .msg = .menu_open, .key = 4, .width = 200, .style = .{
-        .bg_grad = accent_fill,
-        .fg = th.text,
+        .bg = accent_fill,
+        .fg = elmz.solid(th.text),
     } });
     const inert = ui.button(.{ .label = "Unavailable", .msg = .pick, .key = 5, .width = 200, .disabled = true });
 
@@ -182,19 +182,19 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             ui.text(.{ .label = "13 - body text, the size the list rows use", .size = 13, .margin_top = 8 }),
             ui.text(.{ .label = "11 - captions and metadata", .size = 11, .tone = .muted, .margin_top = 8 }),
             ui.text(.{ .label = "A second FACE is not reachable from here yet: the canvas holds one, so per-element type waits for the font roadmap.", .size = 11, .tone = .muted, .wrap = true, .margin_top = 14 }),
-        }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } }),
+        }, .width = 340, .style = .{ .pad = 16, .bg = elmz.solid(th.panel), .radius = 12, .border = elmz.solid(th.border) } }),
         2 => ui.column(.{ .children = &.{
             ui.text(.{ .label = "notes", .size = 18 }),
             ui.text(.{ .label = "Wrapped text breaks at spaces and at newlines and is measured at the width it is given, so this paragraph reflows with the panel rather than running past it. A single word wider than the box is elided, not spilled.", .size = 13, .wrap = true, .margin_top = 10 }),
             stats,
-        }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } }),
+        }, .width = 340, .style = .{ .pad = 16, .bg = elmz.solid(th.panel), .radius = 12, .border = elmz.solid(th.border) } }),
         else => ui.column(.{ .children = &.{
             actions_head,
             primary,
             inert,
             stats,
             ui.text(.{ .label = "The disabled button stays in the hit list with active = false, so a click cannot fall through to whatever is behind it.", .size = 11, .tone = .muted, .wrap = true, .margin_top = 12 }),
-        }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } }),
+        }, .width = 340, .style = .{ .pad = 16, .bg = elmz.solid(th.panel), .radius = 12, .border = elmz.solid(th.border) } }),
     };
 
     panel.margin_left = 16;
@@ -223,7 +223,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         popupItem(ui, "Duplicate", 31),
         popupItem(ui, "Rename", 32),
         popupItem(ui, "Remove", 33),
-    }, .gap = 2, .style = .{ .pad = 8, .bg = th.panel, .radius = 10, .border = th.border } });
+    }, .gap = 2, .style = .{ .pad = 8, .bg = elmz.solid(th.panel), .radius = 10, .border = elmz.solid(th.border) } });
     pop.width = 190;
     pop.offset = .{ 386, 120 };
     pop.halo = .{ .color = th.bg, .offset = .{ 0, 6 }, .blur = 16, .mode = .outer_glow };

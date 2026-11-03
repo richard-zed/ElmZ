@@ -40,30 +40,30 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const pink = elmz.Color.rgbHex(0xf5c2e7);
     const green = elmz.Color.rgbHex(0xa6e3a1);
 
-    const title = ui.text(.{ .label = "fills", .size = 22, .style = .{ .fg_grad = elmz.Fill.hgrad(th.accent, pink) } });
+    const title = ui.text(.{ .label = "fills", .size = 22, .style = .{ .fg = elmz.Fill.hgrad(th.accent, pink) } });
 
     // -- backgrounds -------------------------------------------------------
-    const vert = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg_grad = elmz.Fill.vgrad(th.accent, th.bg), .radius = 10 } });
+    const vert = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg = elmz.Fill.vgrad(th.accent, th.bg), .radius = 10 } });
 
-    const horz = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg_grad = elmz.Fill.hgrad(th.bg, pink), .radius = 10 } });
+    const horz = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg = elmz.Fill.hgrad(th.bg, pink), .radius = 10 } });
 
-    const rad = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg_grad = elmz.Fill.radialFill(th.accent, th.bg), .radius = 10 } });
+    const rad = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg = elmz.Fill.radialFill(th.accent, th.bg), .radius = 10 } });
 
     const bg_row = ui.row(.{ .children = &.{ vert, horz, rad }, .gap = 12 });
 
     // -- borders -----------------------------------------------------------
-    const square = ui.rect(.{ .width = 160, .height = 72, .style = .{ .border_grad = elmz.Fill.vgrad(th.accent, green) } });
+    const square = ui.rect(.{ .width = 160, .height = 72, .style = .{ .border = elmz.Fill.vgrad(th.accent, green) } });
 
-    const round = ui.rect(.{ .width = 160, .height = 72, .style = .{ .radius = 16, .border_grad = elmz.Fill.hgrad(pink, th.accent) } });
+    const round = ui.rect(.{ .width = 160, .height = 72, .style = .{ .radius = 16, .border = elmz.Fill.hgrad(pink, th.accent) } });
 
-    const tri = ui.rect(.{ .width = 160, .height = 72, .style = .{ .radius = 16, .bg_grad = .{ .linear = .{ .stops = elmz.Stops.three(th.accent, pink, green) } } } });
+    const tri = ui.rect(.{ .width = 160, .height = 72, .style = .{ .radius = 16, .bg = .{ .linear = .{ .stops = elmz.Stops.three(th.accent, pink, green) } } } });
 
     const border_row = ui.row(.{ .children = &.{ square, round, tri }, .gap = 12 });
 
     // -- text and a bar ----------------------------------------------------
-    const grad_text = ui.text(.{ .label = "gradient text runs", .size = 26, .style = .{ .fg_grad = elmz.Fill.hgrad(th.accent, pink) } });
+    const grad_text = ui.text(.{ .label = "gradient text runs", .size = 26, .style = .{ .fg = elmz.Fill.hgrad(th.accent, pink) } });
 
-    const bar = ui.bar(.{ .value = 0.65, .width = 504, .height = 14, .style = .{ .fg_grad = elmz.Fill.hgrad(th.accent, green) } });
+    const bar = ui.bar(.{ .value = 0.65, .width = 504, .height = 14, .style = .{ .fg = elmz.Fill.hgrad(th.accent, green) } });
 
     const note = ui.text(.{ .label = "backgrounds, borders (square and rounded) and text all take a Fill", .size = 12, .tone = .muted });
 

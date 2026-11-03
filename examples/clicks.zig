@@ -69,9 +69,9 @@ fn whichName(w: Which) []const u8 {
 fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // The last button that fired stays tinted, so a click that went nowhere
     // looks like nowhere: neither counter moves and neither button lights.
-    const a = ui.button(.{ .label = "A", .msg = .a, .width = 120, .height = 56, .style = .{ .bg = if (m.last == .a) ui.theme.accent else ui.theme.control } });
+    const a = ui.button(.{ .label = "A", .msg = .a, .width = 120, .height = 56, .style = .{ .bg = elmz.solid(if (m.last == .a) ui.theme.accent else ui.theme.control) } });
 
-    const b = ui.button(.{ .label = "B", .msg = .b, .width = 120, .height = 56, .style = .{ .bg = if (m.last == .b) ui.theme.accent else ui.theme.control } });
+    const b = ui.button(.{ .label = "B", .msg = .b, .width = 120, .height = 56, .style = .{ .bg = elmz.solid(if (m.last == .b) ui.theme.accent else ui.theme.control) } });
 
     const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 92 });
 

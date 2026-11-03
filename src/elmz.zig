@@ -564,6 +564,14 @@ fn longestWord(r: Renderer, bytes: []const u8, size: f32) f32 {
     return best;
 }
 
+
+/// A flat colour as a fill. Free function because `Fill.solid` is already a
+/// union member, so a method of the same name cannot exist. This is what keeps
+/// `.fg = elmz.solid(c)` readable without spelling the union tag at each site.
+pub fn solid(c: Color) Fill {
+    return .{ .solid = c };
+}
+
 /// How wide a row child ends up when the row cannot give everyone what they
 /// asked for. The deficit is shared out in proportion to each child's SLACK
 /// (`w - min_w`), so a text that can wrap shrinks and a button that cannot
@@ -1443,13 +1451,11 @@ fn hitAppend(
 /// reused, and asserted in a test without rendering anything. That is the whole
 /// point of it existing as a type rather than eight assignments to an element.
 pub const Style = struct {
-    bg: ?Color = null,
-    /// gradient override for `bg`
-    bg_grad: ?Fill = null,
-    fg: ?Color = null,
-    fg_grad: ?Fill = null,
-    border: ?Color = null,
-    border_grad: ?Fill = null,
+    /// A fill is either a flat colour or a gradient, so one field covers both.
+    /// Build one with `solid`, `hgrad` or `vgrad`.
+    bg: ?Fill = null,
+    fg: ?Fill = null,
+    border: ?Fill = null,
     /// `null` means the caller did not specify, which is what lets a widget
     /// merge a caller style over its own defaults and still let someone force
     /// a square corner with `radius = 0`.
@@ -1473,23 +1479,26 @@ pub const Style = struct {
     margin_bottom: ?f32 = null,
 
     pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
-        return resolveFill(self.bg, self.bg_grad, fallback);
+        return self.bg orelse fallback;
     }
     pub fn fgFill(self: Style, fallback: ?Fill) ?Fill {
-        return resolveFill(self.fg, self.fg_grad, fallback);
+        return self.fg orelse fallback;
     }
     pub fn borderFill(self: Style, fallback: ?Fill) ?Fill {
-        return resolveFill(self.border, self.border_grad, fallback);
+        return self.border orelse fallback;
     }
 };
 
-/// The one rule for a slot: the gradient wins over the flat colour, because a
-/// caller who set a gradient meant it. `fallback` is what the geometry or the theme
-/// defaults to when the caller set neither.
-fn resolveFill(solid: ?Color, grad: ?Fill, fallback: ?Fill) ?Fill {
-    if (grad) |g| return g;
-    if (solid) |c| return .{ .solid = c };
-    return fallback;
+/// Merging two fills, one of which may have come from a flat `bg` and the
+/// other from a gradient: a gradient wins over a flat colour, because a caller
+/// who reached for a gradient meant it. Two flats: `new` wins.
+fn mergeFill(old: ?Fill, new: ?Fill) ?Fill {
+    const n = new orelse return old;
+    if (n != .solid) return n;
+    if (old) |o| {
+        if (o != .solid) return o;
+    }
+    return n;
 }
 
 pub fn Element(comptime M: type) type {
@@ -1522,16 +1531,13 @@ pub fn Element(comptime M: type) type {
         width: ?f32 = null,
         height: ?f32 = null,
         /// fills this element's rect before anything inside it is painted
-        bg: ?Color = null,
-        /// gradient override for `bg`; wins over the flat colour when set
-        bg_grad: ?Fill = null,
+        bg: ?Fill = null,
         /// what this element draws with on top of `bg`: text colour, control
         /// label, bar fill. Appearance lives on the element rather than inside
         /// `Geometry`, so the geometry describes structure only — which is what lets a
         /// widget take its colours from the theme instead of needing a variant
         /// per look.
-        fg: ?Color = null,
-        fg_grad: ?Fill = null,
+        fg: ?Fill = null,
         /// A glow or shadow behind this element, following its corner radius.
         /// Appearance only: no layout cost, no hit region, no children moved.
         halo: ?Halo = null,
@@ -1546,8 +1552,7 @@ pub fn Element(comptime M: type) type {
         /// not have to keep a copy of the resting look to restore later.
         hover_halo: ?Halo = null,
         /// 1px inset outline, drawn inside the rect so it costs no layout
-        border: ?Color = null,
-        border_grad: ?Fill = null,
+        border: ?Fill = null,
         /// wrap text to the width layout gives this element
         wrap: bool = false,
         /// corner rounding; 0 = square. Clamped to half the shorter side.
@@ -1676,11 +1681,8 @@ pub fn Element(comptime M: type) type {
         pub fn style(self: *const Self) Style {
             return .{
                 .bg = self.bg,
-                .bg_grad = self.bg_grad,
                 .fg = self.fg,
-                .fg_grad = self.fg_grad,
                 .border = self.border,
-                .border_grad = self.border_grad,
                 .radius = self.radius,
                 .pad = self.pad,
                 .halo = self.halo,
@@ -1699,11 +1701,11 @@ pub fn Element(comptime M: type) type {
         /// compiles; this is the short path, not an enforced boundary.
         pub fn applyStyle(self: *Self, s: Style) void {
             self.bg = s.bg;
-            self.bg_grad = s.bg_grad;
+            self.bg = mergeFill(self.bg, s.bg);
             self.fg = s.fg;
-            self.fg_grad = s.fg_grad;
+            self.fg = mergeFill(self.fg, s.fg);
             self.border = s.border;
-            self.border_grad = s.border_grad;
+            self.border = mergeFill(self.border, s.border);
             self.radius = s.radius orelse 0;
             self.pad = s.pad orelse 0;
             self.halo = s.halo;
@@ -1730,11 +1732,11 @@ pub fn Element(comptime M: type) type {
         /// ask for square corners on a rounded widget.
         pub fn mergeStyle(self: *Self, s: Style) void {
             if (s.bg) |v| self.bg = v;
-            if (s.bg_grad) |v| self.bg_grad = v;
+            if (s.bg) |v| self.bg = v;
             if (s.fg) |v| self.fg = v;
-            if (s.fg_grad) |v| self.fg_grad = v;
+            if (s.fg) |v| self.fg = v;
             if (s.border) |v| self.border = v;
-            if (s.border_grad) |v| self.border_grad = v;
+            if (s.border) |v| self.border = v;
             if (s.radius) |v| self.radius = v;
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
@@ -3135,7 +3137,7 @@ pub fn Ui(comptime M: type) type {
             e.wrap = o.wrap;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
-            if (o.tone == .muted) e.fg = self.theme.text_muted;
+            if (o.tone == .muted) e.fg = .{ .solid = self.theme.text_muted };
             return self.finish(e, o);
         }
 
@@ -3164,7 +3166,7 @@ pub fn Ui(comptime M: type) type {
             e.hover_bg = .{ .solid = self.theme.hover };
             e.press_bg = .{ .solid = self.theme.pressed };
             // The geometry's own look, then the caller's overlay.
-            e.applyStyle(.{ .bg = self.theme.control, .fg = self.theme.text });
+            e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .fg = .{ .solid = self.theme.text } });
             return self.finish(e, o);
         }
 
@@ -3172,7 +3174,7 @@ pub fn Ui(comptime M: type) type {
             const e = self.mk(.{ .bar = .{ .value = o.value } });
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
-            e.applyStyle(.{ .bg = self.theme.control, .fg = self.theme.accent });
+            e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .fg = .{ .solid = self.theme.accent } });
             return self.finish(e, o);
         }
 
@@ -3196,7 +3198,7 @@ pub fn Ui(comptime M: type) type {
 
         pub fn separator(self: *Self, o: SeparatorOpts) *Elem {
             const t = @max(1.0, o.thickness);
-            const e = self.rect(.{ .width = t, .height = t, .style = .{ .bg = self.theme.border } });
+            const e = self.rect(.{ .width = t, .height = t, .style = .{ .bg = .{ .solid = self.theme.border } } });
             // The CROSS axis stretches. An unset extent is what both a column's
             // child and a row's child read as "fill the slot you were given", so
             // clearing one side here is the whole of the orientation.
@@ -5390,8 +5392,8 @@ fn kUpdate(_: *KState, _: KMsg) Action(KMsg) {
 }
 
 fn gradView(_: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
-    const box = ui.rect(.{ .width = 80, .height = 40, .style = .{ .bg = ui.theme.panel, .bg_grad = Fill.vgrad(ui.theme.accent, ui.theme.bg), .border = ui.theme.border, .border_grad = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
-    const label = ui.text(.{ .label = "grad", .size = 12, .style = .{ .fg_grad = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
+    const box = ui.rect(.{ .width = 80, .height = 40, .style = .{ .bg = Fill.vgrad(ui.theme.accent, ui.theme.bg), .border = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
+    const label = ui.text(.{ .label = "grad", .size = 12, .style = .{ .fg = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
     return ui.column(.{ .children = &.{ box, label } });
 }
 
@@ -7672,8 +7674,8 @@ fn wgListOnly(s: *WgState, ui: *Ui(WgMsg)) *Element(WgMsg) {
 
 fn wgTabsAt(s: *WgState, ui: *Ui(WgMsg), sel: u16) *Element(WgMsg) {
     _ = s;
-    const a = ui.rect(.{ .width = 10, .height = 10, .style = .{ .bg = Color.rgbHex(0x123456) } });
-    const b = ui.rect(.{ .width = 10, .height = 10, .style = .{ .bg = Color.rgbHex(0x654321) } });
+    const a = ui.rect(.{ .width = 10, .height = 10, .style = .{ .bg = solid(Color.rgbHex(0x123456)) } });
+    const b = ui.rect(.{ .width = 10, .height = 10, .style = .{ .bg = solid(Color.rgbHex(0x654321)) } });
     return ui.column(.{ .children = &.{
         ui.tabs(.{
             .key = 95,

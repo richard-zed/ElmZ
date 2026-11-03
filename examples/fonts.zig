@@ -61,7 +61,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             ui.text(.{ .label = "MIXED case, muted tone, tabular-ish 1,234.56", .size = 17, .tone = .muted, .margin_top = 8 }),
             ui.text(.{ .label = "rtl/arabic, CJK and emoji are NOT here yet -- one face, no fallback chain", .size = 12, .tone = .muted, .margin_top = 14 }),
         },
-        .style = .{ .pad = 28, .bg = th.bg },
+        .style = .{ .pad = 28, .bg = elmz.solid(th.bg) },
     });
 }
 

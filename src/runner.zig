@@ -1836,14 +1836,14 @@ fn sView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
         ui.rect(.{ .width = 8, .height = 20 }),
         ui.text(.{ .label = "nested", .size = 10 }),
         ui.button(.{ .label = "inc", .msg = .inc }),
-    }, .gap = 6, .style = .{ .pad = 4, .border = ui.theme.accent } });
+    }, .gap = 6, .style = .{ .pad = 4, .border = elmz.solid(ui.theme.accent) } });
 
     inner.margin_top = 4;
     const box = ui.column(.{ .children = &.{
         ui.text(.{ .label = "stress", .size = 14 }),
         inner,
         ui.bar(.{ .value = 0.5 }),
-    }, .gap = 2, .style = .{ .pad = 10, .bg = ui.theme.panel, .border = ui.theme.text_muted } });
+    }, .gap = 2, .style = .{ .pad = 10, .bg = elmz.solid(ui.theme.panel), .border = elmz.solid(ui.theme.text_muted) } });
     return box;
 }
 
@@ -2029,7 +2029,7 @@ fn cardView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
     const card = ui.column(.{ .children = &.{
         b,
-    }, .width = 200, .hover_bg = .{ .solid = ui.theme.hover }, .press_bg = .{ .solid = ui.theme.pressed }, .style = .{ .pad = 20, .bg = ui.theme.control } });
+    }, .width = 200, .hover_bg = .{ .solid = ui.theme.hover }, .press_bg = .{ .solid = ui.theme.pressed }, .style = .{ .pad = 20, .bg = elmz.solid(ui.theme.control) } });
     return card;
 }
 
@@ -2248,9 +2248,9 @@ test "a paragraph wraps to its width and paints one prim per line" {
 /// below the bottom edge.
 fn clipView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const a = ui.rect(.{ .width = 600, .height = 60, .style = .{ .bg = ui.theme.accent } });
-    const b = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = ui.theme.accent } });
-    const c = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = ui.theme.accent } }); // starts at y = 90, wholly outside
+    const a = ui.rect(.{ .width = 600, .height = 60, .style = .{ .bg = elmz.solid(ui.theme.accent) } });
+    const b = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = elmz.solid(ui.theme.accent) } });
+    const c = ui.rect(.{ .width = 600, .height = 20, .style = .{ .bg = elmz.solid(ui.theme.accent) } }); // starts at y = 90, wholly outside
     c.margin_top = 10;
     const box = ui.column(.{ .children = &.{ a, b, c }, .width = 120, .height = 80 });
     box.clips = true;
@@ -2353,8 +2353,8 @@ test "a press outside a clipping container is not a hit" {
 
 fn noopClipOff(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
-    const blk = ui.rect(.{ .width = 40, .height = 10, .style = .{ .bg = ui.theme.accent } });
-    const box = ui.column(.{ .children = &.{ ui.text(.{ .label = "fits", .size = 12 }), blk }, .width = 120, .height = 60, .style = .{ .bg = ui.theme.panel } });
+    const blk = ui.rect(.{ .width = 40, .height = 10, .style = .{ .bg = elmz.solid(ui.theme.accent) } });
+    const box = ui.column(.{ .children = &.{ ui.text(.{ .label = "fits", .size = 12 }), blk }, .width = 120, .height = 60, .style = .{ .bg = elmz.solid(ui.theme.panel) } });
     return ui.column(.{ .children = &.{box} });
 }
 
@@ -2529,17 +2529,17 @@ fn rectOf(p: elmz.Primitive) elmz.Rect {
 }
 
 fn bgView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .bg = ui.theme.panel } });
+    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .bg = elmz.solid(ui.theme.panel) } });
     return r;
 }
 
 fn borderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .border = ui.theme.accent } });
+    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .border = elmz.solid(ui.theme.accent) } });
     return r;
 }
 
 fn bgAndBorderView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
-    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .bg = ui.theme.panel, .border = ui.theme.accent } });
+    const r = ui.rect(.{ .width = 40, .height = 20, .style = .{ .bg = elmz.solid(ui.theme.panel), .border = elmz.solid(ui.theme.accent) } });
     return r;
 }
 

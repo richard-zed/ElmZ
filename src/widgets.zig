@@ -101,7 +101,7 @@ pub fn textInput(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const e = ui.rect(.{
         .width = 0,
         .height = 0,
-        .style = o.style orelse .{ .bg = ui.theme.control, .radius = 4 },
+        .style = o.style orelse .{ .bg = elmz.solid(ui.theme.control), .radius = 4 },
     });
     // `RectOpts` sizes are non-optional -- a rect always has a box -- but a
     // FIELD does not: null width means "as wide as the parent gives me", and
@@ -143,17 +143,17 @@ pub fn slider(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const track = ui.rect(.{
         .width = if (o.orientation == .horizontal) o.length else o.thickness,
         .height = if (o.orientation == .horizontal) o.thickness else o.length,
-        .style = .{ .bg = ui.theme.control, .radius = o.thickness / 2 },
+        .style = .{ .bg = elmz.solid(ui.theme.control), .radius = o.thickness / 2 },
     });
     const fill = ui.rect(.{
         .width = if (o.orientation == .horizontal) along else o.thickness,
         .height = if (o.orientation == .horizontal) o.thickness else along,
-        .style = .{ .bg = ui.theme.accent, .radius = o.thickness / 2 },
+        .style = .{ .bg = elmz.solid(ui.theme.accent), .radius = o.thickness / 2 },
     });
     const knob = ui.rect(.{
         .width = d,
         .height = d,
-        .style = .{ .bg = ui.theme.bg, .border = ui.theme.border, .radius = d / 2 },
+        .style = .{ .bg = elmz.solid(ui.theme.bg), .border = elmz.solid(ui.theme.border), .radius = d / 2 },
     });
 
     switch (o.orientation) {
@@ -362,7 +362,7 @@ pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
             const outer = ui.rect(.{
                 .width = o.box,
                 .height = o.box,
-                .style = .{ .bg = mark, .border = th.border, .radius = 3 },
+                .style = .{ .bg = elmz.solid(mark), .border = elmz.solid(th.border), .radius = 3 },
             });
             if (!o.checked) break :blk outer;
             // A filled square alone reads as "loud" without saying what
@@ -376,7 +376,7 @@ pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
             const mark_e = ui.rect(.{
                 .width = tick,
                 .height = tick,
-                .style = .{ .bg = th.bg, .radius = 1 },
+                .style = .{ .bg = elmz.solid(th.bg), .radius = 1 },
             });
             mark_e.offset = .{ (o.box - tick) * 0.5, (o.box - tick) * 0.5 };
             break :blk ui.stack(.{ .width = o.box, .height = o.box, .children = &.{ outer, mark_e } });
@@ -386,8 +386,8 @@ pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
                 .width = o.box,
                 .height = o.box,
                 .style = .{
-                    .bg = th.control,
-                    .border = if (o.checked) th.accent else th.border,
+                    .bg = elmz.solid(th.control),
+                    .border = elmz.solid(if (o.checked) th.accent else th.border),
                     .radius = o.box * 0.5,
                 },
             });
@@ -396,7 +396,7 @@ pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
             const dot_e = ui.rect(.{
                 .width = dot,
                 .height = dot,
-                .style = .{ .bg = th.accent, .radius = dot * 0.5 },
+                .style = .{ .bg = elmz.solid(th.accent), .radius = dot * 0.5 },
             });
             dot_e.offset = .{ (o.box - dot) * 0.5, (o.box - dot) * 0.5 };
             break :blk ui.stack(.{ .width = o.box, .height = o.box, .children = &.{ outer, dot_e } });
@@ -407,7 +407,7 @@ pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
             const track = ui.rect(.{
                 .width = w,
                 .height = o.box,
-                .style = .{ .bg = mark, .border = th.border, .radius = o.box * 0.5 },
+                .style = .{ .bg = elmz.solid(mark), .border = elmz.solid(th.border), .radius = o.box * 0.5 },
             });
             // The knob travels rather than the track changing shape: a
             // track that grew would move the label every time the value
@@ -415,7 +415,7 @@ pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
             const knob_e = ui.rect(.{
                 .width = knob,
                 .height = knob,
-                .style = .{ .bg = th.bg, .radius = knob * 0.5 },
+                .style = .{ .bg = elmz.solid(th.bg), .radius = knob * 0.5 },
             });
             knob_e.offset = .{ if (o.checked) w - knob - 2 else 2, 2 };
             break :blk ui.stack(.{ .width = w, .height = o.box, .children = &.{ track, knob_e } });
@@ -511,14 +511,14 @@ pub fn toast(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const stripe = ui.rect(.{
         .width = o.bar_width,
         .height = 0,
-        .style = .{ .bg = ui.severityColor(o.severity) },
+        .style = .{ .bg = elmz.solid(ui.severityColor(o.severity)) },
     });
     const e = ui.row(.{
         .children = &.{ stripe, ui.text(.{ .label = o.text, .size = o.size }) },
         .gap = 8,
         .style = .{
-            .bg = ui.theme.panel,
-            .border = ui.theme.border,
+            .bg = elmz.solid(ui.theme.panel),
+            .border = elmz.solid(ui.theme.border),
             .radius = 6,
             .pad = 8,
         },
@@ -605,13 +605,13 @@ pub fn tabs(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         const label = ui.text(.{
             .label = t.label,
             .size = o.size,
-            .style = .{ .fg = if (live) th.text else th.text_muted },
+            .style = .{ .fg = elmz.solid(if (live) th.text else th.text_muted) },
         });
         const b = ui.row(.{
             .children = &.{label},
             .style = .{
-                .bg = if (live) th.selected else null,
-                .border = if (live) th.accent else null,
+                .bg = if (live) elmz.solid(th.selected) else null,
+                .border = if (live) elmz.solid(th.accent) else null,
                 .pad = o.pad,
             },
             .hover_bg = .{ .solid = th.hover },
@@ -696,13 +696,13 @@ pub fn list(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         const label = ui.text(.{
             .label = r.label,
             .size = o.size,
-            .style = .{ .fg = if (live) th.text else th.text_muted },
+            .style = .{ .fg = elmz.solid(if (live) th.text else th.text_muted) },
         });
         const item = ui.row(.{
             .children = &.{label},
             .height = o.row_h,
             .style = .{
-                .bg = if (live) th.selected else null,
+                .bg = if (live) elmz.solid(th.selected) else null,
                 .pad = o.pad,
             },
             .hover_bg = .{ .solid = th.hover },

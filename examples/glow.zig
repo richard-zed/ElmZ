@@ -118,8 +118,8 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .key = 1,
         .width = 74,
         .style = .{
-            .bg = th.accent,
-            .fg = th.bg,
+            .bg = elmz.solid(th.accent),
+            .fg = elmz.solid(th.bg),
             .radius = 10,
             .halo = .{ .color = glow_color, .blur = 14, .spread = 2, .mode = .glow, .quality = .sdf },
         },
@@ -135,8 +135,8 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .key = 2,
         .width = 74,
         .style = .{
-            .bg = th.accent,
-            .fg = th.bg,
+            .bg = elmz.solid(th.accent),
+            .fg = elmz.solid(th.bg),
             .radius = 10,
             // Same numbers, different path: one stencil built once and blitted,
             // instead of a distance field evaluated per pixel every frame.
@@ -167,8 +167,8 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             .key = i + 3,
             .width = 124,
             .style = .{
-                .bg = th.control,
-                .fg = th.text,
+                .bg = elmz.solid(th.control),
+                .fg = elmz.solid(th.text),
                 .radius = 10,
                 // Identical in every field except `mode`, so a difference on
                 // screen is the cut and nothing else.
@@ -202,9 +202,9 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             .height = 54,
             .style = .{
                 .pad = 10,
-                .bg = th.panel,
+                .bg = elmz.solid(th.panel),
                 .radius = 10,
-                .border = th.border,
+                .border = elmz.solid(th.border),
                 // The offset is derived inside `shadow`, so the two cannot
                 // disagree.
                 .halo = elmz.Halo.shadow(shadow_color, deg, 10),
@@ -237,7 +237,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .height = H,
         .style = .{
             .pad = 26,
-            .bg_grad = page_fill,
+            .bg = page_fill,
         },
     });
 }

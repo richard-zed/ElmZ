@@ -47,7 +47,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *Elem {
             ui.rect(.{ .width = 6, .height = 12 }),
             ui.text(.{ .label = "row", .size = 10 }),
             ui.button(.{ .label = "go", .msg = .inc }),
-        }, .gap = 4, .style = .{ .pad = 2, .bg = ui.theme.panel } });
+        }, .gap = 4, .style = .{ .pad = 2, .bg = elmz.solid(ui.theme.panel) } });
     }
     return ui.column(.{ .children = buf[0..n] });
 }

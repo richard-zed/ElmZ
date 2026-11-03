@@ -54,16 +54,16 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     // one row per item, built in a loop: no hand-unrolled children
     var rows: [m.items.len]*elmz.Element(Msg) = undefined;
     for (m.items, 0..) |item, i| {
-        const mark = ui.bar(.{ .value = 1, .width = 3, .height = 14, .style = .{ .bg = if (item.done) ui.theme.accent else ui.theme.border } });
+        const mark = ui.bar(.{ .value = 1, .width = 3, .height = 14, .style = .{ .bg = elmz.solid(if (item.done) ui.theme.accent else ui.theme.border) } });
 
         // done rows go FLAT (page colour) and drop to muted text instead of
         // using a dim fill: Mocha has no step between base and surface0, so a
         // "dimmer" fill was either invisible (mantle, 1.07) or identical to the
         // normal row (surface0, 1.00). The edge border keeps the row legible.
         const label = ui.text(.{ .label = item.label, .size = 14 });
-        if (item.done) label.fg = ui.theme.text_muted;
+        if (item.done) label.fg = elmz.solid(ui.theme.text_muted);
 
-        const row = ui.row(.{ .children = &.{ mark, label }, .gap = 10, .on_press = .{ .toggle = i }, .style = .{ .pad = 10, .bg = if (item.done) ui.theme.bg else ui.theme.panel, .border = ui.theme.border } });
+        const row = ui.row(.{ .children = &.{ mark, label }, .gap = 10, .on_press = .{ .toggle = i }, .style = .{ .pad = 10, .bg = elmz.solid(if (item.done) ui.theme.bg else ui.theme.panel), .border = elmz.solid(ui.theme.border) } });
         rows[i] = row;
     }
 

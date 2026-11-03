@@ -31,8 +31,8 @@ fn cards(ui: *elmz.Ui(Msg), filled: bool) *elmz.Element(Msg) {
     for (radii, 0..) |rad, i| {
         const c = ui.rect(.{ .width = 56, .height = 56, .style = .{
             .radius = rad,
-            .bg = if (filled) ui.theme.control else null,
-            .border = if (filled) null else ui.theme.accent,
+            .bg = if (filled) elmz.solid(ui.theme.control) else null,
+            .border = if (filled) null else elmz.solid(ui.theme.accent),
         } });
         items[i] = c;
     }
@@ -48,7 +48,7 @@ fn view(_: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const inner = ui.column(.{ .children = &.{
         ui.text(.{ .label = "radius", .size = 18 }),
         caption,
-    }, .width = 300 + 2 * 14, .gap = 6, .style = .{ .pad = 14, .bg = ui.theme.panel, .border = ui.theme.text_muted, .radius = 18 } });
+    }, .width = 300 + 2 * 14, .gap = 6, .style = .{ .pad = 14, .bg = elmz.solid(ui.theme.panel), .border = elmz.solid(ui.theme.text_muted), .radius = 18 } });
 
     const line0 = cards(ui, true);
     line0.margin_top = 4;
@@ -60,7 +60,7 @@ fn view(_: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         line0,
         line1,
         inner,
-    }, .gap = 4, .style = .{ .pad = 24, .bg = ui.theme.bg } });
+    }, .gap = 4, .style = .{ .pad = 24, .bg = elmz.solid(ui.theme.bg) } });
     return col;
 }
 

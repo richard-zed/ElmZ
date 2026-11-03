@@ -71,7 +71,7 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 /// A nav tab is a text element with a fill and padding -- not a widget. The
 /// only thing that makes it "selected" is which theme role it is filled with.
 fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *elmz.Element(Msg) {
-    const e = ui.text(.{ .label = label, .size = 14, .on_press = msg, .key = key, .style = .{ .pad = 11, .radius = 8, .bg = if (active) ui.theme.selected else ui.theme.control, .fg = if (active) ui.theme.text else ui.theme.text_muted } });
+    const e = ui.text(.{ .label = label, .size = 14, .on_press = msg, .key = key, .style = .{ .pad = 11, .radius = 8, .bg = elmz.solid(if (active) ui.theme.selected else ui.theme.control), .fg = elmz.solid(if (active) ui.theme.text else ui.theme.text_muted) } });
     return e;
 }
 
@@ -110,7 +110,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const edge_fill = ui.gradients.get("panel") orelse elmz.Fill.hgrad(pink, th.accent);
 
     // -- header ------------------------------------------------------------
-    const title = ui.text(.{ .label = "elmz", .size = m.title_size, .style = .{ .fg_grad = accent_fill } });
+    const title = ui.text(.{ .label = "elmz", .size = m.title_size, .style = .{ .fg = accent_fill } });
 
     const sub = ui.text(.{ .label = "one frame: layout, fills, states, keys, theme", .size = 12, .tone = .muted });
 
@@ -124,7 +124,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     }, .gap = 8 });
 
     // -- left card: a list where every row is its own hit region -----------
-    const card_head = ui.text(.{ .label = "recent", .size = 12, .style = .{ .fg = th.text_muted } });
+    const card_head = ui.text(.{ .label = "recent", .size = 12, .style = .{ .fg = elmz.solid(th.text_muted) } });
 
     const rows = ui.column(.{ .children = &.{
         listRow(ui, "counter.zig", "12 prims", .pick_a, 10),
@@ -132,7 +132,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         listRow(ui, "gallery.zig", "37 prims", .pick_c, 12),
     }, .gap = 2 });
 
-    const progress = ui.bar(.{ .value = 0.62, .width = 308, .height = 12, .style = .{ .radius = 6, .fg_grad = bar_fill } });
+    const progress = ui.bar(.{ .value = 0.62, .width = 308, .height = 12, .style = .{ .radius = 6, .fg = bar_fill } });
 
     const usage = ui.text(.{ .label = "62% of a week of frames", .size = 11, .tone = .muted });
 
@@ -144,12 +144,12 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         rows,
         progress,
         usage,
-    }, .width = 340, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border = th.border } });
+    }, .width = 340, .style = .{ .pad = 16, .bg = elmz.solid(th.panel), .radius = 12, .border = elmz.solid(th.border) } });
 
     // -- right card: actions, one of them inert ----------------------------
-    const actions_head = ui.text(.{ .label = "actions", .size = 12, .style = .{ .fg = th.text_muted } });
+    const actions_head = ui.text(.{ .label = "actions", .size = 12, .style = .{ .fg = elmz.solid(th.text_muted) } });
 
-    const primary = ui.button(.{ .label = "Sync now", .msg = .primary, .key = 4, .width = 188, .style = .{ .bg_grad = elmz.Fill.hgrad(th.control, th.selected), .fg = th.text } });
+    const primary = ui.button(.{ .label = "Sync now", .msg = .primary, .key = 4, .width = 188, .style = .{ .bg = elmz.Fill.hgrad(th.control, th.selected), .fg = elmz.solid(th.text) } });
 
     const inert = ui.button(.{ .label = "Unavailable", .msg = .primary, .key = 5, .width = 188, .disabled = true });
 
@@ -163,7 +163,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         primary,
         inert,
         inert_note,
-    }, .width = 216, .style = .{ .pad = 16, .bg = th.panel, .radius = 12, .border_grad = edge_fill } });
+    }, .width = 216, .style = .{ .pad = 16, .bg = elmz.solid(th.panel), .radius = 12, .border = edge_fill } });
 
     // -- body and page -----------------------------------------------------
     const body = ui.row(.{ .children = &.{ left, right }, .gap = 16 });
