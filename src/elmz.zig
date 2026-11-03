@@ -637,6 +637,9 @@ pub const Renderer = struct {
         /// draws a rounded rect, or its 1px outline when `stroke` is set
         rrect: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void,
         text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void,
+        /// Point subsequent `text` calls at a registered face, by index. 0 is
+        /// the primary. A backend with only one face ignores it.
+        set_face: *const fn (ptr: *anyopaque, face: u16) void,
         /// A glow or shadow behind `rect`. `corner` is the element's own radius
         /// so the halo follows its shape rather than boxing it.
         halo: *const fn (ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void,
@@ -684,6 +687,31 @@ pub const Renderer = struct {
 
     pub fn text(self: Renderer, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
         if (bytes.len == 0) return;
+        self.vtable.text(self.ptr, x, y, size, fill, bytes, clip);
+    }
+
+    /// Point subsequent `text` calls at a registered face, by index.
+    ///
+    /// Sticky on purpose: an element emits one to a handful of runs that nearly
+    /// always share a typeface, so the index is set once per element rather than
+    /// passed on every call. Index 0 is the primary.
+    pub fn setFace(self: Renderer, face: u16) void {
+        self.vtable.set_face(self.ptr, face);
+    }
+
+    /// Text in a registered face, by index.
+    ///
+    /// The face is STICKY rather than an argument to every draw. An element
+    /// emits one to a handful of text primitives and changes face almost never,
+    /// so passing it per run would widen the hot signature for a field that is
+    /// constant within a run. Index 0 needs no call at all: every backend starts
+    /// there and `Paint` sets it once per element.
+    ///
+    /// Backends that carry a single face may ignore `set_face`; the text then
+    /// draws in the primary, which is what 0 means anyway.
+    pub fn textFace(self: Renderer, face: u16, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
+        if (bytes.len == 0) return;
+        if (face != 0) self.vtable.set_face(self.ptr, face);
         self.vtable.text(self.ptr, x, y, size, fill, bytes, clip);
     }
 
@@ -1457,6 +1485,18 @@ fn hitAppend(
 /// reused, and asserted in a test without rendering anything. That is the whole
 /// point of it existing as a type rather than eight assignments to an element.
 pub const Style = struct {
+    /// Which registered typeface this element's text draws in, as an index.
+    ///
+    /// BEHIND THE SCENES: nothing in a `view` sets this. `Ui.font()` takes a
+    /// NAME and resolves it against the registry, which is the only place that
+    /// knows how names become faces. An index appears here because `Style` is a
+    /// value that lives in the tree, and a tree is not the place to hold a
+    /// string that has to survive a frame.
+    ///
+    /// Null is the primary face, so an app that registers nothing records
+    /// exactly what it recorded before.
+    face: ?u16 = null,
+
     /// A fill is either a flat colour or a gradient, so one field covers both.
     /// Build one with `solid`, `hgrad` or `vgrad`.
     bg: ?Fill = null,
@@ -1544,6 +1584,9 @@ pub fn Element(comptime M: type) type {
         /// widget take its colours from the theme instead of needing a variant
         /// per look.
         fg: ?Fill = null,
+        /// Which registered typeface this element's text draws in. Set through
+        /// `Style.face`, which is itself behind the scenes -- see `Style`.
+        face: u16 = 0,
         /// A glow or shadow behind this element, following its corner radius.
         /// Appearance only: no layout cost, no hit region, no children moved.
         halo: ?Halo = null,
@@ -1667,7 +1710,11 @@ pub fn Element(comptime M: type) type {
             /// element's box. The offset is runtime state, so a viewport is
             /// something an app declares and never animates by hand.
             scroll: struct { child: *Self },
-            text: struct { bytes: []const u8, size: f32 },
+            /// `face` is set through `Style.face`, never by a view: a style
+            /// names a typeface, `Ui` resolves it against the registry and
+            /// stores the INDEX here, because the element is a value that has
+            /// to outlive the frame that named it.
+            text: struct { bytes: []const u8, size: f32, face: u16 = 0 },
             button: struct { label: []const u8, size: f32 },
             bar: struct { value: f32 },
             /// Children share ONE origin, each displaced by its own `offset`.
@@ -1706,12 +1753,10 @@ pub fn Element(comptime M: type) type {
         /// construction. Zig has no field privacy, so post-hoc assignment still
         /// compiles; this is the short path, not an enforced boundary.
         pub fn applyStyle(self: *Self, s: Style) void {
-            self.bg = s.bg;
             self.bg = mergeFill(self.bg, s.bg);
-            self.fg = s.fg;
             self.fg = mergeFill(self.fg, s.fg);
-            self.border = s.border;
             self.border = mergeFill(self.border, s.border);
+            if (s.face) |v| self.face = v;
             self.radius = s.radius orelse 0;
             self.pad = s.pad orelse 0;
             self.halo = s.halo;
@@ -1738,11 +1783,9 @@ pub fn Element(comptime M: type) type {
         /// ask for square corners on a rounded widget.
         pub fn mergeStyle(self: *Self, s: Style) void {
             if (s.bg) |v| self.bg = v;
-            if (s.bg) |v| self.bg = v;
-            if (s.fg) |v| self.fg = v;
             if (s.fg) |v| self.fg = v;
             if (s.border) |v| self.border = v;
-            if (s.border) |v| self.border = v;
+            if (s.face) |v| self.face = v;
             if (s.radius) |v| self.radius = v;
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
@@ -2193,6 +2236,13 @@ pub fn Element(comptime M: type) type {
             hov: Hover,
             th: Theme,
         ) Allocator.Error!void {
+            // Every element starts on the primary face. `setFace` is sticky
+            // until told otherwise, and only TEXT elements call it, so without
+            // this a label styled in a second typeface would leak that font into
+            // the button and tooltip drawn after it. Resetting here makes the
+            // leak structurally impossible instead of fixing it per call site.
+            r.setFace(0);
+
             // What this element's own drawing is confined to: the clip it
             // inherited. Its children get one more intersection if it clips.
             const child_clip = if (self.clips) rect.intersect(clip) else clip;
@@ -2381,6 +2431,13 @@ pub fn Element(comptime M: type) type {
 
             switch (self.geometry) {
                 .text => |t| {
+                    // The typeface this label was styled in. Set once here and
+                    // sticky for the runs below, so a wrapped paragraph does not
+                    // repeat the index on every line. Unconditional, not
+                    // `!= 0`-guarded: an element with no face must CLEAR one the
+                    // previous element set, or a single styled label would leak
+                    // its font into everything drawn after it this frame.
+                    r.setFace(t.face);
                     // Glyphs start inside the padding, matching `measure`.
                     const ix = rect.x + self.pad;
                     const iy = rect.y + self.pad;
@@ -2777,6 +2834,11 @@ pub fn Ui(comptime M: type) type {
         /// degraded rather than aborted, which is what lets `view` be
         /// infallible. The runner reports it.
         failed: bool = false,
+        /// The face the next recorded text prim draws in. Sticky, set by `paint`
+        /// once per element, because a wrapped label emits several runs that all
+        /// share one typeface. Reset per element, not per frame, so a styled
+        /// label cannot leak its font into the next element drawn.
+        cur_face: u16 = 0,
         /// which failure `failed` refers to; only meaningful when failed
         fail_kind: FailKind = .layout_allocation,
         /// Detail for the band, formatted in place. A fixed buffer rather
@@ -2950,6 +3012,14 @@ pub fn Ui(comptime M: type) type {
             // writes only the fields they actually set.
             const style: Style = fieldOr(o, "style", Style{});
             e.mergeStyle(style);
+            // A text element also carries its face inside the geometry, which is
+            // what paint reads. Copied here rather than in `text()` because the
+            // style arrives last: `text()` runs before `finish` merges it, so a
+            // face set at build time would be overwritten by the default.
+            if (e.style().face) |f| switch (e.geometry) {
+                .text => |*tx| tx.face = f,
+                else => {},
+            };
             return e;
         }
 
@@ -3660,6 +3730,14 @@ pub fn Collector(comptime M: type) type {
         /// draw the frame: if it is anything else, text is measured at one
         /// width and painted at another.
         metrics: Renderer,
+        /// The face the next recorded text prim draws in. Sticky, because a
+        /// wrapped label emits several runs that all share one typeface, so the
+        /// index is set once per element rather than passed on every call.
+        ///
+        /// Reset per ELEMENT by `paint`, not per frame: only text elements set
+        /// it, so without that a styled label would leak its font into whatever
+        /// is drawn next.
+        cur_face: u16 = 0,
 
         pub fn renderer(self: *Self) Renderer {
             return .{ .ptr = @ptrCast(self), .vtable = &vtable };
@@ -3670,6 +3748,7 @@ pub fn Collector(comptime M: type) type {
             .path = vtPath,
             .rrect = vtRrect,
             .text = vtText,
+            .set_face = vtSetFace,
             .halo = vtHalo,
             .frost = vtFrost,
             .measure_text = vtMeasure,
@@ -3736,6 +3815,14 @@ pub fn Collector(comptime M: type) type {
                 self.failed = true;
             };
         }
+        /// Sticky for the primitives after it. `Paint` sets this once per
+        /// element before emitting its runs, so the index rides the recorded
+        /// prim rather than being threaded through every text call.
+        fn vtSetFace(ptr: *anyopaque, face: u16) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.cur_face = face;
+        }
+
         fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             // Text has no rect of its own, so the prune needs the metrics that
@@ -3751,6 +3838,7 @@ pub fn Collector(comptime M: type) type {
                 .fill = fill,
                 .bytes = bytes,
                 .clip = clip,
+                .face = self.cur_face,
             } }) catch {
                 self.failed = true;
             };
@@ -3842,6 +3930,7 @@ pub fn nominalRenderer() Renderer {
         .path = nominalPath,
         .rrect = nominalRrect,
         .text = nominalText,
+        .set_face = nominalSetFace,
         .halo = nominalHalo,
         .frost = nominalFrost,
         .measure_text = nominalMeasure,
@@ -3900,6 +3989,7 @@ fn nominalPath(_: *anyopaque, _: f32, _: f32, _: Path, _: Fill, _: Rect) void {}
 fn nominalQuad(_: *anyopaque, _: Rect, _: Fill, _: Rect) void {}
 fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: bool, _: Rect) void {}
 fn nominalText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: Rect) void {}
+fn nominalSetFace(_: *anyopaque, _: u16) void {}
 fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
 // ---------------------------------------------------------------------------
 // messages / runtime
@@ -5791,6 +5881,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
             Color => .{ .r = 1, .g = 2, .b = 3, .a = 4 },
             Fill => .{ .solid = .{ .r = 5, .g = 6, .b = 7, .a = 8 } },
             f32 => 7,
+            u16 => 3,
             Halo => .{ .color = .{ .r = 9, .g = 10, .b = 11, .a = 12 }, .blur = 3, .spread = 1, .offset = .{ 1, 2 } },
             Frost => .{ .blur = 5 },
             else => @compileError("new Style field '" ++ f.name ++ "' of type " ++ @typeName(Child) ++

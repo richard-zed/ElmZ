@@ -14,7 +14,7 @@
 //
 // Two sections, never merged:
 //   .theme -- the ten portable roles. Same meaning in every elmz app.
-//   .app   -- tokens an app declared for itself, in Zig. Absent here, because
+//   .vars  -- tokens an app declared for itself, in Zig. Absent here, because
 //             it is the app's to define; a file that writes one without
 //             declaring it is rejected rather than ignored.
 //
@@ -24,7 +24,7 @@
 //                 colour everywhere that role is used as a FILL. Gradients are
 //                 literal too, so they do not follow a later edit to .colors.
 .{
-    .version = 2,
+    .version = 3,
 
     .theme = .{
         .colors = .{

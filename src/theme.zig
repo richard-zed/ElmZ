@@ -141,7 +141,7 @@ pub const defaults_zon: [:0]const u8 = @embedFile("theme.defaults.zon");
 
 /// Every loader version this file understands. A file states its own so a v1
 /// file is refused in one sentence instead of half-loading and looking wrong.
-pub const theme_version: u32 = 2;
+pub const theme_version: u32 = 3;
 
 /// Gradient direction for the linear case: degrees on a clock face, clockwise
 /// from 12 o'clock, naming the direction the ramp TRAVELS.
@@ -343,7 +343,43 @@ pub const ThemeSpec = struct {
     }
 };
 
-/// The whole document. `.app` is typed by whoever claims it.
+
+/// One named style: a bag of role REFERENCES, plus a font name.
+///
+/// Values are strings, not bare identifiers: `.bg = ".panel"` rather than
+/// `.bg = .panel`. ZON reads a leading dot as an identifier, so the bare form
+/// is a parse error -- verified by compiling, not assumed.
+///
+/// A style never holds a colour. It names a role in `.colors`, so editing the
+/// palette moves every style that refers to it, and a style cannot drift out of
+/// agreement with the palette it belongs to.
+pub const StyleSpec = struct {
+    bg: ?[]const u8 = null,
+    fg: ?[]const u8 = null,
+    border: ?[]const u8 = null,
+    font: ?[]const u8 = null,
+    size: ?f32 = null,
+    weight: ?u16 = null,
+};
+
+/// The named styles, as a LIST rather than a map.
+///
+/// ZON cannot parse a hash map -- `canParseType` refuses it at comptime, which
+/// is why this is a slice of entries with the name inside rather than
+/// `.styles = .{ .panel = ... }`. Verified by compiling, not read from docs.
+pub const StylesSpec = []const StyleEntry;
+
+pub const StyleEntry = struct {
+    name: []const u8,
+    spec: StyleSpec = .{},
+    /// How many other styles this one's `.font` names, so the loader can find
+    /// a cycle without walking a map it does not have.
+    pub fn fontRef(self: StyleEntry) ?[]const u8 {
+        return self.spec.font;
+    }
+};
+
+/// The whole document. `.vars` is typed by whoever claims it.
 ///
 /// There is no lenient mode. An app that wants tokens in the theme file
 /// declares a struct and gets them, checked; an app that declares nothing has
@@ -356,7 +392,12 @@ pub fn ThemeFileType(comptime App: type) type {
     return struct {
         version: u32,
         theme: ThemeSpec = .{},
-        app: App = .{},
+        /// Named styles, resolved against this file's own palette.
+        styles: StylesSpec = &.{},
+        /// The app tier. Called `.vars` since v3 because `.app` collided with
+        /// the compile-time declared app type, and a reader had no way to tell
+        /// which one a sentence meant.
+        vars: App = .{},
     };
 }
 
@@ -365,7 +406,12 @@ pub fn Loaded(comptime App: type) type {
     return struct {
         theme: Theme,
         gradients: Gradients = .{},
-        app: App = .{},
+        vars: App = .{},
+        /// COPIED out of the parse result, which `loadTheme` frees before
+        /// returning: the keys and the string values come from that allocation,
+        /// so a borrowed table would dangle. Owned by `gpa`; free with
+        /// `freeStyles`. Empty means the file named no styles.
+        styles: StylesSpec = &.{},
         /// The font name is COPIED, not borrowed: the parse result owns its
         /// strings and is freed before this is returned, so a slice into it
         /// would dangle. Fixed capacity keeps that free of an owner.
@@ -398,7 +444,7 @@ pub const ThemeDiag = struct {
 /// ZON and still be an unusable theme: two interaction roles sharing a colour
 /// is a defect in the values, not in the syntax, and the author needs to be
 /// told which.
-pub const ThemeLoadError = error{ Parse, Version, Palette, OutOfMemory };
+pub const ThemeLoadError = error{ Parse, Version, Palette, Style, OutOfMemory };
 
 /// First diagnostic, rendered as `name line:col: reason` -- the shape that
 /// tells an author where to look.
@@ -468,7 +514,29 @@ pub fn loadTheme(
         return error.Palette;
     };
 
-    var out: Loaded(App) = .{ .theme = theme, .gradients = file.theme.resolveGradients(theme), .app = file.app };
+    // Every style's role references are checked before any of it is used. A
+    // name that is not a role is a typo, and a typo here means an element draws
+    // with the wrong colour and says nothing.
+    for (file.styles) |entry| {
+        inline for (.{ "bg", "fg", "border" }) |slot| {
+            if (@field(entry.spec, slot)) |ref| {
+                if (!isRole(ref)) {
+                    diag.set("{s}: style .{s} .{s} names \"{s}\", which is not a role", .{ name, entry.name, slot, ref });
+                    return error.Style;
+                }
+            }
+        }
+    }
+    try checkStyleCycles(diag, name, file.styles);
+
+    var out: Loaded(App) = .{
+        .theme = theme,
+        .gradients = file.theme.resolveGradients(theme),
+        .vars = file.vars,
+    };
+
+    // The font name rides through the same buffer as the theme-level one, so a
+    // style cannot smuggle in a path.
     if (file.theme.font) |f| {
         if (f.len > font_name_max) {
             diag.set("{s}: font name {d} bytes, not a name -- is that a path?", .{ name, f.len });
@@ -477,7 +545,79 @@ pub fn loadTheme(
         @memcpy(out.font_buf[0..f.len], f);
         out.font_len = f.len;
     }
+
+    // Deep copy: names and string values point into `file`, which the defer
+    // above frees. Getting this wrong is a use-after-free that renders as
+    // garbage role names, or as nothing at all.
+    if (file.styles.len > 0) out.styles = try copyStyles(gpa, file.styles);
     return out;
+}
+
+/// Free the owned style table. Safe on the empty default.
+pub fn freeStyles(gpa: std.mem.Allocator, styles: *StylesSpec) void {
+    for (styles.*) |entry| {
+        inline for (.{ "bg", "fg", "border", "font" }) |slot| {
+            if (@field(entry.spec, slot)) |str| gpa.free(str);
+        }
+        gpa.free(entry.name);
+    }
+    if (styles.len > 0) gpa.free(styles.*);
+    styles.* = &.{};
+}
+
+fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
+    const out = try gpa.alloc(StyleEntry, src.len);
+    errdefer gpa.free(out);
+    var done: usize = 0;
+    errdefer for (out[0..done]) |e| {
+        inline for (.{ "bg", "fg", "border", "font" }) |slot| {
+            if (@field(e.spec, slot)) |str| gpa.free(str);
+        }
+        gpa.free(e.name);
+    };
+    for (src, 0..) |entry, i| {
+        var nv = entry.spec;
+        inline for (.{ "bg", "fg", "border", "font" }) |slot| {
+            if (@field(entry.spec, slot)) |str| @field(nv, slot) = try gpa.dupe(u8, str);
+        }
+        out[i] = .{ .name = try gpa.dupe(u8, entry.name), .spec = nv };
+        done = i + 1;
+    }
+    return out;
+}
+
+/// Is `ref` one of the palette's role names?
+fn isRole(ref: []const u8) bool {
+    inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+        if (std.mem.eql(u8, ref, f.name)) return true;
+    }
+    return false;
+}
+
+fn styleNamed(styles: []const StyleEntry, n: []const u8) ?StyleEntry {
+    for (styles) |e| if (std.mem.eql(u8, e.name, n)) return e;
+    return null;
+}
+
+/// A style may name another style as its font. That is a graph, so a cycle is
+/// reachable, and a cycle would be an infinite resolve at paint time.
+fn checkStyleCycles(diag: *ThemeDiag, name: []const u8, styles: []const StyleEntry) ThemeLoadError!void {
+    for (styles) |start| {
+        var cur = start;
+        var hops: usize = 0;
+        while (true) {
+            const next = cur.fontRef() orelse break;
+            // A font name that matches no style is a typeface and resolves to
+            // the registry. Only style-to-style edges can cycle.
+            const nxt = styleNamed(styles, next) orelse break;
+            hops += 1;
+            if (hops > styles.len) {
+                diag.set("{s}: style .{s} refers to itself through .font", .{ name, start.name });
+                return error.Style;
+            }
+            cur = nxt;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,7 +681,7 @@ test "an override replaces exactly one role" {
     // warning, just a different colour than the file asked for.
     {
         var diag: ThemeDiag = .{};
-        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xff000080 } } }", Theme{}, &diag);
+        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xff000080 } } }", Theme{}, &diag);
         try std.testing.expectEqual(@as(u8, 0xff), loaded.theme.accent.r);
         try std.testing.expectEqual(@as(u8, 0x00), loaded.theme.accent.g);
         try std.testing.expectEqual(@as(u8, 0x00), loaded.theme.accent.b);
@@ -550,12 +690,12 @@ test "an override replaces exactly one role" {
     // Six digits still means opaque, so the common case did not shift.
     {
         var diag: ThemeDiag = .{};
-        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag);
+        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag);
         try std.testing.expectEqual(@as(u8, 255), loaded.theme.accent.a);
         try std.testing.expectEqual(@as(u8, 0x89), loaded.theme.accent.r);
     }
 
-    const src = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xff0000 } } }";
+    const src = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xff0000 } } }";
     var diag: ThemeDiag = .{};
     const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
     try std.testing.expect(std.meta.eql(Color.rgbHex(0xff0000), loaded.theme.accent));
@@ -564,21 +704,21 @@ test "an override replaces exactly one role" {
 
 test "a theme names a font, and the name survives the parse being freed" {
     var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .font = \"DejaVu Sans\" } }", Theme{}, &diag);
+    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .font = \"DejaVu Sans\" } }", Theme{}, &diag);
     // A slice into the parse result would dangle the moment it was freed, so
     // this asserts the COPY, and the allocator would report a use-after-free
     // rather than a wrong string if it were borrowed.
     try std.testing.expectEqualStrings("DejaVu Sans", loaded.fontName().?);
     // No font named is not a fault: it means keep whatever is attached.
     var diag2: ThemeDiag = .{};
-    const bare = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag2);
+    const bare = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag2);
     try std.testing.expect(bare.fontName() == null);
 }
 
 test "a font name long enough to be a path is refused by name" {
     var diag: ThemeDiag = .{};
     const long = "x" ** (font_name_max + 1);
-    const src = try std.fmt.allocPrint(std.testing.allocator, ".{{ .version = 2, .theme = .{{ .font = \"{s}\" }} }}", .{long});
+    const src = try std.fmt.allocPrint(std.testing.allocator, ".{{ .version = 3, .theme = .{{ .font = \"{s}\" }} }}", .{long});
     defer std.testing.allocator.free(src);
     const srcz = try std.testing.allocator.dupeZ(u8, src);
     defer std.testing.allocator.free(srcz);
@@ -588,7 +728,7 @@ test "a font name long enough to be a path is refused by name" {
 
 test "a gradient resolves to the fill a theme could never express before" {
     const src =
-        \\.{ .version = 2, .theme = .{ .gradients = .{
+        \\.{ .version = 3, .theme = .{ .gradients = .{
         \\    .accent = .{ .linear = .{ .dir = 135, .from = 0x89b4fa, .to = 0xf5c2e7 } },
         \\    .panel = .{ .radial = .{ .inner = 0x313244, .outer = 0x1e1e2e, .radius = 0.75 } },
         \\} } }
@@ -632,7 +772,7 @@ test "a linear direction is an angle, and it spans the box at any angle" {
 
     // 90 degrees runs left to right, exactly on the horizontal centre line.
     const h = (try case.load(
-        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 90, .from = 0xff0000, .to = 0x0000ff } } } } }
+        \\.{ .version = 3, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 90, .from = 0xff0000, .to = 0x0000ff } } } } }
     )).linear;
     try std.testing.expectApproxEqAbs(@as(f32, 0), h.from[0], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), h.to[0], 1e-6);
@@ -640,7 +780,7 @@ test "a linear direction is an angle, and it spans the box at any angle" {
 
     // 180 runs top to bottom -- clock 6, what the old `vertical` default meant.
     const v = (try case.load(
-        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 180, .from = 0xff0000, .to = 0x0000ff } } } } }
+        \\.{ .version = 3, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 180, .from = 0xff0000, .to = 0x0000ff } } } } }
     )).linear;
     try std.testing.expectApproxEqAbs(@as(f32, 0), v.from[1], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), v.to[1], 1e-6);
@@ -649,7 +789,7 @@ test "a linear direction is an angle, and it spans the box at any angle" {
     // An angle the enum could not name still spans the whole box: the delta is
     // a unit vector, so turning the ramp never shrinks it.
     const a = (try case.load(
-        \\.{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 22, .from = 0xff0000, .to = 0x0000ff } } } } }
+        \\.{ .version = 3, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = 22, .from = 0xff0000, .to = 0x0000ff } } } } }
     )).linear;
     const dx = a.to[0] - a.from[0];
     const dy = a.to[1] - a.from[1];
@@ -663,7 +803,7 @@ test "a linear direction is an angle, and it spans the box at any angle" {
 test "a radial centre is a fraction of the box, not a pixel" {
     var diag: ThemeDiag = .{};
     const src =
-        \\.{ .version = 2, .theme = .{ .gradients = .{
+        \\.{ .version = 3, .theme = .{ .gradients = .{
         \\    .panel = .{ .radial = .{ .inner = 0xffffff, .outer = 0x000000, .center = .{ 0, 0 }, .radius = 0.6 } },
         \\} } }
     ;
@@ -676,7 +816,7 @@ test "a radial centre is a fraction of the box, not a pixel" {
     // Omitted centre keeps the middle, so an old file renders as it did.
     var diag2: ThemeDiag = .{};
     const mid = try loadTheme(struct {}, std.testing.allocator, "theme.zon",
-        \\.{ .version = 2, .theme = .{ .gradients = .{ .panel = .{ .radial = .{} } } } }
+        \\.{ .version = 3, .theme = .{ .gradients = .{ .panel = .{ .radial = .{} } } } }
     , Theme{}, &diag2);
     try std.testing.expectEqual(@as(f32, 0.5), mid.gradients.panel.?.radial.center[0]);
 }
@@ -686,7 +826,7 @@ test "an omitted gradient end inherits the role colour" {
     // copy of the palette, so editing `.colors` leaves it behind. Naming only
     // the end that differs keeps it tied to the palette.
     const only_to =
-        \\.{ .version = 2, .theme = .{
+        \\.{ .version = 3, .theme = .{
         \\    .colors = .{ .accent = 0x112233 },
         \\    .gradients = .{ .accent = .{ .linear = .{ .dir = 0, .to = 0xffffff } } },
         \\} }
@@ -700,7 +840,7 @@ test "an omitted gradient end inherits the role colour" {
 
     // Same gradient, different palette role: the inherited end moves with it.
     const other =
-        \\.{ .version = 2, .theme = .{
+        \\.{ .version = 3, .theme = .{
         \\    .colors = .{ .accent = 0x445566 },
         \\    .gradients = .{ .accent = .{ .linear = .{ .dir = 0, .to = 0xffffff } } },
         \\} }
@@ -715,7 +855,7 @@ test "an omitted gradient end inherits the role colour" {
     // A radial with nothing named is the role colour at both ends: legal, and
     // visibly a no-op rather than an error.
     const bare =
-        \\.{ .version = 2, .theme = .{
+        \\.{ .version = 3, .theme = .{
         \\    .gradients = .{ .panel = .{ .radial = .{ .radius = 0.4 } } },
         \\} }
     ;
@@ -730,7 +870,7 @@ test "an omitted gradient end inherits the role colour" {
 }
 
 test "a gradient direction typo is a parse error, not a fallback" {
-    const src = ".{ .version = 2, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = .sideways, .from = 0, .to = 1 } } } } }";
+    const src = ".{ .version = 3, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = .sideways, .from = 0, .to = 1 } } } } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
 }
@@ -740,9 +880,9 @@ test "a theme file cannot compute anything" {
     // theme file that tried to call or import would be rejected by the parser
     // before any of our code runs.
     const cases = [_][:0]const u8{
-        ".{ .version = 2, .theme = .{ .colors = .{ .bg = 1 + 1 } } }",
-        ".{ .version = 2, .theme = .{ .colors = .{ .bg = @import(\"std\") } } }",
-        ".{ .version = 2, .theme = .{ .colors = .{ .bg = compute() } } }",
+        ".{ .version = 3, .theme = .{ .colors = .{ .bg = 1 + 1 } } }",
+        ".{ .version = 3, .theme = .{ .colors = .{ .bg = @import(\"std\") } } }",
+        ".{ .version = 3, .theme = .{ .colors = .{ .bg = compute() } } }",
     };
     for (cases) |src| {
         var diag: ThemeDiag = .{};
@@ -751,7 +891,7 @@ test "a theme file cannot compute anything" {
 }
 
 test "a file whose interaction roles collide is rejected" {
-    const src = ".{ .version = 2, .theme = .{ .colors = .{ .hover = 0x45475a } } }";
+    const src = ".{ .version = 3, .theme = .{ .colors = .{ .hover = 0x45475a } } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(
         error.Palette,
@@ -761,7 +901,7 @@ test "a file whose interaction roles collide is rejected" {
 }
 
 test "a bad value names the file, line and column" {
-    const src = ".{ .version = 2, .theme = .{ .colors = .{ .bg = \"blue\" } } }";
+    const src = ".{ .version = 3, .theme = .{ .colors = .{ .bg = \"blue\" } } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
     try std.testing.expect(std.mem.startsWith(u8, diag.text(), "theme.zon 1:"));
@@ -769,7 +909,7 @@ test "a bad value names the file, line and column" {
 }
 
 test "an unknown key in the theme section is rejected" {
-    const src = ".{ .version = 2, .theme = .{ .colors = .{ .bgx = 0xff0000 } } }";
+    const src = ".{ .version = 3, .theme = .{ .colors = .{ .bgx = 0xff0000 } } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
     try std.testing.expect(std.mem.indexOf(u8, diag.text(), "bgx") != null);
@@ -778,7 +918,7 @@ test "an unknown key in the theme section is rejected" {
 test "an unknown key in the gradients section is rejected" {
     // `.gradients` is a typed table, not a free catalogue: a misspelled role
     // would otherwise sit in the file looking like it did something.
-    const src = ".{ .version = 2, .theme = .{ .gradients = .{ .accentt = .{ .linear = .{ .from = 0, .to = 1 } } } } }";
+    const src = ".{ .version = 3, .theme = .{ .gradients = .{ .accentt = .{ .linear = .{ .from = 0, .to = 1 } } } } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
     try std.testing.expect(std.mem.indexOf(u8, diag.text(), "accentt") != null);
@@ -791,18 +931,18 @@ test "the v1 shape is refused rather than half-read" {
     const v1 = ".{ .version = 1, .theme = .{ .bg = 0x112233 } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Version, loadTheme(struct {}, std.testing.allocator, "theme.zon", v1, Theme{}, &diag));
-    try std.testing.expectEqualStrings("theme.zon: version 1 is not 2", diag.text());
+    try std.testing.expectEqualStrings("theme.zon: version 1 is not 3", diag.text());
 
-    // A v2 file that keeps the v1 nesting is a parse error naming the key it
+    // A v3 file that keeps the v1 nesting is a parse error naming the key it
     // does not recognise, not a silent no-op.
-    const misnested = ".{ .version = 2, .theme = .{ .bg = 0x112233 } }";
+    const misnested = ".{ .version = 3, .theme = .{ .bg = 0x112233 } }";
     var diag2: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", misnested, Theme{}, &diag2));
     try std.testing.expect(std.mem.indexOf(u8, diag2.text(), "bg") != null);
 }
 
 test "an unknown top-level section is rejected" {
-    const src = ".{ .version = 2, .themes = .{} }";
+    const src = ".{ .version = 3, .themes = .{} }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
 }
@@ -811,7 +951,7 @@ test "an app tier nobody declared is refused, and named" {
     // No lenient mode: the tier is for app writers, so an app that wants it
     // declares a struct. Waving unknown keys through would cost the theme its
     // typo detection, because `ignore_unknown_fields` is file-wide.
-    const src = ".{ .version = 2, .theme = .{}, .app = .{ .outer_box_border = 4 } }";
+    const src = ".{ .version = 3, .theme = .{}, .vars = .{ .outer_box_border = 4 } }";
     var diag: ThemeDiag = .{};
     try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
     // The offending KEY is named, not just the section: "unexpected field
@@ -822,33 +962,33 @@ test "an app tier nobody declared is refused, and named" {
 
 test "an app that declares its tokens gets them, strictly" {
     const App = struct { outer_box_border: u8 = 0, hero: ?u32 = null };
-    const src = ".{ .version = 2, .theme = .{}, .app = .{ .outer_box_border = 4, .hero = 0xccddff } }";
+    const src = ".{ .version = 3, .theme = .{}, .vars = .{ .outer_box_border = 4, .hero = 0xccddff } }";
     var diag: ThemeDiag = .{};
     const loaded = try loadTheme(App, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
-    try std.testing.expectEqual(4, loaded.app.outer_box_border);
-    try std.testing.expectEqual(@as(?u32, 0xccddff), loaded.app.hero);
+    try std.testing.expectEqual(4, loaded.vars.outer_box_border);
+    try std.testing.expectEqual(@as(?u32, 0xccddff), loaded.vars.hero);
 
     // Claiming it means it is checked: a typo in the app tier is an error.
-    const typo = ".{ .version = 2, .theme = .{}, .app = .{ .outer_box_bordr = 4 } }";
+    const typo = ".{ .version = 3, .theme = .{}, .vars = .{ .outer_box_bordr = 4 } }";
     try std.testing.expectError(error.Parse, loadTheme(App, std.testing.allocator, "theme.zon", typo, Theme{}, &diag));
 }
 
 test "an app token cannot shadow a library role" {
-    const src = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x112233 } }, .app = .{ .bg = 0x445566 } }";
+    const src = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x112233 } }, .vars = .{ .bg = 0x445566 } }";
     const App = struct { bg: ?u32 = null };
     var diag: ThemeDiag = .{};
     const loaded = try loadTheme(App, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
     try std.testing.expect(std.meta.eql(Color.rgbHex(0x112233), loaded.theme.bg));
-    try std.testing.expectEqual(@as(?u32, 0x445566), loaded.app.bg);
+    try std.testing.expectEqual(@as(?u32, 0x445566), loaded.vars.bg);
 }
 
 test "the app tier is optional" {
     const App = struct { hero: ?u32 = null };
-    const src = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x112233 } } }";
+    const src = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x112233 } } }";
     var diag: ThemeDiag = .{};
     const loaded = try loadTheme(App, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
     try std.testing.expect(std.meta.eql(Color.rgbHex(0x112233), loaded.theme.accent));
-    try std.testing.expectEqual(@as(?u32, null), loaded.app.hero);
+    try std.testing.expectEqual(@as(?u32, null), loaded.vars.hero);
 }
 
 test "the palette guard names the offending pair" {

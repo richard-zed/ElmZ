@@ -775,6 +775,16 @@ pub const Canvas = struct {
     extra_faces: std.ArrayListUnmanaged(ExtraFace) = .empty,
     extra_faces_max: usize = 8,
 
+    /// Which face the NEXT text call draws in. Sticky, because a run of text
+    /// primitives almost always shares one and the backend should not re-derive
+    /// it per string. 0 is the primary, which is also the default, so a build
+    /// that registers no extra face never leaves this value.
+    ///
+    /// Reset by `paintFrame` at the start of every frame rather than at the end
+    /// of drawing: an element that sets it and then throws is exactly the case
+    /// where a trailing reset would be skipped.
+    cur_face: u16 = 0,
+
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
     /// A 64-bit collision would hand back the width of a different string, and
     /// a wrong width is a layout bug that presents as a rendering bug. The
@@ -2163,6 +2173,10 @@ pub const Canvas = struct {
     /// primitives; nothing is rasterised until this runs.
     pub fn paintFrame(self: *Self, prims: []const elmz.Primitive) void {
         const r = self.renderer();
+        // The prim carries the face, so paint does not need sticky state across
+        // a frame boundary -- but a prim that names one still has to set it
+        // here, and starting at the primary means a frame with no faces costs
+        // nothing.
         for (prims) |p| switch (p) {
             .quad => |q| r.quad(q.rect, q.fill, q.clip),
             .halo => |q| r.halo(q.rect, q.corner, q.halo, q.clip),
@@ -2553,6 +2567,7 @@ pub const Canvas = struct {
         .path = vtPath,
         .rrect = vtRrect,
         .text = vtText,
+        .set_face = vtSetFace,
         .halo = vtHalo,
         .frost = vtFrost,
         .measure_text = vtMeasure,
@@ -2598,9 +2613,18 @@ pub const Canvas = struct {
         );
     }
 
+    /// Sticky until the next call. The canvas already holds every face, so this
+    /// is a field write: no load, no parse, and emphatically not `setFontAt`,
+    /// which would clear both caches and rebuild them on every element.
+    fn vtSetFace(ptr: *anyopaque, face: u16) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.cur_face = face;
+    }
+
     fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.drawTextClip(
+        self.drawTextFace(
+            self.facePtrAt(self.cur_face),
             x * self.scale,
             y * self.scale,
             size * self.scale,

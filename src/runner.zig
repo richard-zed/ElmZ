@@ -179,7 +179,7 @@ pub const Options = struct {
 /// in the runner instead of in anyone's Model.
 /// Watches the theme files, and resolves them through the same call startup
 /// uses. Generic over the app tier for the same reason `ChainOf` is: a reload
-/// that guessed `struct {}` would reject a file whose `.app` section the app
+/// that guessed `struct {}` would reject a file whose `.vars` section the app
 /// legitimately declared, and it would only do so *after* the first edit.
 pub fn ThemeWatchOf(comptime App: type) type {
     return struct {
@@ -280,17 +280,17 @@ pub const ThemeWatch = ThemeWatchOf(struct {});
 
 /// A fully resolved chain: every file read, every overlay applied.
 ///
-/// Generic over the app tier's type because `.app` is parsed strictly, and a
+/// Generic over the app tier's type because `.vars` is parsed strictly, and a
 /// strict parse needs to know what it is parsing against. An app that declares
 /// tokens gets `ChainOf(Tokens)`; one that does not uses the alias below and
-/// its files may not contain an `.app` section.
+/// its files may not contain an `.vars` section.
 pub fn ChainOf(comptime App: type) type {
     return struct {
         theme: elmz.Theme,
         /// Gradient overrides that came with that palette.
         gradients: elmz.Gradients = .{},
         /// The app tier, if the app declared one. Otherwise `.{}` -- and a file
-        /// that writes `.app` keys is rejected rather than waved through.
+        /// that writes `.vars` keys is rejected rather than waved through.
         app: App = .{},
         /// The typeface the chain names, COPIED: the files were read into
         /// buffers that die before this is returned. Empty means no file named
@@ -357,7 +357,7 @@ pub fn resolveChain(
             if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
-                out.app = loaded.app;
+                out.app = loaded.vars;
                 if (loaded.fontName()) |f| {
                     @memcpy(out.font_buf[0..f.len], f);
                     out.font_len = f.len;
@@ -381,7 +381,7 @@ pub fn resolveChain(
             if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
-                out.app = loaded.app;
+                out.app = loaded.vars;
                 // The end user's name wins outright, and an override that omits
                 // `.font` inherits the developer's -- the same rule the colours
                 // follow, so one file cannot mean two things.
@@ -489,6 +489,100 @@ pub const FontSlot = struct {
 
     fn appliedName(self: *const FontSlot) []const u8 {
         return self.applied[0..self.applied_len];
+    }
+};
+
+/// The typefaces a chain named, loaded once and addressed by index.
+///
+/// A theme file names a font BY NAME -- `"DejaVu Sans"`, never a path -- so
+/// something has to turn that string into bytes the canvas can draw with. This
+/// does that, and it is deliberately the only place that does: a second lookup
+/// path is how one of them drifts from the other.
+///
+/// INDEX 0 IS THE PRIMARY and is never stored here. It stays the canvas's own
+/// `font`, attached through `applyChainFont`, because that face is what layout
+/// measured against and repointing it mid-run would relayout everything. What
+/// lives here is every OTHER face a style named.
+///
+/// The bytes are OWNED. A `Face` borrows them for as long as it draws, so the
+/// owner cannot be the theme file -- that buffer is freed the moment the parse
+/// finishes. They live as long as the registry, which lives as long as the
+/// window.
+pub const FontRegistry = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    home: ?[]const u8,
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
+
+    pub const Entry = struct {
+        /// The name as the theme wrote it, duplicated: the theme's own string
+        /// dies with the parse, and this outlives it.
+        name: []u8,
+        bytes: []u8,
+    };
+
+    pub const max_faces = 8;
+
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8) FontRegistry {
+        return .{ .gpa = gpa, .io = io, .home = home };
+    }
+
+    pub fn deinit(self: *FontRegistry) void {
+        for (self.entries.items) |e| {
+            self.gpa.free(e.name);
+            self.gpa.free(e.bytes);
+        }
+        self.entries.deinit(self.gpa);
+    }
+
+    /// The index for `name`, loading it if this is the first time.
+    ///
+    /// `null` means the name could not be produced: absent, unreadable, or past
+    /// `max_faces`. The caller bands it and keeps the face already attached,
+    /// the same rule `applyChainFont` follows -- a font that cannot be found
+    /// must never quietly become a different font.
+    ///
+    /// Idempotent by NAME, not by index: asking twice for "Inter" costs one
+    /// lookup ever, which is what makes a per-frame call free.
+    pub fn indexOf(self: *FontRegistry, name: []const u8) ?usize {
+        if (name.len == 0) return null;
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) return i + 1;
+        }
+        if (self.entries.items.len >= max_faces) return null;
+
+        const bytes = software.loadFontByNameHome(self.gpa, self.io, name, &.{}, self.home) catch return null;
+        const owned = self.gpa.dupe(u8, name) catch {
+            self.gpa.free(bytes);
+            return null;
+        };
+        self.entries.append(self.gpa, .{ .name = owned, .bytes = bytes }) catch {
+            self.gpa.free(owned);
+            self.gpa.free(bytes);
+            return null;
+        };
+        return self.entries.items.len;
+    }
+
+    /// The index for `name` WITHOUT loading it, for a resolve that must not
+    /// touch the filesystem. Used where the answer is only compared, never
+    /// drawn with.
+    pub fn find(self: *const FontRegistry, name: []const u8) ?usize {
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) return i + 1;
+        }
+        return null;
+    }
+
+    /// Register every loaded face with the canvas, so a primitive naming one
+    /// can draw with it. Cheap and idempotent: `setFontIndex` returns early
+    /// once an index is occupied.
+    pub fn attachAll(self: *FontRegistry, canvas: *software.Canvas) void {
+        for (self.entries.items, 0..) |e, i| {
+            canvas.setFontIndex(i + 1, e.bytes, 0) catch |err| switch (err) {
+                error.FaceLimit, error.OutOfMemory => return,
+            };
+        }
     }
 };
 
@@ -617,12 +711,12 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
 
     // Same trick again, for the type rather than a value: an app that wants
     // tokens in its theme file names the struct here (`theme_tokens = Tokens`),
-    // and its `.app` section is then parsed and checked against it. Without it
+    // and its `.vars` section is then parsed and checked against it. Without it
     // there is no tier and a file writing one is told so, which is the whole
     // point of declaring.
     //
     // What this does NOT do is hand the values back. Declaring `theme_tokens`
-    // buys validation, not delivery: `run` passes `.app` through unread, so an
+    // buys validation, not delivery: `run` passes `.vars` through unread, so an
     // app that wants the numbers resolves the chain itself (see
     // `resolveChain`). Stated here because the declaration reads as though the
     // runner would deliver them, and two resolutions of one file are worth
@@ -758,10 +852,22 @@ pub fn run(
     // The face the chain names, and the bytes behind it. Owned here so a swap
     // frees the previous buffer instead of leaking it.
     var font_slot: FontSlot = .{ .canvas = canvas };
+    // Every OTHER face a style named, loaded on demand and owned for the life
+    // of the loop. The primary stays in `font_slot`: it is the face layout
+    // measured against, so it is not a member of the set.
+    //
+    // Constructed only when both a gpa and an io are present, because loading a
+    // face is a filesystem read. Without them the multi-face path is simply
+    // unavailable, which is the right answer for a headless run.
+    var font_reg: ?FontRegistry = if (opts.gpa != null and opts.io != null)
+        FontRegistry.init(opts.gpa.?, opts.io.?, opts.home)
+    else
+        null;
     defer if (opts.gpa) |g| {
         if (base_owned) |p| g.free(p);
         if (user_owned) |p| g.free(p);
         font_slot.deinit(g);
+        if (font_reg) |*r| r.deinit();
     };
     if (opts.io) |io_arg| {
         if (opts.gpa) |g| {
@@ -2636,8 +2742,8 @@ test "the font name rides the chain: user wins, an omitting override inherits" {
     defer tmp.cleanup();
     var bb: [64]u8 = undefined;
     var ub: [64]u8 = undefined;
-    try tmp.dir.writeFile(io, .{ .sub_path = "theme.defaults.zon", .data = ".{ .version = 2, .theme = .{ .font = \"Base Face\" } }" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "theme.defaults.zon", .data = ".{ .version = 3, .theme = .{ .font = \"Base Face\" } }" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }" });
 
     // An override that omits `.font` inherits the developer's, the same rule the
     // colours follow -- otherwise one file would mean two things.
@@ -2647,7 +2753,7 @@ test "the font name rides the chain: user wins, an omitting override inherits" {
     }
 
     // And the end user naming one wins outright.
-    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 2, .theme = .{ .font = \"User Face\" } }" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 3, .theme = .{ .font = \"User Face\" } }" });
     {
         const chain = resolveChain(struct {}, gpa, io, .{}, tmpPath(&bb, tmp, "theme.defaults.zon") catch unreachable, tmpPath(&ub, tmp, "theme.zon") catch unreachable);
         try std.testing.expectEqualStrings("User Face", chain.fontName().?);
@@ -2662,11 +2768,11 @@ test "the chain layers the override over the developer's base" {
 
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x102030, .panel = 0x203040 } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x102030, .panel = 0x203040 } } }",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
     });
 
     var bb: [128]u8 = undefined;
@@ -2750,11 +2856,11 @@ test "editing the base re-applies the override on top of it" {
 
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x102030 } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x102030 } } }",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
     });
 
     var bb: [128]u8 = undefined;
@@ -2775,7 +2881,7 @@ test "editing the base re-applies the override on top of it" {
     // a palette that no longer exists.
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .bg = 0x405060, .panel = 0x203040 } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x405060, .panel = 0x203040 } } }",
     });
 
     watch.poll(&ui, io, gpa);
@@ -2790,7 +2896,7 @@ test "editing the base re-applies the override on top of it" {
 
 test "the app tier is parsed against the type the app declares, and refused without one" {
     // The bug this closes: `resolveChain` hardcoded `struct {}`, so an app that
-    // declared tokens had its `.app` section rejected by the very function that
+    // declared tokens had its `.vars` section rejected by the very function that
     // loads it -- the tier worked when called directly and never through the
     // runner. Same file, two callers, opposite answers.
     const Tokens = struct { sidebar_width: u16 = 200 };
@@ -2802,7 +2908,7 @@ test "the app tier is parsed against the type the app declares, and refused with
 
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } }, .app = .{ .sidebar_width = 240 } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } }, .vars = .{ .sidebar_width = 240 } }",
     });
     var bb: [128]u8 = undefined;
     var ub: [128]u8 = undefined;
@@ -2833,7 +2939,7 @@ test "a gradient written into the file reaches the Ui, and leaves when edited ou
     // actually fills it.
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa }, .gradients = .{ .accent = .{ .linear = .{ .dir = 45, .from = 0x89b4fa, .to = 0xf5c2e7 } } } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa }, .gradients = .{ .accent = .{ .linear = .{ .dir = 45, .from = 0x89b4fa, .to = 0xf5c2e7 } } } } }",
     });
 
     var bb: [128]u8 = undefined;
@@ -2854,7 +2960,7 @@ test "a gradient written into the file reaches the Ui, and leaves when edited ou
     // gradient would outlive the line that declared it.
     try tmp.dir.writeFile(io, .{
         .sub_path = "theme.zon",
-        .data = ".{ .version = 2, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }",
+        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }",
     });
     watch.poll(&ui, io, gpa);
     try std.testing.expect(ui.gradients.accent == null);
