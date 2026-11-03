@@ -687,6 +687,18 @@ const FontMem = struct {
     kern_mem: [Face.kern_bytes]u8 align(8),
 };
 
+/// A non-primary face and the cache storage its glyphs live in.
+///
+/// Held as a pair rather than as a `Face` alone because the cache keeps slices
+/// into `mem`: the same rule as `FontMem`, one copy outward. The `Face` must be
+/// attached AFTER the storage is in its final home, which is what `setFontIndex`
+/// does when it appends one.
+const ExtraFace = struct {
+    face: Face = .none,
+    mem: *FontMem,
+    vary_index: u32 = 0,
+};
+
 /// One edge crossing a scanline. `dir` carries the edge's direction so a
 /// nonzero fill can accumulate winding; an even-odd fill ignores it and pairs
 /// the crossings off in order.
@@ -735,13 +747,33 @@ pub const Canvas = struct {
     /// and neither is a timing.
     bakes: usize = 0,
 
-    /// The face this canvas measures and draws with. `Font.none` means no
-    /// glyph data: text measures at zero and draws nothing. The caller supplies
-    /// the bytes -- the library ships no typeface.
+    /// The face this canvas measures and draws with when a primitive names no
+    /// other. `Font.none` means no glyph data: text measures at zero and draws
+    /// nothing. The caller supplies the bytes -- the library ships no typeface.
     font: Face = .none,
 
-    /// Scratch for the glyph cache, allocated once and reused across faces.
+    /// Scratch for the glyph cache of the PRIMARY face.
     font_mem: ?*FontMem = null,
+
+    /// Additional faces, each with its own cache, addressed by index >= 1.
+    ///
+    /// A style may name a different typeface, and switching used to mean
+    /// `setFontAt` -- which CLEARS the measure and wrap caches unconditionally,
+    /// because a different face answers every width differently. Doing that per
+    /// primitive throws away a warm glyph cache on every text run, and with two
+    /// faces interleaved it never converges: each switch evicts the other's
+    /// work.
+    ///
+    /// So a face does not replace its predecessor here, it JOINS it. Each entry
+    /// owns the cache storage its glyphs land in, and picking one is an index,
+    /// not a rebuild. Both caches already key on the face fingerprint, so
+    /// measurements for the two cannot collide -- that part was already right.
+    ///
+    /// GREW LAZILY, on first use of an index. An app that names one typeface
+    /// pays nothing for this, and the ~270 KiB a face's cache costs is only
+    /// spent on faces a theme actually asked for. Capped at `extra_faces_max`.
+    extra_faces: std.ArrayListUnmanaged(ExtraFace) = .empty,
+    extra_faces_max: usize = 8,
 
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
     /// A 64-bit collision would hand back the width of a different string, and
@@ -897,6 +929,61 @@ pub const Canvas = struct {
         }
     }
 
+    /// Register a face at `index` (must be >= 1) and give it its own cache.
+    ///
+    /// Idempotent per index: asking twice for the same index is a no-op, so a
+    /// per-frame call is free after the first. The measure and wrap caches are
+    /// deliberately NOT cleared -- they key on the face fingerprint, so entries
+    /// for this face and every other one coexist. That is the whole point of
+    /// keeping faces side by side instead of swapping them.
+    ///
+    /// `bytes` must outlive the canvas, same rule as `setFont`.
+    pub fn setFontIndex(self: *Self, index: usize, bytes: []const u8, face_index: u32) !void {
+        std.debug.assert(index >= 1);
+        if (index > self.extra_faces_max) return error.FaceLimit;
+        // Grow with empty slots up to the requested index so `items[index]`
+        // is always valid.
+        while (self.extra_faces.items.len <= index) {
+            const mem = try self.gpa.create(FontMem);
+            mem.* = .{};
+            self.extra_faces.append(self.gpa, .{ .mem = mem }) catch |e| {
+                self.gpa.destroy(mem);
+                return e;
+            };
+        }
+        const slot = &self.extra_faces.items[index];
+        if (slot.face.ok) return;
+        var face = Face.initIndex(bytes, face_index);
+        face.attachCache(&slot.mem.bytes);
+        face.attachLookup(&slot.mem.lookup);
+        face.attachKern(&slot.mem.kern, &slot.mem.kern_mem);
+        slot.face = face;
+        slot.vary_index = face_index;
+    }
+
+    /// The face to draw with at `index`: the primary at 0, a registered extra
+    /// otherwise. An index never registered yields `Face.none`, which draws
+    /// nothing rather than silently drawing in the wrong typeface.
+    pub fn faceAt(self: *const Self, index: usize) Face {
+        if (index == 0) return self.font;
+        if (index >= self.extra_faces.items.len) return .none;
+        return self.extra_faces.items[index].face;
+    }
+
+    /// The same face BY POINTER, which is what painting needs.
+    ///
+    /// `Face.drawText` takes `*const Font` and its glyph cache keeps its hit and
+    /// miss counters INSIDE the face value. Handing it a copy means every glyph
+    /// still rasterises -- the pixels look right -- but the counters land on a
+    /// temporary and the real face reports nothing, forever. Drawing through a
+    /// pointer is the difference between a warm cache and a cache that merely
+    /// looks unused.
+    pub fn facePtrAt(self: *Self, index: usize) *const Face {
+        if (index == 0) return &self.font;
+        if (index >= self.extra_faces.items.len) return &self.font;
+        return &self.extra_faces.items[index].face;
+    }
+
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
         @memset(px, 0);
@@ -935,6 +1022,8 @@ pub const Canvas = struct {
         self.clearWrapCache();
         self.wrap_cache.deinit(self.gpa);
         if (self.font_mem) |m| self.gpa.destroy(m);
+        for (self.extra_faces.items) |f| self.gpa.destroy(f.mem);
+        self.extra_faces.deinit(self.gpa);
         self.gpa.free(self.px);
     }
 
@@ -1365,8 +1454,22 @@ pub const Canvas = struct {
     }
 
     pub fn drawTextClip(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
-        if (!self.font.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
-        self.font.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
+        self.drawTextFace(&self.font, x, y, size, fill, bytes, clip);
+    }
+
+    /// Text in a SPECIFIC face, rather than whatever the canvas is pointed at.
+    ///
+    /// The face is passed, not swapped in. `setFontAt` clears both caches, so
+    /// pointing the canvas at another face per primitive would evict the warm
+    /// cache on every run -- and with two faces interleaved, each switch would
+    /// undo the other's work. Every face keeps its own storage here, so a
+    /// different typeface costs an argument, not a rebuild.
+    ///
+    /// An absent face still falls back to the built-in bitmap, the same rule as
+    /// the primary: invisible text is a worse answer than the wrong face.
+    pub fn drawTextFace(self: *Self, face: *const Face, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+        if (!face.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
+        face.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
     }
 
     /// Text in the built-in face, for a canvas with no typeface attached.
@@ -2065,7 +2168,14 @@ pub const Canvas = struct {
             .halo => |q| r.halo(q.rect, q.corner, q.halo, q.clip),
             .frost => |q| r.frost(q.rect, q.radius, q.blur, q.clip),
             .rrect => |q| r.roundedRect(q.rect, q.radius, q.fill, q.stroke, q.clip),
-            .text => |t| r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip),
+            .text => |t| {
+                if (t.face == 0) {
+                    r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
+                } else {
+                    const f = self.facePtrAt(t.face);
+                    self.drawTextFace(f, t.x * self.scale, t.y * self.scale, t.size * self.scale, t.fill, t.bytes, self.scaledRect(t.clip));
+                }
+            },
         };
     }
 

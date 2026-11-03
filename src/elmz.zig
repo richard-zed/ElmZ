@@ -500,7 +500,13 @@ pub const Primitive = union(enum) {
     quad: struct { rect: Rect, fill: Fill, clip: Rect },
     /// rounded rect: `stroke` draws a 1px outline instead of a fill
     rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect },
-    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect },
+    /// `face` selects a registered typeface by index, 0 being the primary.
+    ///
+    /// Behind the scenes on purpose: a `view` never writes this. A style names a
+    /// font, the runtime resolves the name, and what reaches paint is an index.
+    /// Zero is the primary, so a build that registers no extra face records
+    /// exactly what it recorded before.
+    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0 },
     /// Recorded where it has to composite: before the element's own fill for
     /// `glow` and `shadow`, after it for `inner_glow`, whose light would
     /// otherwise be covered by the shape it lives inside.
