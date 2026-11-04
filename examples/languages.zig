@@ -107,7 +107,11 @@ pub fn main(init: std.process.Init) !void {
     const gpa = da.allocator();
     const io = init.io;
 
-    var w = std.Io.File.stdout().writer(io, &.{});
+    // Caller-owned buffer, like every other example. Passing `&.{}` made the
+    // writer allocate its own and never free it, so DebugAllocator reported a
+    // leak at exit -- which reads as a crash AFTER a successful render.
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
     defer out.flush() catch {};
 

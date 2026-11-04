@@ -575,6 +575,7 @@ pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntr
                 .border = e.spec.border,
                 .font = e.spec.font,
                 .size = e.spec.size,
+                .weight = e.spec.weight,
             },
         });
     }

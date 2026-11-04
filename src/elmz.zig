@@ -940,7 +940,12 @@ pub const StyleEntry = struct {
         fg: ?[]const u8 = null,
         border: ?[]const u8 = null,
         font: ?[]const u8 = null,
+        /// Point size named by the theme. Applied by `styleByName`; a call
+        /// site that passes its own `.size` still wins, because an element
+        /// that asked for a size meant it.
         size: ?f32 = null,
+        /// Weight in the variable `wght` axis, in user units (400, 700).
+        weight: ?u16 = null,
     } = .{},
 };
 
@@ -1555,6 +1560,12 @@ pub const Style = struct {
 
     /// A fill is either a flat colour or a gradient, so one field covers both.
     /// Build one with `solid`, `hgrad` or `vgrad`.
+    /// Point size, from a theme style. Null means "no opinion", which is what
+    /// lets `text()` fall back to the size the call site passed.
+    size: ?f32 = null,
+    /// `wght` axis value, from a theme style. Null leaves the face at its
+    /// default instance.
+    weight: ?u16 = null,
     bg: ?Fill = null,
     fg: ?Fill = null,
     border: ?Fill = null,
@@ -2978,6 +2989,8 @@ pub fn Ui(comptime M: type) type {
                 if (entry.spec.fg) |r| out.fg = self.roleFill(r);
                 if (entry.spec.border) |r| out.border = self.roleFill(r);
                 if (entry.spec.font) |f| out.face = self.font(f);
+                out.size = entry.spec.size;
+                out.weight = entry.spec.weight;
                 return out;
             }
             return null;
@@ -3152,7 +3165,10 @@ pub fn Ui(comptime M: type) type {
 
         pub const TextOpts = struct {
             label: []const u8,
-            size: f32 = 14,
+            /// Optional so a STYLE can supply it: a non-optional default of 14
+            /// meant every call site silently asked for 14, and a theme's
+            /// `.size` could never win. Null here means "the style's, or 14".
+            size: ?f32 = null,
             /// The typeface to draw this label in, BY NAME, resolved through
             /// the runtime's registry. A name, not an index: the index is a
             /// load-order artefact and would silently mean a different
@@ -3345,7 +3361,12 @@ pub fn Ui(comptime M: type) type {
         /// Text. `fg` is only set for `tone = .muted`: leaving it unset is the
         /// paint default, so the common case writes one fewer field.
         pub fn text(self: *Self, o: TextOpts) *Elem {
-            const e = self.mk(.{ .text = .{ .bytes = o.label, .size = o.size } });
+            // Precedence, one place: an explicit call-site size wins, then the
+            // style the element carries, then the widget default. The style is
+            // read here rather than in `finish` because `size` is a field of
+            // the geometry, and finish runs after it was already recorded.
+            const size: f32 = o.size orelse (o.style.size orelse 14);
+            const e = self.mk(.{ .text = .{ .bytes = o.label, .size = size } });
             // The ONLY place a name becomes a face. `font` returns an opaque
             // handle; nothing downstream can forge one.
             if (o.font) |n| e.face = self.font(n) orelse 0;
@@ -6059,6 +6080,11 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
         // into the four sides, and an Element has no `margin` to compare with.
         // Its effect is covered by asserting the sides below.
         if (comptime std.mem.eql(u8, f.name, "margin")) continue;
+        // `size` and `weight` are read when the geometry is BUILT (`text()`
+        // picks the size, the face picks the instance), so neither is a field
+        // on an Element to compare. Covered by the text tests instead.
+        if (comptime std.mem.eql(u8, f.name, "size")) continue;
+        if (comptime std.mem.eql(u8, f.name, "weight")) continue;
         if (@typeInfo(f.type).optional.child == f32) {
             // applyStyle defaults an absent radius/pad, so compare as optional
             try std.testing.expect(@field(a, f.name) == @field(full, f.name).?);
@@ -6075,7 +6101,11 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     var m: Element(void) = .{ .geometry = .{ .rect = {} } };
     m.mergeStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
+        // Same three non-stored fields as above: none of them lands on an
+        // Element, so there is nothing here to compare.
         if (comptime std.mem.eql(u8, f.name, "margin")) continue;
+        if (comptime std.mem.eql(u8, f.name, "size")) continue;
+        if (comptime std.mem.eql(u8, f.name, "weight")) continue;
         if (@typeInfo(f.type).optional.child == f32) {
             try std.testing.expect(@field(m, f.name) == @field(full, f.name).?);
         } else {

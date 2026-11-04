@@ -445,6 +445,19 @@ pub const Font = struct {
         // genuinely different work, and picking between them is a property of
         // the TEXT, not of the font.
         if (isArabic(cps[0..n])) {
+            // A face that cannot map the run's script still answers: `shapeArabic`
+            // falls back to `glyphIndex(cp) catch 0` and returns without error
+            // when there is no GSUB, so gid 0 (notdef) or a stray cmap hit comes
+            // back and the catch below never fires. That is a TOFU run, not a
+            // shaped one -- refused here so the caller draws .notdef boxes in
+            // the face it actually named rather than a plausible wrong glyph.
+            const mappable = for (cps[0..n]) |cp| {
+                if (self.face.glyphIndex(cp)) |_| {} else |_| break false;
+            } else true;
+            if (!mappable) {
+                for (cps[0..n], 0..) |cp, k| run.gids[k] = self.glyphFor(cp).gid;
+                return i;
+            }
             run.len = self.face.shapeArabic(cps[0..n], run.gids[0..n], null) catch blk: {
                 for (cps[0..n], 0..) |cp, k| run.gids[k] = self.glyphFor(cp).gid;
                 break :blk n;
