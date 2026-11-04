@@ -787,6 +787,28 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
     return run(Tokens, S, M, &rt, &canvas, window, opts);
 }
 
+/// Fill the canvas with the `bg` role.
+///
+/// A gradient on `bg` is not decoration on an element -- it IS the page, so it
+/// cannot arrive as a primitive the way a panel's gradient does. A clear can
+/// only take one colour, which is why this is a full-canvas fill: same pixels
+/// as the clear when the role is flat, and the actual ramp when it is not.
+fn clearToTheme(canvas: *software.Canvas, ui: anytype) void {
+    const fill = ui.roleFill("bg");
+    if (fill == .solid) {
+        canvas.clear(fill.solid);
+        return;
+    }
+    const w: f32 = @floatFromInt(canvas.w);
+    const h: f32 = @floatFromInt(canvas.h);
+    const all: elmz.Rect = .{ .x = 0, .y = 0, .w = w, .h = h };
+    const r = canvas.renderer();
+    // Clear first so a gradient with any transparency still lands on the page
+    // colour, not on whatever the previous frame left behind.
+    canvas.clear(ui.theme.bg);
+    r.quad(all, fill, all);
+}
+
 /// Build a frame sized to the canvas, clear it to `bg`, and rasterise it.
 /// The caller owns the returned frame.
 ///
@@ -855,7 +877,7 @@ pub fn paintInto(
         .h = @floatFromInt(canvas.h),
     }, canvas.renderer());
     errdefer frame.deinit();
-    canvas.clear(rt.ui.theme.bg);
+    clearToTheme(canvas, &rt.ui);
     canvas.paintFrame(frame.prims);
     return frame;
 }
@@ -1071,7 +1093,7 @@ pub fn run(
             frame = try rt.frame(size, canvas.renderer());
             const t1 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
 
-            canvas.clear(rt.ui.theme.bg);
+            clearToTheme(canvas, &rt.ui);
             canvas.paintFrame(frame.?.prims);
             const t2 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
 

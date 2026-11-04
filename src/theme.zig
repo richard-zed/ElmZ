@@ -682,7 +682,8 @@ test "the palette guard is family-scoped" {
 
 test "the shipped defaults list every role" {
     var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.defaults.zon", defaults_zon, Theme{}, &diag);
+    var loaded = try loadTheme(struct {}, std.testing.allocator, "theme.defaults.zon", defaults_zon, Theme{}, &diag);
+    defer freeStyles(std.testing.allocator, &loaded.styles);
 
     // A role added to `Theme` and forgotten in the file would leave the
     // compiled literal showing through, which is the one way the file stops
@@ -699,7 +700,8 @@ test "the shipped defaults list every role" {
 
 test "the shipped defaults resolve to the compiled palette" {
     var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.defaults.zon", defaults_zon, Theme{}, &diag);
+    var loaded = try loadTheme(struct {}, std.testing.allocator, "theme.defaults.zon", defaults_zon, Theme{}, &diag);
+    defer freeStyles(std.testing.allocator, &loaded.styles);
     try std.testing.expect(std.meta.eql(@as(Theme, .{}), loaded.theme));
 }
 
