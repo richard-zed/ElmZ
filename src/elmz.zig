@@ -506,7 +506,7 @@ pub const Primitive = union(enum) {
     /// font, the runtime resolves the name, and what reaches paint is an index.
     /// Zero is the primary, so a build that registers no extra face records
     /// exactly what it recorded before.
-    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0 },
+    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0, weight: u16 = 0 },
     /// Recorded where it has to composite: before the element's own fill for
     /// `glow` and `shadow`, after it for `inner_glow`, whose light would
     /// otherwise be covered by the shape it lives inside.
@@ -640,6 +640,11 @@ pub const Renderer = struct {
         /// Point subsequent `text` calls at a registered face, by index. 0 is
         /// the primary. A backend with only one face ignores it.
         set_face: *const fn (ptr: *anyopaque, face: u16) void,
+        /// `wght` for the face `set_face` last named, or 0 for its default
+        /// instance. Separate from `set_face` because the two are independent:
+        /// a weight survives a face change only if the caller re-asks, and
+        /// `set_face` already resets it to 0 for that reason.
+        set_weight: *const fn (ptr: *anyopaque, weight: u16) void,
         /// A glow or shadow behind `rect`. `corner` is the element's own radius
         /// so the halo follows its shape rather than boxing it.
         halo: *const fn (ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void,
@@ -717,6 +722,12 @@ pub const Renderer = struct {
     ///
     /// Backends that carry a single face may ignore `set_face`; the text then
     /// draws in the primary, which is what 0 means anyway.
+    /// Set the weight of the face `setFace` last named. 0 restores the
+    /// default instance. A non-variable face ignores it.
+    pub fn setWeight(self: Renderer, weight: u16) void {
+        self.vtable.set_weight(self.ptr, weight);
+    }
+
     pub fn textFace(self: Renderer, face: u16, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
         if (bytes.len == 0) return;
         if (face != 0) self.vtable.set_face(self.ptr, face);
@@ -924,6 +935,19 @@ pub fn roleColor(pal: Theme, name: []const u8) Color {
     return pal.text;
 }
 
+/// A halo as a DOCUMENT sees it: the colour is a role name, everything else is
+/// a number. Split from `Halo` because a zon file cannot hold a `Color`, and
+/// because a role name is what makes a themed glow light up with the palette.
+pub const HaloSpecEntry = struct {
+    color: []const u8 = "text_muted",
+    blur: f32 = 12,
+    spread: f32 = 0,
+    offset: [2]f32 = .{ 0, 0 },
+    light: ?f32 = null,
+    mode: Halo.Mode = .glow,
+    quality: Halo.Quality = .baked,
+};
+
 /// A theme style as a VIEW sees it.
 ///
 /// Structurally identical to `theme.StyleEntry` but declared here, because
@@ -946,6 +970,13 @@ pub const StyleEntry = struct {
         size: ?f32 = null,
         /// Weight in the variable `wght` axis, in user units (400, 700).
         weight: ?u16 = null,
+        /// A glow or shadow, with its colour named as a theme role so it
+        /// follows `.colors` instead of freezing a hex.
+        ///
+        /// A shadow is not a separate thing: it is `.outer_glow`, offset, in a
+        /// dark role, with `light` set. Building it from the glow keeps one
+        /// emission path and one set of rules.
+        halo: ?HaloSpecEntry = null,
     } = .{},
 };
 
@@ -1654,6 +1685,10 @@ pub fn Element(comptime M: type) type {
         /// Which registered typeface this element's text draws in. Set through
         /// `Style.face`, which is itself behind the scenes -- see `Style`.
         face: u16 = 0,
+        /// `wght` axis for that face, or 0 for its default instance. Kept
+        /// beside `face` because a weight is meaningless without one, and both
+        /// are recorded together into the text primitive.
+        weight: u16 = 0,
         /// A glow or shadow behind this element, following its corner radius.
         /// Appearance only: no layout cost, no hit region, no children moved.
         halo: ?Halo = null,
@@ -1781,7 +1816,7 @@ pub fn Element(comptime M: type) type {
             /// names a typeface, `Ui` resolves it against the registry and
             /// stores the INDEX here, because the element is a value that has
             /// to outlive the frame that named it.
-            text: struct { bytes: []const u8, size: f32, face: u16 = 0 },
+            text: struct { bytes: []const u8, size: f32, face: u16 = 0, weight: u16 = 0 },
             button: struct { label: []const u8, size: f32 },
             bar: struct { value: f32 },
             /// Children share ONE origin, each displaced by its own `offset`.
@@ -1810,6 +1845,7 @@ pub fn Element(comptime M: type) type {
                 // and every styled label painted in the primary face -- tofu for
                 // any script the primary does not cover.
                 .face = self.face,
+                .weight = self.weight,
                 .radius = self.radius,
                 .pad = self.pad,
                 .halo = self.halo,
@@ -1831,6 +1867,7 @@ pub fn Element(comptime M: type) type {
             self.fg = mergeFill(self.fg, s.fg);
             self.border = mergeFill(self.border, s.border);
             if (s.face) |v| self.face = v;
+            if (s.weight) |v| self.weight = v;
             self.radius = s.radius orelse 0;
             self.pad = s.pad orelse 0;
             self.halo = s.halo;
@@ -1860,6 +1897,7 @@ pub fn Element(comptime M: type) type {
             if (s.fg) |v| self.fg = v;
             if (s.border) |v| self.border = v;
             if (s.face) |v| self.face = v;
+            if (s.weight) |v| self.weight = v;
             if (s.radius) |v| self.radius = v;
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
@@ -2514,6 +2552,10 @@ pub fn Element(comptime M: type) type {
                     // previous element set, or a single styled label would leak
                     // its font into everything drawn after it this frame.
                     r.setFace(t.face);
+                    // After the face, never before: `setFace` resets the weight
+                    // to the face's default instance, so setting it first would
+                    // be discarded.
+                    r.setWeight(t.weight);
                     // Glyphs start inside the padding, matching `measure`.
                     const ix = rect.x + self.pad;
                     const iy = rect.y + self.pad;
@@ -2991,6 +3033,15 @@ pub fn Ui(comptime M: type) type {
                 if (entry.spec.font) |f| out.face = self.font(f);
                 out.size = entry.spec.size;
                 out.weight = entry.spec.weight;
+                if (entry.spec.halo) |h| out.halo = .{
+                    .color = roleColor(self.theme, h.color),
+                    .blur = h.blur,
+                    .spread = h.spread,
+                    .offset = h.offset,
+                    .light = h.light,
+                    .mode = h.mode,
+                    .quality = h.quality,
+                };
                 return out;
             }
             return null;
@@ -3156,8 +3207,15 @@ pub fn Ui(comptime M: type) type {
             // what paint reads. Copied here rather than in `text()` because the
             // style arrives last: `text()` runs before `finish` merges it, so a
             // face set at build time would be overwritten by the default.
-            if (e.style().face) |f| switch (e.geometry) {
+            const st = e.style();
+            if (st.face) |f| switch (e.geometry) {
                 .text => |*tx| tx.face = f,
+                else => {},
+            };
+            // Same rule for the weight: it belongs to the face, and paint
+            // reads both off the geometry.
+            if (st.weight) |v| switch (e.geometry) {
+                .text => |*tx| tx.weight = v,
                 else => {},
             };
             return e;
@@ -3366,7 +3424,11 @@ pub fn Ui(comptime M: type) type {
             // read here rather than in `finish` because `size` is a field of
             // the geometry, and finish runs after it was already recorded.
             const size: f32 = o.size orelse (o.style.size orelse 14);
-            const e = self.mk(.{ .text = .{ .bytes = o.label, .size = size } });
+            const e = self.mk(.{ .text = .{
+                .bytes = o.label,
+                .size = size,
+                .weight = o.style.weight orelse 0,
+            } });
             // The ONLY place a name becomes a face. `font` returns an opaque
             // handle; nothing downstream can forge one.
             if (o.font) |n| e.face = self.font(n) orelse 0;
@@ -3909,6 +3971,7 @@ pub fn Collector(comptime M: type) type {
             .rrect = vtRrect,
             .text = vtText,
             .set_face = vtSetFace,
+            .set_weight = nominalSetWeight,
             .halo = vtHalo,
             .frost = vtFrost,
             .measure_text = vtMeasure,
@@ -4097,6 +4160,7 @@ pub fn nominalRenderer() Renderer {
         .rrect = nominalRrect,
         .text = nominalText,
         .set_face = nominalSetFace,
+        .set_weight = nominalSetWeight,
         .halo = nominalHalo,
         .frost = nominalFrost,
         .measure_text = nominalMeasure,
@@ -4161,6 +4225,7 @@ fn nominalQuad(_: *anyopaque, _: Rect, _: Fill, _: Rect) void {}
 fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: bool, _: Rect) void {}
 fn nominalText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: Rect) void {}
 fn nominalSetFace(_: *anyopaque, _: u16) void {}
+fn nominalSetWeight(_: *anyopaque, _: u16) void {}
 fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
 // ---------------------------------------------------------------------------
 // messages / runtime

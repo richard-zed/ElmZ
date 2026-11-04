@@ -844,6 +844,11 @@ pub const Canvas = struct {
     /// of drawing: an element that sets it and then throws is exactly the case
     /// where a trailing reset would be skipped.
     cur_face: u16 = 0,
+    /// `wght` for `cur_face`, or 0 for the face's default instance. Sticky
+    /// beside `cur_face` because varying a weight rebuilds the instance and
+    /// clears both caches -- doing that per text run would clear them
+    /// constantly, so it happens only when the value actually changes.
+    cur_weight: u16 = 0,
     dbg_faces: bool = true,
 
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
@@ -2638,6 +2643,7 @@ pub const Canvas = struct {
         .rrect = vtRrect,
         .text = vtText,
         .set_face = vtSetFace,
+        .set_weight = vtSetWeight,
         .halo = vtHalo,
         .frost = vtFrost,
         .measure_text = vtMeasure,
@@ -2690,6 +2696,60 @@ pub const Canvas = struct {
     fn vtSetFace(ptr: *anyopaque, face: u16) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.cur_face = face;
+        self.cur_weight = 0;
+        self.revaryFace(face);
+    }
+
+    fn vtSetWeight(ptr: *anyopaque, weight: u16) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.setFaceWeight(weight);
+    }
+
+    /// Point the STICKY face at a variable instance of `weight`.
+    ///
+    /// Only `weight` is honoured: it is the one axis a theme style names, and
+    /// a general axis map would be a structure the schema does not have. A
+    /// non-variable face has no `wght`, `atCoords` returns the default
+    /// instance, and the pixels are unchanged -- so styling a static font with
+    /// a weight is a no-op rather than an error, which is the same rule a
+    /// missing font follows.
+    pub fn setFaceWeight(self: *Self, weight: u16) void {
+        if (weight == self.cur_weight) return;
+        self.cur_weight = weight;
+        self.revaryFace(self.cur_face);
+    }
+
+    /// Rebuild `cur_face`'s instance at `cur_weight`.
+    ///
+    /// The caches are keyed by FACE INDEX, not by instance, so a rebuild must
+    /// invalidate them or the new weight lays out the old weight's widths.
+    fn revaryFace(self: *Self, index: u16) void {
+        if (self.cur_weight == 0) return;
+        const slot = if (index == 0) &self.font else blk: {
+            if (index >= self.extra_faces.items.len) return;
+            break :blk &self.extra_faces.items[index].face;
+        };
+        if (!slot.ok) return;
+        const coords = [_]f32{@floatFromInt(self.cur_weight)};
+        const varied = slot.atCoords(&coords);
+        // `atCoords` on a face with no `gvar` returns the default instance;
+        // keeping it costs nothing and keeps the call site unconditional.
+        self.clearMeasureCache();
+        self.clearWrapCache();
+        if (index == 0) {
+            self.font = varied;
+            if (self.font_mem) |m| {
+                self.font.attachCache(&m.bytes);
+                self.font.attachLookup(&m.lookup);
+                self.font.attachKern(&m.kern, &m.kern_mem);
+            }
+        } else {
+            self.extra_faces.items[index].face = varied;
+            const m = self.extra_faces.items[index].mem;
+            self.extra_faces.items[index].face.attachCache(&m.bytes);
+            self.extra_faces.items[index].face.attachLookup(&m.lookup);
+            self.extra_faces.items[index].face.attachKern(&m.kern, &m.kern_mem);
+        }
     }
 
     fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
@@ -4941,4 +5001,51 @@ test "a measurement cache does not answer across variation instances" {
     try std.testing.expectEqual(light.fingerprint(), heavy.fingerprint());
     // ...and the instance identity must NOT be.
     try std.testing.expect(light.instanceKey() != heavy.instanceKey());
+}
+
+test "a style weight reaches the pixels, not just the struct" {
+    // This is the test whose absence let `weight` sit resolved-and-dropped: it
+    // parsed, `styleByName` filled `Style.weight`, and nothing downstream read
+    // it. Asserting the field is set would have passed the whole time. Only
+    // ink proves the outline changed.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/root/NovusGroteskVF-cff2.otf.ttf",
+        std.testing.allocator,
+        .limited(32 * 1024 * 1024),
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(bytes);
+
+    // Skips on a box without the fixture. Written anyway: the wiring it covers
+    // is the only thing standing between a themed weight and a no-op.
+    if (@import("cedar.zig").Font.init(bytes).axisCount() == 0) return error.SkipZigTest;
+
+    var c = try Canvas.init(std.testing.allocator, 200, 100);
+    defer c.deinit();
+    const r = c.renderer();
+    c.setFont(bytes);
+
+    const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+
+    @memset(c.px, 0);
+    r.setFace(0);
+    r.setWeight(300);
+    r.text(10, 10, 60, ink, "H", area);
+    const light_ink = countInk(c.px);
+
+    @memset(c.px, 0);
+    r.setFace(0);
+    r.setWeight(900);
+    r.text(10, 10, 60, ink, "H", area);
+    const heavy_ink = countInk(c.px);
+
+    try std.testing.expect(light_ink > 0);
+    try std.testing.expect(heavy_ink > light_ink);
+
+    // A face change must DROP the weight: it belongs to the face it was asked
+    // for, never to whatever is drawn next.
+    r.setFace(0);
+    try std.testing.expectEqual(@as(u16, 0), c.cur_weight);
 }

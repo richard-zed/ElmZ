@@ -360,6 +360,26 @@ pub const StyleSpec = struct {
     font: ?[]const u8 = null,
     size: ?f32 = null,
     weight: ?u16 = null,
+    halo: ?HaloSpec = null,
+};
+
+/// A glow or shadow in a theme file.
+///
+/// The colour is a ROLE NAME, not a hex, for the same reason every other style
+/// field is: editing `.colors` must move it. A shadow is the same machinery as
+/// a glow with `mode = "outer_glow"`, an offset and a dark role -- there is no
+/// separate shadow type, because there is no separate emission path.
+///
+/// `light` is the clock-face angle the light COMES FROM (0 = overhead, 90 =
+/// right), unlike a gradient's `dir`, which is where the colour goes.
+pub const HaloSpec = struct {
+    color: []const u8 = "text_muted",
+    blur: f32 = 12,
+    spread: f32 = 0,
+    offset: [2]f32 = .{ 0, 0 },
+    light: ?f32 = null,
+    mode: elmz.Halo.Mode = .glow,
+    quality: elmz.Halo.Quality = .baked,
 };
 
 /// The named styles, as a LIST rather than a map.
