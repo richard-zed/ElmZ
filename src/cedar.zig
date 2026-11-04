@@ -338,18 +338,35 @@ pub const Font = struct {
         return self.cache.stats;
     }
 
-    /// stb's ScaleForPixelHeight, reproduced from the same hhea numbers.
+    /// Pixels per font unit. `size` names the EM SQUARE.
+    ///
+    /// The rasteriser multiplies raw font units by this and never reads
+    /// `units_per_em`, so the divisor must be the em. Using the hhea span
+    /// (asc - desc) instead is near 1:1 for DejaVu but 1.448:1 for a typical
+    /// CJK/Arabic face, which drew every non-Latin glyph at 69% of its size.
     fn scaleFor(self: *const Font, size: f32) f32 {
-        const v = self.face.vMetrics();
-        const em = @as(f32, @floatFromInt(v.ascender)) - @as(f32, @floatFromInt(v.descender));
-        if (em <= 0) return 1;
-        return size / em;
+        const upem = self.face.units_per_em;
+        if (upem == 0) return 1;
+        return size / @as(f32, @floatFromInt(upem));
     }
 
+    /// The line box for `size`, normalised so `ascent + descent == size`.
+    ///
+    /// `size` names the EM, and the em is what a caller's box is. Scaling the
+    /// raw hhea numbers instead gives `asc - desc` = 1448 units on a CJK face
+    /// (asc 1160, desc -288, upem 1000), a 1.448x span: the box overshoots, the
+    /// baseline sits ~11px too low at size 30, and every glyph is cut off at
+    /// the bottom of its own element. Normalising keeps the face's PROPORTIONS
+    /// -- ascent still dominates -- while keeping the total equal to the em.
     pub fn verticalMetrics(self: *const Font, size: f32) V {
         if (!self.ok) return .{ .ascent = size, .descent = 0, .line_gap = 0 };
-        const s = self.scaleFor(size);
         const v = self.face.vMetrics();
+        // THE SAME scale the glyphs are rasterised with. Normalising the span
+        // to `size` (the old code divided by asc - desc) shrinks the descent
+        // to desc/span of the em and lifts the baseline, so a box sized to
+        // `size` cannot hold the glyph: Arabic came out asc 19.52 desc -10.48
+        // on a face whose real proportion is 0.80/0.20 of a 1.448 em span.
+        const s = self.scaleFor(size);
         return .{
             .ascent = @as(f32, @floatFromInt(v.ascender)) * s,
             .descent = @as(f32, @floatFromInt(v.descender)) * s,
@@ -432,29 +449,14 @@ pub const Font = struct {
                 for (cps[0..n], 0..) |cp, k| run.gids[k] = self.glyphFor(cp).gid;
                 break :blk n;
             };
-            // Advances come from the generic path: `shapeArabic` answers with
-            // glyph ids only, and the hmtx walk it would need is private to
-            // Cedar. Shaping the same run twice costs a second layout but that
-            // layout is already paid for `measure`, and a wrong advance would
-            // misplace every glyph after the first.
-            // A SCRATCH buffer, not `run.gids`: `shape` WRITES glyph ids into
-            // its `out` slice before it does anything else, so passing the run's
-            // own gids here would overwrite the joined forms `shapeArabic` just
-            // produced with the generic unjoined ones -- and the run would draw
-            // as isolated letters with every advance correct. The advances are
-            // all this call is for.
-            var scratch: [run_max]u16 = undefined;
-            var adv: [run_max]i32 = undefined;
-            const m = self.face.shape(cps[0..n], scratch[0..n], null, .{
-                .advances = adv[0..n],
-                .substitute = false,
-                .kern_cache = self.kern,
-            }) catch null;
-            if (m != null) {
-                @memcpy(run.advs[0..n], adv[0..n]);
-            } else {
-                for (run.gids[0..n], 0..) |g, k| run.advs[k] = advanceOfGid(&self.face, g);
-            }
+            // Advances belong to the JOINED glyphs `shapeArabic` just
+            // returned, so they are read straight off those gids. A second
+            // `shape` call cannot supply them: substitution-on answers with the
+            // BASE forms (1365..1395) where `shapeArabic` returns the
+            // contextual ones (5337..5366), and substitution-off lays isolate
+            // advances behind joined glyphs -- which is a wide gap after every
+            // character, the defect this replaces.
+            for (run.gids[0..run.len], 0..) |g, k| run.advs[k] = advanceOfGid(&self.face, g);
             // Cedar returns LOGICAL order on purpose -- "the caller reverses
             // for display, because reversing is a property of the writing
             // direction and not of the shaping". This is that reversal. Both
@@ -492,6 +494,9 @@ pub const Font = struct {
             at = self.layoutRun(bytes, at, &run);
             for (run.advs[0..run.len]) |a| w += @as(f32, @floatFromInt(a)) * s;
         }
+        // `verticalMetrics` is already normalised to the em, so the box is
+        // exactly what it reports and the baseline `drawText` computes from
+        // the same numbers lands in the same place.
         return .{
             .width = w,
             .height = v.ascent - v.descent,
@@ -738,6 +743,11 @@ pub const Font = struct {
 
                 if (r) |rr| {
                     if (rr.w > 0 and rr.h > 0) {
+                        // `x0`/`y0` are PIXELS ALREADY: `bitmapBoxPhase` floors
+                        // and ceils them after multiplying by `scale`, so a
+                        // second multiply by `s` shrank a -25px offset to -0.4
+                        // and dropped every Latin and CJK glyph half a line
+                        // below its baseline, straight through the clip.
                         const ox: i64 = @intFromFloat(@round(pen + @as(f32, @floatFromInt(rr.x0))));
                         const oy: i64 = @intFromFloat(@round(baseline + @as(f32, @floatFromInt(rr.y0))));
                         var row: u32 = 0;
