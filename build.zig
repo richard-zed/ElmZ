@@ -165,21 +165,13 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.getInstallStep().dependOn(&b.addInstallArtifact(languages, .{}).step);
-    b.step("languages", "build the six-language demo").dependOn(&languages.step);
-
-    const arsh = b.addExecutable(.{
-        .name = "arsh",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("arsh_tmp.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "inkwell", .module = b.dependency("inkwell", .{ .target = target, .optimize = optimize }).module("inkwell") },
-            },
-        }),
-    });
-    b.step("arsh", "scratch").dependOn(&b.addInstallArtifact(arsh, .{}).step);
+    const languages_install = b.addInstallArtifact(languages, .{});
+    b.getInstallStep().dependOn(&languages_install.step);
+    // MUST depend on the INSTALL step, not `languages.step`: the latter only
+    // compiles into the cache, so `zig build languages` reported success while
+    // zig-out/bin/languages kept its old timestamp and every run measured a
+    // stale binary.
+    b.step("languages", "build the six-language demo").dependOn(&languages_install.step);
 
     const gallery = b.addExecutable(.{
         .name = "gallery",
