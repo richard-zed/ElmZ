@@ -74,7 +74,7 @@
     // three CJK languages do NOT share one either -- they agree on most
     // characters and disagree on exactly the ones a reader would notice.
     .styles = .{
-        .{ .name = "latin", .spec = .{ .fg = "text", .font = "DejaVu Sans" } },
+        .{ .name = "latin", .spec = .{ .fg = "text", .font = "Ubuntu" } },
         .{ .name = "arabic", .spec = .{ .fg = "text", .font = "Noto Sans Arabic" } },
         .{ .name = "thai", .spec = .{ .fg = "text", .font = "Noto Sans Thai" } },
         // The three CJK languages live in ONE collection file, so the name is

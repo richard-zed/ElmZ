@@ -647,6 +647,14 @@ pub const Renderer = struct {
         /// the element draws, or it frosts the element too.
         frost: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, blur: f32, clip: Rect) void,
         measure_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32) TextMetrics,
+        /// Metrics for a string measured ON `face` -- the same face its glyphs
+        /// will be drawn with. `measure_text` answers from the primary face,
+        /// which is right for a width and wrong for a box: layout sized every
+        /// CJK label with DejaVu's metrics (upem 2048, asc 1901, desc -483) and
+        /// drew it with Noto CJK's (upem 1000, asc 1160, desc -288), so the
+        /// allotted 34.92px box held a 43.44px line and cut the bottom off.
+        /// A backend with one face answers this identically to `measure_text`.
+        measure_text_face: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) TextMetrics,
         /// Splits into lines no wider than `max_width`. Returns the count.
         /// Kept on the renderer because only the backend knows the glyph
         /// advances, and layout must break lines exactly where paint does.
@@ -734,6 +742,13 @@ pub const Renderer = struct {
 
     pub fn measureText(self: Renderer, bytes: []const u8, size: f32) TextMetrics {
         return self.vtable.measure_text(self.ptr, bytes, size);
+    }
+
+    /// Metrics on the face `bytes` will actually be DRAWN with. Every caller
+    /// that sizes a box around text must use this, not `measureText`, or the
+    /// box is measured by one typeface and filled by another.
+    pub fn measureTextFace(self: Renderer, bytes: []const u8, size: f32, face: u16) TextMetrics {
+        return self.vtable.measure_text_face(self.ptr, bytes, size, face);
     }
 
     pub fn wrapText(self: Renderer, bytes: []const u8, size: f32, max_width: f32, out: [][]const u8) usize {
@@ -1910,7 +1925,7 @@ pub fn Element(comptime M: type) type {
         /// cases that actually occur, and both are answered by the first.
         fn textBaseline(self: *const Self, r: Renderer, w: f32, h: f32) ?f32 {
             switch (self.geometry) {
-                .text => |t| return self.pad + r.measureText(t.bytes, t.size).ascent,
+                .text => |t| return self.pad + r.measureTextFace(t.bytes, t.size, t.face).ascent,
                 .button => |b| {
                     const ts = r.measureText(b.label, b.size);
                     return (h - ts.height) * 0.5 + ts.ascent;
@@ -1951,7 +1966,9 @@ pub fn Element(comptime M: type) type {
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
             var s: Extent = switch (self.geometry) {
                 .text => |t| blk: {
-                    const ts = r.measureText(t.bytes, t.size);
+                    // Measured on the face it will be PAINTED with, not the
+                    // primary. See `measure_text_face`.
+                    const ts = r.measureTextFace(t.bytes, t.size, t.face);
                     // An explicit width still wins; otherwise wrapping text
                     // takes what it is given, since it has no natural width.
                     const max_w = self.width orelse avail_w;
@@ -2526,7 +2543,7 @@ pub fn Element(comptime M: type) type {
                     } else {
                         var buf: [max_lines][]const u8 = undefined;
                         const n = r.wrapText(t.bytes, t.size, iw, &buf);
-                        const ts = r.measureText(t.bytes, t.size);
+                        const ts = r.measureTextFace(t.bytes, t.size, t.face);
                         for (buf[0..n], 0..) |line, i| {
                             if (line.len == 0) continue;
                             r.text(ix, iy + @as(f32, @floatFromInt(i)) * ts.line_height, t.size, fg_now, line, tclip);
@@ -2937,6 +2954,19 @@ pub fn Ui(comptime M: type) type {
         /// be unaffected by an edit to `theme.zon`. An unknown name is not an
         /// error -- the caller keeps its own default, which is what lets an app
         /// ship with no theme file at all.
+        /// One role as a FILL: its theme gradient when the file gave it one,
+        /// else the flat colour.
+        ///
+        /// This is the seam that makes a gradient on `accent` reach a style
+        /// that names `accent`, rather than only the fills an app hand-built.
+        /// A style names a ROLE, and a role is a look -- so text set in a
+        /// gradiented role is gradiented text, which is the whole reason
+        /// `Renderer.text` takes a `Fill` and not a `Color`.
+        pub fn roleFill(self: *const Self, name: []const u8) Fill {
+            if (self.gradients.get(name)) |g| return g;
+            return .{ .solid = roleColor(self.theme, name) };
+        }
+
         pub fn styleByName(self: *const Self, name: []const u8) ?Style {
             const styles = self.styles orelse return null;
             for (styles) |entry| {
@@ -2944,9 +2974,9 @@ pub fn Ui(comptime M: type) type {
                 var out: Style = .{};
                 // A role reference is resolved against THIS frame's palette,
                 // so editing `.colors` moves every style that names it.
-                if (entry.spec.bg) |r| out.bg = .{ .solid = roleColor(self.theme, r) };
-                if (entry.spec.fg) |r| out.fg = .{ .solid = roleColor(self.theme, r) };
-                if (entry.spec.border) |r| out.border = .{ .solid = roleColor(self.theme, r) };
+                if (entry.spec.bg) |r| out.bg = self.roleFill(r);
+                if (entry.spec.fg) |r| out.fg = self.roleFill(r);
+                if (entry.spec.border) |r| out.border = self.roleFill(r);
                 if (entry.spec.font) |f| out.face = self.font(f);
                 return out;
             }
@@ -3861,10 +3891,16 @@ pub fn Collector(comptime M: type) type {
             .halo = vtHalo,
             .frost = vtFrost,
             .measure_text = vtMeasure,
+            .measure_text_face = vtMeasureFace,
             .wrap_text = vtWrap,
             .advance_text = vtAdvanceText,
             .hit_text = vtHitText,
         };
+
+        fn vtMeasureFace(ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) TextMetrics {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            return self.metrics.measureTextFace(bytes, size, face);
+        }
 
         fn vtFrost(ptr: *anyopaque, rect: Rect, radius: f32, blur: f32, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
@@ -4043,6 +4079,7 @@ pub fn nominalRenderer() Renderer {
         .halo = nominalHalo,
         .frost = nominalFrost,
         .measure_text = nominalMeasure,
+        .measure_text_face = nominalMeasureFace,
         .wrap_text = nominalWrap,
         .advance_text = nominalAdvance,
         .hit_text = nominalHit,
@@ -4090,6 +4127,10 @@ fn nominalWrap(_: *anyopaque, bytes: []const u8, size: f32, max_width: f32, out:
 }
 
 fn nominalMeasure(_: *anyopaque, bytes: []const u8, size: f32) TextMetrics {
+    return nominalTextMetrics(bytes, size);
+}
+
+fn nominalMeasureFace(_: *anyopaque, bytes: []const u8, size: f32, _: u16) TextMetrics {
     return nominalTextMetrics(bytes, size);
 }
 

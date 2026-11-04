@@ -1548,10 +1548,6 @@ pub const Canvas = struct {
     /// An absent face still falls back to the built-in bitmap, the same rule as
     /// the primary: invisible text is a worse answer than the wrong face.
     pub fn drawTextFace(self: *Self, face: *const Face, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
-        const dbg = self.dbg_faces;
-        if (dbg and bytes.len > 0 and bytes[0] > 0x7F) {
-            std.debug.print("TF avail={} ok={} first=U+{X:0>4} size={d} x={d}\n", .{ face.available(), face.ok, bytes[0], size, x });
-        }
         if (!face.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
         face.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
     }
@@ -2645,6 +2641,7 @@ pub const Canvas = struct {
         .halo = vtHalo,
         .frost = vtFrost,
         .measure_text = vtMeasure,
+        .measure_text_face = vtMeasureFace,
         .wrap_text = vtWrap,
         .advance_text = vtAdvanceText,
         .hit_text = vtHitText,
@@ -2713,7 +2710,15 @@ pub const Canvas = struct {
     /// constant, so its numbers cache like any other face's. Non-zero on
     /// purpose: 0 is what `instanceKey()` returns for an absent face, and
     /// reusing it would make "no font" indistinguishable from "not computed".
-    fn faceKey(self: *const Self) usize {
+    fn faceKey(self: *Self) usize {
+        return self.faceKeyAt(0);
+    }
+
+    /// The cache key for face `index`, which must be the face the caller is
+    /// about to draw with -- metrics and glyphs come from the same outline.
+    fn faceKeyAt(self: *Self, index: usize) usize {
+        const f = self.facePtrAt(index);
+        if (f.available()) return f.instanceKey();
         return if (self.font.available()) self.font.instanceKey() else elmfont_face_key;
     }
 
@@ -2725,6 +2730,10 @@ pub const Canvas = struct {
     /// at the next frame's reset, which is the trap that makes a naive version
     /// corrupt rather than slow.
     fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
+        return self.cachedMeasureFace(bytes, dev, 0);
+    }
+
+    fn cachedMeasureFace(self: *Self, bytes: []const u8, dev: f32, face_index: usize) elmz.TextMetrics {
         // The key must name the face the number CAME FROM, not the face that
         // was asked for. When no typeface is attached the measurement is
         // answered by `elmfont`, but `instanceKey()` on a dead face is 0 --
@@ -2732,14 +2741,15 @@ pub const Canvas = struct {
         // built-in rasteriser, and was evicted before it was ever reused.
         // That is a permanent double measure for exactly the apps that had a
         // font go missing, which read as "the font fix made it slow".
-        const face = self.faceKey();
+        const face = self.faceKeyAt(face_index);
         const probe: MeasureKey = .{ .text = bytes, .dev = dev, .face = face };
         if (self.measure_cache.get(probe)) |m| {
             self.measure_hits += 1;
             return m;
         }
         self.measure_misses += 1;
-        const m = if (self.font.available()) self.font.measure(bytes, dev) else elmfont.measure(bytes, dev);
+        const f = self.facePtrAt(face_index);
+        const m = if (f.available()) f.measure(bytes, dev) else elmfont.measure(bytes, dev);
         if (self.measure_cache.count() >= measure_cap) self.clearMeasureCache();
         const owned = self.gpa.dupe(u8, bytes) catch return m;
         self.measure_cache.put(self.gpa, .{ .text = owned, .dev = dev, .face = face }, m) catch {
@@ -2812,6 +2822,20 @@ pub const Canvas = struct {
     /// grid-fitting move stems by whole pixels -- so at 1.25x the width of a
     /// string is not 1.25x the width measured at 1x, and a layout built on the
     /// scaled-down number would disagree with the glyphs actually drawn.
+    fn vtMeasureFace(ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) elmz.TextMetrics {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const m = self.cachedMeasureFace(bytes, size * self.scale, face);
+        if (self.scale == 1.0) return m;
+        const inv = 1.0 / self.scale;
+        return .{
+            .width = m.width * inv,
+            .height = m.height * inv,
+            .ascent = m.ascent * inv,
+            .descent = m.descent * inv,
+            .line_height = m.line_height * inv,
+        };
+    }
+
     fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const m = self.cachedMeasure(bytes, size * self.scale);
