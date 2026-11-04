@@ -54,14 +54,54 @@
             .warning = 0xf9e2af,
             // a thing failed: the error band's text, an error toast's bar
             .fail = 0xf38ba8,
+
+            // Colours beyond the ten. A LIST, not a map -- zon has no map.
+            //
+            // This is the tier for what a UI needs but a palette cannot
+            // guess: a diff's added and removed, a chart's series, a tag's
+            // hue. Each is usable anywhere a role name is -- `.bg = "danger"`,
+            // a halo's `.color`, a `.gradients` key.
+            //
+            // A custom name may NOT shadow one above: the built-in would win
+            // the lookup, so the file would look ignored rather than wrong.
+            //
+            // .roles = .{
+            //     .{ .name = "danger", .hex = 0xeba0ac },
+            //     .{ .name = "info", .hex = 0x89dceb },
+            // },
         },
 
         // No gradient ships by default: a default gradient is a look, and the
-        // library's default look is a flat palette. Both forms, for reference.
+        // library's default look is a flat palette.
+        //
+        // Keyed by ROLE NAME -- the ten built-ins or any `.roles` above -- so
+        // a gradient stands exactly where a flat colour would. A gradient
+        // overrides that role wherever it is used as a FILL; the flat colour
+        // stays for text and borders, and as the fallback.
+        //
+        // Omitted ends INHERIT the role's resolved colour, so a gradient
+        // cannot drift from the palette it belongs to. Here `.accent`'s `from`
+        // is simply 0x89b4fa without repeating it.
+        //
+        // `.dir` is DEGREES, clockwise from 12 o'clock: 0 up, 90 right,
+        // 180 down, 270 left. Radial `.center` is a fraction of the box;
+        // `.radius` is a fraction of its WIDTH.
         //
         // .gradients = .{
-        //     .accent = .{ .linear = .{ .dir = 135, .from = 0x89b4fa, .to = 0xf5c2e7 } },
-        //     .panel = .{ .radial = .{ .inner = 0x45475a, .outer = 0x313244, .radius = 0.7 } },
+        //     .accent = .{ .linear = .{ .dir = 135, .to = 0xf5c2e7 } },
+        //     .panel = .{ .radial = .{ .inner = 0x45475a, .center = .{ 0.25, 0.15 }, .radius = 0.7 } },
+        //     .danger = .{ .linear = .{ .dir = 90, .from = 0xeba0ac, .to = 0xf38ba8 } },
+        // },
+        //
+        // Custom gradients go in a `roles` list inside `.gradients`, naming a
+        // colour from `.colors .roles`. A gradient for a name no role defines
+        // is rejected: it would resolve against the `text` fallback and draw a
+        // ramp nobody asked for.
+        //
+        // .gradients = .{
+        //     .roles = .{
+        //         .{ .name = "danger", .gradient = .{ .linear = .{ .dir = 90, .to = 0xf38ba8 } } },
+        //     },
         // },
     },
 
@@ -73,8 +113,32 @@
     // its own face: a Latin face has no Arabic, Thai or CJK glyphs, and the
     // three CJK languages do NOT share one either -- they agree on most
     // characters and disagree on exactly the ones a reader would notice.
+    //
+    // A style may also carry:
+    //   .size   -- point size, which a call site passing its own `.size` beats
+    //   .weight -- the variable `wght` axis (400, 700). A no-op on a static
+    //              face, and `Ubuntu` below IS static, so the comments here
+    //              use a variable name where weight matters.
+    //   .halo   -- a glow or shadow, in the role names above. Colour is a ROLE
+    //              so it follows `.colors`. A shadow is not a separate thing:
+    //              it is `.mode = "outer_glow"` plus an `.offset` plus a dark
+    //              role. `.light` is the clock-face angle the light COMES
+    //              FROM (0 overhead, 90 right) -- note that a `.dir` in
+    //              `.gradients` is where the colour GOES, the opposite sense
+    //              at the same number.
     .styles = .{
         .{ .name = "latin", .spec = .{ .fg = "text", .font = "Ubuntu" } },
+        // .{ .name = "heading", .spec = .{
+        //     .fg = "text",
+        //     .font = "Roboto Flex",
+        //     .size = 34,
+        //     .weight = 700,
+        //     .halo = .{ .color = "accent", .blur = 14, .spread = 2, .light = 0 },
+        // } },
+        // .{ .name = "card", .spec = .{
+        //     .bg = "panel",
+        //     .halo = .{ .color = "bg", .blur = 10, .offset = .{ 0, 6 }, .mode = "outer_glow" },
+        // } },
         .{ .name = "arabic", .spec = .{ .fg = "text", .font = "Noto Sans Arabic" } },
         .{ .name = "thai", .spec = .{ .fg = "text", .font = "Noto Sans Thai" } },
         // The three CJK languages live in ONE collection file, so the name is

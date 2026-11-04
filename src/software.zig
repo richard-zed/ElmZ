@@ -2719,6 +2719,20 @@ pub const Canvas = struct {
         self.revaryFace(self.cur_face);
     }
 
+    /// The `wght` axis of a face, or null when it has none.
+    ///
+    /// The tag is the four bytes 'w','g','h','t' packed big-endian, the same
+    /// layout `fvar` uses.
+    const wght_tag: u32 = (@as(u32, 'w') << 24) | (@as(u32, 'g') << 16) | (@as(u32, 'h') << 8) | @as(u32, 't');
+
+    fn wghtAxis(face: @import("cedar.zig").Font) ?usize {
+        var i: usize = 0;
+        while (i < face.axisCount()) : (i += 1) {
+            if (face.axis(i)) |a| if (a.tag == wght_tag) return i;
+        }
+        return null;
+    }
+
     /// Rebuild `cur_face`'s instance at `cur_weight`.
     ///
     /// The caches are keyed by FACE INDEX, not by instance, so a rebuild must
@@ -2730,8 +2744,25 @@ pub const Canvas = struct {
             break :blk &self.extra_faces.items[index].face;
         };
         if (!slot.ok) return;
-        const coords = [_]f32{@floatFromInt(self.cur_weight)};
-        const varied = slot.atCoords(&coords);
+
+        // `atCoords` takes coords in AXIS ORDER, so a one-element array sets
+        // axis 0 -- which is `wght` only by luck. Roboto Flex declares twelve
+        // axes and `wght` is the ELEVENTH, so a single-element array was
+        // quietly varying `GRAD` and leaving the weight at its default. That is
+        // why two weights drew identical pixels: nothing about the outline had
+        // been asked to change.
+        const wi = wghtAxis(slot.*);
+        if (wi == null) return;
+        var coords: [32]f32 = undefined;
+        const n = @min(slot.axisCount(), coords.len);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            // Only `wght` is named; every other axis stays at its own default,
+            // which is what a missing value means to `atCoords`.
+            const a = slot.axis(i) orelse continue;
+            coords[i] = if (a.tag == wght_tag) @floatFromInt(self.cur_weight) else a.default;
+        }
+        const varied = slot.atCoords(coords[0..n]);
         // `atCoords` on a face with no `gvar` returns the default instance;
         // keeping it costs nothing and keeps the call site unconditional.
         self.clearMeasureCache();
@@ -4920,7 +4951,7 @@ test "two weights of a variable face differ through the seam" {
     const io = std.Io.Threaded.global_single_threaded.io();
     const bytes = std.Io.Dir.cwd().readFileAlloc(
         io,
-        "/root/NovusGroteskVF-cff2.otf.ttf",
+        "/usr/share/fonts/roboto-flex/RobotoFlex[GRAD,XOPQ,XTRA,YOPQ,YTAS,YTDE,YTFI,YTLC,YTUC,opsz,slnt,wdth,wght].ttf",
         std.testing.allocator,
         .limited(32 * 1024 * 1024),
     ) catch return error.SkipZigTest;
@@ -4938,13 +4969,14 @@ test "two weights of a variable face differ through the seam" {
     const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
     const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
-    c.setFontAt(bytes, 0, &.{300});
+    var cb: [32]f32 = undefined;
+    c.setFontAt(bytes, 0, wghtCoords(probe, 300, &cb));
     r.text(10, 10, 60, ink, "H", area);
     const light_hash = std.hash.Wyhash.hash(0, c.px);
     const light_ink = countInk(c.px);
 
     @memset(c.px, 0);
-    c.setFontAt(bytes, 0, &.{900});
+    c.setFontAt(bytes, 0, wghtCoords(probe, 900, &cb));
     r.text(10, 10, 60, ink, "H", area);
     const heavy_hash = std.hash.Wyhash.hash(0, c.px);
     const heavy_ink = countInk(c.px);
@@ -4965,6 +4997,22 @@ test "two weights of a variable face differ through the seam" {
 
 /// Non-zero pixels in a frame. Used by the variation test to compare how much
 /// of the canvas each weight covers.
+/// A coords array that sets `wght` and leaves every other axis at its default.
+///
+/// `atCoords` takes coordinates in AXIS ORDER, so a one-element array sets
+/// axis 0. On Roboto Flex axis 0 is `GRAD` and `wght` is the eleventh, which is
+/// why a bare `&.{700}` varied the wrong axis and drew the default weight.
+fn wghtCoords(face: @import("cedar.zig").Font, weight: f32, out: []f32) []const f32 {
+    const n = @min(face.axisCount(), out.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const a = face.axis(i) orelse continue;
+        const is_w = a.tag == ((@as(u32, 'w') << 24) | (@as(u32, 'g') << 16) | (@as(u32, 'h') << 8) | @as(u32, 't'));
+        out[i] = if (is_w) weight else a.default;
+    }
+    return out[0..n];
+}
+
 fn countInk(px: []const u8) usize {
     var n: usize = 0;
     for (px) |p| {
@@ -4985,7 +5033,7 @@ test "a measurement cache does not answer across variation instances" {
     const io = std.Io.Threaded.global_single_threaded.io();
     const bytes = std.Io.Dir.cwd().readFileAlloc(
         io,
-        "/root/NovusGroteskVF-cff2.otf.ttf",
+        "/usr/share/fonts/roboto-flex/RobotoFlex[GRAD,XOPQ,XTRA,YOPQ,YTAS,YTDE,YTFI,YTLC,YTUC,opsz,slnt,wdth,wght].ttf",
         std.testing.allocator,
         .limited(32 * 1024 * 1024),
     ) catch return error.SkipZigTest;
@@ -4994,8 +5042,9 @@ test "a measurement cache does not answer across variation instances" {
     const probe = @import("cedar.zig").Font.init(bytes);
     if (probe.axisCount() == 0) return error.SkipZigTest;
 
-    const light = probe.atCoords(&.{300});
-    const heavy = probe.atCoords(&.{900});
+    var cb: [32]f32 = undefined;
+    const light = probe.atCoords(wghtCoords(probe, 300, &cb));
+    const heavy = probe.atCoords(wghtCoords(probe, 900, &cb));
 
     // Same file, so the byte identity is the SAME...
     try std.testing.expectEqual(light.fingerprint(), heavy.fingerprint());
@@ -5011,7 +5060,7 @@ test "a style weight reaches the pixels, not just the struct" {
     const io = std.Io.Threaded.global_single_threaded.io();
     const bytes = std.Io.Dir.cwd().readFileAlloc(
         io,
-        "/root/NovusGroteskVF-cff2.otf.ttf",
+        "/usr/share/fonts/roboto-flex/RobotoFlex[GRAD,XOPQ,XTRA,YOPQ,YTAS,YTDE,YTFI,YTLC,YTUC,opsz,slnt,wdth,wght].ttf",
         std.testing.allocator,
         .limited(32 * 1024 * 1024),
     ) catch return error.SkipZigTest;

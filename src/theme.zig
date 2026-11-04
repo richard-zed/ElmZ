@@ -86,10 +86,12 @@ const Collision = struct {
 pub fn firstCollision(t: Theme) ?Collision {
     const fields = @typeInfo(Theme).@"struct".fields;
     inline for (fields, 0..) |f, i| {
+        if (comptime std.mem.eql(u8, f.name, "custom")) continue;
         // `if`-capture, not `orelse continue`: `continue` inside an inline for
         // is comptime control flow in a runtime block, which does not compile.
         if (familyOf(f.name)) |fi| {
             inline for (fields[i + 1 ..]) |g| {
+                if (comptime std.mem.eql(u8, g.name, "custom")) continue;
                 if (familyOf(g.name)) |gi| {
                     if (fi == gi and std.meta.eql(@field(t, f.name), @field(t, g.name)))
                         return .{ .family = fi, .a = f.name, .b = g.name };
@@ -104,7 +106,11 @@ pub fn firstCollision(t: Theme) ?Collision {
 fn checkPalette(t: Theme) !void {
     const fields = @typeInfo(Theme).@"struct".fields;
     inline for (fields) |f| {
-        if (familyOf(f.name) == null) return error.UnfiledRole;
+        // `custom` is the side table for names a file invented; it is a slice,
+        // not a role, and has no family to file under.
+        if (comptime !std.mem.eql(u8, f.name, "custom")) {
+            if (familyOf(f.name) == null) return error.UnfiledRole;
+        }
     }
     if (firstCollision(t) != null) return error.DuplicateRole;
 }
@@ -240,16 +246,34 @@ pub const ColorsSpec = struct {
     warning: ?u32 = null,
     fail: ?u32 = null,
 
+    /// Colours beyond the built-in roles, as a LIST because ZON cannot parse a
+    /// map -- the same reason `.styles` is a list. A name here is usable
+    /// anywhere a role name is: `.bg = "sidebar"`, a halo's `.color`, a
+    /// gradient key.
+    ///
+    /// This is why the tier exists: the ten built-ins describe a UI, not an
+    /// APP. A chart's series colours, a diff's added/removed, a tag's hue per
+    /// tag -- none of those are `accent`, and squeezing them into `accent` is
+    /// how a palette stops meaning anything.
+    roles: []const CustomRole = &.{},
+
     /// `base` supplies whatever the spec leaves null. The field names mirror
     /// `Theme`; a test proves they stay mirrored, and this inline loop is what
     /// makes adding a role a one-line change on this side.
     pub fn overlay(self: ColorsSpec, base: Theme) Theme {
         var t = base;
         inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "roles")) continue;
             if (@field(self, f.name)) |hex| @field(t, f.name) = Color.hex(hex);
         }
         return t;
     }
+};
+
+/// One named colour outside the built-in set.
+pub const CustomRole = struct {
+    name: []const u8,
+    hex: u32,
 };
 
 /// Gradients per role, named exactly like the colours they stand in for.
@@ -271,6 +295,22 @@ pub const GradientsSpec = struct {
     success: ?GradientSpec = null,
     warning: ?GradientSpec = null,
     fail: ?GradientSpec = null,
+
+    /// Gradients for colours the file invented. A LIST because zon has no map,
+    /// and keyed by name rather than position because a gradient has to be
+    /// findable at paint time -- the same list-a-map problem `.styles` and
+    /// `.colors .roles` have, solved the same way.
+    ///
+    /// An omitted end INHERITS that role's colour, so a custom gradient needs
+    /// the role to exist in `.colors .roles`: it resolves against it exactly
+    /// as a built-in gradient resolves against a built-in role.
+    roles: []const CustomGradient = &.{},
+};
+
+/// One named gradient outside the built-in set.
+pub const CustomGradient = struct {
+    name: []const u8,
+    gradient: GradientSpec,
 };
 
 /// The resolved gradients: a role with no gradient is null, which is how every
@@ -290,18 +330,31 @@ pub const Gradients = struct {
     warning: ?elmz.Fill = null,
     fail: ?elmz.Fill = null,
 
+    /// Gradients for the file's own roles. A slice, not fields, for the same
+    /// reason `Theme.custom` is: names are data here, not schema.
+    custom: []const CustomFill = &.{},
+
+    pub const CustomFill = struct { name: []const u8, fill: elmz.Fill };
+
     pub fn any(self: Gradients) bool {
         inline for (@typeInfo(Gradients).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "custom")) continue;
             if (@field(self, f.name) != null) return true;
         }
-        return false;
+        return self.custom.len > 0;
     }
 
     /// The gradient for a role by name, or null. Lets an app say
     /// `ui.gradients.get("accent")` without knowing the whole shape.
     pub fn get(self: Gradients, name: []const u8) ?elmz.Fill {
         inline for (@typeInfo(Gradients).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "custom")) continue;
             if (std.mem.eql(u8, name, f.name)) return @field(self, f.name);
+        }
+        // A name the file defined. Checked last so a custom name can never
+        // shadow a built-in one -- the loader refuses that case outright.
+        for (self.custom) |c| {
+            if (std.mem.eql(u8, c.name, name)) return c.fill;
         }
         return null;
     }
@@ -335,6 +388,7 @@ pub const ThemeSpec = struct {
     pub fn resolveGradients(self: ThemeSpec, theme: Theme) Gradients {
         var out: Gradients = .{};
         inline for (@typeInfo(GradientsSpec).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "roles")) continue;
             if (@field(self.gradients, f.name)) |spec| {
                 @field(out, f.name) = spec.resolve(@field(theme, f.name));
             }
@@ -524,7 +578,55 @@ pub fn loadTheme(
 
     defer std.zon.parse.free(gpa, file);
 
-    const theme = file.theme.overlay(base);
+    var theme = file.theme.overlay(base);
+
+    // The file's own role names. The strings live in the parse result, which is
+    // freed on return, so they are COPIED into the caller's allocator before
+    // this scope ends -- a borrowed slice would dangle and every custom role
+    // would draw as the `text` fallback for reasons nothing could trace.
+    if (file.theme.colors.roles.len > 0) {
+        const custom = gpa.alloc(Theme.CustomColor, file.theme.colors.roles.len) catch return error.OutOfMemory;
+        errdefer gpa.free(custom);
+        var made: usize = 0;
+        errdefer for (custom[0..made]) |c| gpa.free(c.name);
+        for (file.theme.colors.roles, 0..) |r, i| {
+            // A custom name that shadows a built-in is a mistake worth naming:
+            // the built-in would win in `roleColor`, so the file would look
+            // ignored rather than wrong.
+            if (isBuiltinRole(r.name)) {
+                diag.set("{s}: .colors .roles names \"{s}\", which is a built-in role", .{ name, r.name });
+                return error.Palette;
+            }
+            custom[i] = .{ .name = gpa.dupe(u8, r.name) catch return error.OutOfMemory, .color = Color.hex(r.hex) };
+            made = i + 1;
+        }
+        theme.custom = custom;
+    }
+
+    // Custom gradients, resolved against the role they name. Done here rather
+    // than in `resolveGradients` because that runs before `theme.custom` is
+    // attached, so a custom role would resolve against `text`.
+    var grad_out: Gradients = file.theme.resolveGradients(theme);
+    if (file.theme.gradients.roles.len > 0) {
+        const cf = gpa.alloc(Gradients.CustomFill, file.theme.gradients.roles.len) catch return error.OutOfMemory;
+        errdefer gpa.free(cf);
+        var made: usize = 0;
+        errdefer for (cf[0..made]) |c| gpa.free(c.name);
+        for (file.theme.gradients.roles, 0..) |g, i| {
+            // A gradient for a name no role defines would resolve against the
+            // `text` fallback and draw a ramp nobody asked for.
+            if (!isRole(g.name, theme.custom)) {
+                diag.set("{s}: .gradients names \"{s}\", which is not a role", .{ name, g.name });
+                return error.Style;
+            }
+            cf[i] = .{
+                .name = gpa.dupe(u8, g.name) catch return error.OutOfMemory,
+                .fill = g.gradient.resolve(roleColor(theme, g.name)),
+            };
+            made = i + 1;
+        }
+        grad_out.custom = cf;
+    }
 
     // The shipped file is checked by the suite; a user's file is not, and it is
     // the one that can go wrong. A guard that only ever runs in tests protects
@@ -540,7 +642,7 @@ pub fn loadTheme(
     for (file.styles) |entry| {
         inline for (.{ "bg", "fg", "border" }) |slot| {
             if (@field(entry.spec, slot)) |ref| {
-                if (!isRole(ref)) {
+                if (!isRole(ref, theme.custom)) {
                     diag.set("{s}: style .{s} .{s} names \"{s}\", which is not a role", .{ name, entry.name, slot, ref });
                     return error.Style;
                 }
@@ -551,7 +653,7 @@ pub fn loadTheme(
 
     var out: Loaded(App) = .{
         .theme = theme,
-        .gradients = file.theme.resolveGradients(theme),
+        .gradients = grad_out,
         .vars = file.vars,
     };
 
@@ -596,18 +698,40 @@ pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntr
                 .font = e.spec.font,
                 .size = e.spec.size,
                 .weight = e.spec.weight,
+                // The halo's colour is copied as the ROLE NAME it was written
+                // as: the string stays owned by the loader's table, and
+                // resolving it here would freeze today's palette into a style.
+                .halo = if (e.spec.halo) |h| .{
+                    .color = h.color,
+                    .blur = h.blur,
+                    .spread = h.spread,
+                    .offset = h.offset,
+                    .light = h.light,
+                    .mode = h.mode,
+                    .quality = h.quality,
+                } else null,
             },
         });
     }
     return out.items;
 }
 
-/// Free the owned style table. Safe on the empty default./// Free the owned style table. Safe on the empty default.
+/// Free the custom-role table. Safe on a theme that has none.
+pub fn freeCustom(gpa: std.mem.Allocator, t: *elmz.Theme) void {
+    for (t.custom) |c| gpa.free(c.name);
+    if (t.custom.len > 0) gpa.free(t.custom);
+    t.custom = &.{};
+}
+
+/// Free the owned style table. Safe on the empty default.
 pub fn freeStyles(gpa: std.mem.Allocator, styles: *StylesSpec) void {
     for (styles.*) |entry| {
         inline for (.{ "bg", "fg", "border", "font" }) |slot| {
             if (@field(entry.spec, slot)) |str| gpa.free(str);
         }
+        // A halo's colour is a role NAME and is owned like any other string.
+        // Missing it here leaked one allocation per styled glow, silently.
+        if (entry.spec.halo) |h| gpa.free(h.color);
         gpa.free(entry.name);
     }
     if (styles.len > 0) gpa.free(styles.*);
@@ -622,6 +746,7 @@ fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
         inline for (.{ "bg", "fg", "border", "font" }) |slot| {
             if (@field(e.spec, slot)) |str| gpa.free(str);
         }
+        if (e.spec.halo) |h| gpa.free(h.color);
         gpa.free(e.name);
     };
     for (src, 0..) |entry, i| {
@@ -629,17 +754,33 @@ fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
         inline for (.{ "bg", "fg", "border", "font" }) |slot| {
             if (@field(entry.spec, slot)) |str| @field(nv, slot) = try gpa.dupe(u8, str);
         }
+        if (entry.spec.halo) |h| {
+            var nh = h;
+            nh.color = try gpa.dupe(u8, h.color);
+            nv.halo = nh;
+        }
         out[i] = .{ .name = try gpa.dupe(u8, entry.name), .spec = nv };
         done = i + 1;
     }
     return out;
 }
 
+/// Is `name` one of the compiled-in roles, ignoring any the file added?
+fn isBuiltinRole(name: []const u8) bool {
+    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "custom")) continue;
+        if (std.mem.eql(u8, name, f.name)) return true;
+    }
+    return false;
+}
+
 /// Is `ref` one of the palette's role names?
-fn isRole(ref: []const u8) bool {
+fn isRole(ref: []const u8, extra: []const Theme.CustomColor) bool {
     inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "roles")) continue;
         if (std.mem.eql(u8, ref, f.name)) return true;
     }
+    for (extra) |c| if (std.mem.eql(u8, c.name, ref)) return true;
     return false;
 }
 
@@ -697,6 +838,7 @@ test "the palette guard is family-scoped" {
     try std.testing.expectError(error.DuplicateRole, checkPalette(flat_page));
 
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "custom")) continue;
         try std.testing.expect(familyOf(f.name) != null);
     }
 }
@@ -710,6 +852,7 @@ test "the shipped defaults list every role" {
     // compiled literal showing through, which is the one way the file stops
     // being the source of default values.
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "custom")) continue;
         try std.testing.expect(@hasField(ColorsSpec, f.name));
         try std.testing.expect(@hasField(GradientsSpec, f.name));
     }
@@ -1053,4 +1196,42 @@ test "the palette guard names the offending pair" {
     try std.testing.expectEqualStrings("hover", c.b);
 
     try std.testing.expect(firstCollision(.{}) == null);
+}
+
+test "a custom colour is a role, not a parse-only name" {
+    // The whole point of the v3 `.colors` tier, and the failure it invites: a
+    // name that parses, resolves to nothing, and paints the `text` fallback --
+    // a REAL colour, so nothing looks broken, the label just draws wrong. So
+    // this asserts the hex arrives, and that a style may reference it.
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    const src =
+        \\.{ .version = 3,
+        \\   .theme = .{ .colors = .{
+        \\       .bg = 0x101010,
+        \\       .roles = .{ .{ .name = "danger", .hex = 0xeba0ac } },
+        \\   } },
+        \\   .styles = .{ .{ .name = "warn", .spec = .{ .bg = "danger" } } },
+        \\}
+    ;
+    var loaded = try loadTheme(struct {}, gpa, "custom.zon", src, .{}, &diag);
+    defer freeStyles(gpa, &loaded.styles);
+    defer freeCustom(gpa, &loaded.theme);
+
+    try std.testing.expectEqual(@as(usize, 1), loaded.theme.custom.len);
+    try std.testing.expectEqualStrings("danger", loaded.theme.custom[0].name);
+    try std.testing.expect(std.meta.eql(loaded.theme.custom[0].color, elmz.Color.rgbHex(0xeba0ac)));
+
+    // Through the accessor widgets actually use, and NOT the fallback.
+    try std.testing.expect(std.meta.eql(elmz.roleColor(loaded.theme, "danger"), elmz.Color.rgbHex(0xeba0ac)));
+    try std.testing.expect(!std.meta.eql(elmz.roleColor(loaded.theme, "danger"), loaded.theme.text));
+
+    // A style may name it. Before `isRole` knew about the side table this file
+    // was rejected outright.
+    try std.testing.expectEqual(@as(usize, 1), loaded.styles.len);
+
+    // The custom name is DUPED, not borrowed: the parse result is freed on
+    // return, so a borrowed slice would dangle. Reading it here after the free
+    // is the observation that proves it.
+    try std.testing.expectEqualStrings("danger", loaded.theme.custom[0].name);
 }

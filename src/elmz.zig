@@ -831,6 +831,24 @@ pub const Theme = struct {
     warning: Color = Color.rgbHex(0xf9e2af),
     /// a thing failed: the error band's text, an error toast's bar
     fail: Color = Color.rgbHex(0xf38ba8),
+
+    /// Colours the theme file defined beyond the built-ins.
+    ///
+    /// A side table, not fields: `Theme` is a comptime struct and a file is
+    /// read at runtime, so an app's own role names cannot be members. Kept
+    /// small and linear -- a palette has a handful of extras and this is only
+    /// walked on a name lookup, never per pixel.
+    custom: []const CustomColor = &.{},
+
+    pub const CustomColor = struct { name: []const u8, color: Color };
+
+    /// Look up a custom role. Null when the name is not one.
+    pub fn customColor(self: Theme, name: []const u8) ?Color {
+        for (self.custom) |c| {
+            if (std.mem.eql(u8, c.name, name)) return c.color;
+        }
+        return null;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -930,9 +948,14 @@ pub const ScrollChange = union(enum) {
 /// wrong-colour pixel beats a crash inside a paint.
 pub fn roleColor(pal: Theme, name: []const u8) Color {
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
-        if (std.mem.eql(u8, name, f.name)) return @field(pal, f.name);
+        if (comptime !std.mem.eql(u8, f.name, "custom")) {
+            if (std.mem.eql(u8, name, f.name)) return @field(pal, f.name);
+        }
     }
-    return pal.text;
+    // A name the file defined beats the `text` fallback. Without this a custom
+    // role resolved to `text` -- a real colour, so nothing looked broken, the
+    // label just drew in the wrong one.
+    return pal.customColor(name) orelse pal.text;
 }
 
 /// A halo as a DOCUMENT sees it: the colour is a role name, everything else is
@@ -2909,6 +2932,18 @@ const widgets = @import("widgets.zig");
 const reducer = @import("reducer.zig");
 pub const TextEdit = reducer.TextEdit;
 
+/// Storage for the `.vars` tier, in bytes.
+///
+/// The tier is typed by the app (`theme_tokens = Tokens`), and `Ui` only knows
+/// its message type, so the value cannot be a normal field. The runner writes
+/// the struct's bytes here and `Ui.vars` reinterprets them. A fixed buffer
+/// rather than an allocation: the tier is a handful of tokens, and this has to
+/// survive a failed reload without leaking.
+pub const VarSlot = struct {
+    bytes: [256]u8 align(16) = undefined,
+    len: u16 = 0,
+};
+
 pub fn Ui(comptime M: type) type {
     return struct {
         const Self = @This();
@@ -2919,6 +2954,20 @@ pub fn Ui(comptime M: type) type {
         /// Per-role gradient overrides from the theme file. Empty means every
         /// role paints its flat colour, which is the default look.
         gradients: Gradients = .{},
+        /// The `.vars` tier, in BYTES.
+        ///
+        /// `Ui` is generic over the message type, but the tier's type is the
+        /// APP's, so it cannot be a field here. The runner writes the struct's
+        /// bytes and `vars(T)` reads them back typed. A fixed buffer, not an
+        /// allocation: a reload replaces the value in place, so there is
+        /// nothing to free and no way to leak a tier.
+        vars_bytes: [256]u8 align(16) = undefined,
+        vars_len: u16 = 0,
+        /// Where the `.vars` tier lands. `Ui` cannot hold the value itself --
+        /// it is generic over `M`, and the tier's type is the APP's -- so the
+        /// runner writes the bytes here and `vars(T)` reads them back typed.
+        /// Empty until the chain resolves, so `vars` answers defaults first.
+        vars_slot: VarSlot = .{},
         /// Which key holds focus, mirrored from the runtime before `view` runs.
         /// The READ half of `Action.focus`: a widget can ask whether the caret
         /// belongs to it, and the app does not have to keep a second copy of
@@ -3015,6 +3064,29 @@ pub fn Ui(comptime M: type) type {
         /// A style names a ROLE, and a role is a look -- so text set in a
         /// gradiented role is gradiented text, which is the whole reason
         /// `Renderer.text` takes a `Fill` and not a `Color`.
+        /// The `.vars` tier, typed by whoever declared `theme_tokens`.
+        ///
+        /// Defaults until a file supplies some, so a widget can read a token on
+        /// the first frame, before any watch has polled. The type must be the
+        /// one the app declared, or this returns defaults rather than
+        /// reinterpreting unrelated bytes.
+        pub fn vars(self: *const Self, comptime T: type) T {
+            if (comptime @sizeOf(T) > @sizeOf(@TypeOf(self.vars_bytes))) return .{};
+            if (self.vars_len != @sizeOf(T)) return .{};
+            var out: T = undefined;
+            @memcpy(std.mem.asBytes(&out), self.vars_bytes[0..@sizeOf(T)]);
+            return out;
+        }
+
+        /// Write the tier. Called from BOTH the startup and reload paths so
+        /// the two cannot disagree, which is the same reason `resolveChain`
+        /// exists for the palette.
+        pub fn setVars(self: *Self, comptime T: type, value: T) void {
+            if (comptime @sizeOf(T) > @sizeOf(@TypeOf(self.vars_bytes))) return;
+            @memcpy(self.vars_bytes[0..@sizeOf(T)], std.mem.asBytes(&value));
+            self.vars_len = @sizeOf(T);
+        }
+
         pub fn roleFill(self: *const Self, name: []const u8) Fill {
             if (self.gradients.get(name)) |g| return g;
             return .{ .solid = roleColor(self.theme, name) };

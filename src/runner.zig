@@ -283,6 +283,7 @@ pub fn ThemeWatchOf(comptime App: type) type {
             const chain = resolveChain(App, gpa, io, self.floor, self.base_path, self.user_path);
             ui.theme = chain.theme;
             ui.gradients = chain.gradients;
+            ui.setVars(App, chain.app);
             // Kept, not applied: the watch has no canvas. The loop reads this
             // and swaps the face, so resolution still happens in exactly one
             // place (here) and attachment in exactly one place (the caller).
