@@ -804,7 +804,7 @@ pub const Theme = struct {
     /// a thing still works but wants attention: a warning toast's bar
     warning: Color = Color.rgbHex(0xf9e2af),
     /// a thing failed: the error band's text, an error toast's bar
-    @"error": Color = Color.rgbHex(0xf38ba8),
+    fail: Color = Color.rgbHex(0xf38ba8),
 };
 
 // ---------------------------------------------------------------------------
@@ -893,6 +893,47 @@ pub const ScrollChange = union(enum) {
 /// One viewport's offset, keyed by the element's `key`. Owned by the runtime
 /// so that no message ever carries a continuous value: a drag or a wheel tick
 /// changes this, and the next frame reads it.
+/// Name -> face index, closing the seam between `Ui.font` and the runtime's
+/// registry. The registry cannot be named here without a cycle, so it arrives
+/// as one function pointer over `opaque`.
+/// A theme role by NAME, which is how a style refers to a colour.
+///
+/// The name is already known to be a role -- `loadTheme` rejects a style that
+/// names anything else -- so the fallback here is unreachable for a loaded
+/// theme. It returns `text` rather than panicking because this is cold and a
+/// wrong-colour pixel beats a crash inside a paint.
+pub fn roleColor(pal: Theme, name: []const u8) Color {
+    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+        if (std.mem.eql(u8, name, f.name)) return @field(pal, f.name);
+    }
+    return pal.text;
+}
+
+/// A theme style as a VIEW sees it.
+///
+/// Structurally identical to `theme.StyleEntry` but declared here, because
+/// `theme.zig` imports `elmz.zig` and not the other way round -- a cycle would
+/// have to be broken with a lazy import for one field. The two are kept in step
+/// by a test that names both types, so a new style field cannot land in one and
+/// not the other.
+///
+/// Strings only: a style is a document, and a document holds names.
+pub const StyleEntry = struct {
+    name: []const u8,
+    spec: struct {
+        bg: ?[]const u8 = null,
+        fg: ?[]const u8 = null,
+        border: ?[]const u8 = null,
+        font: ?[]const u8 = null,
+        size: ?f32 = null,
+    } = .{},
+};
+
+pub const FaceLookup = struct {
+    ptr: *const anyopaque,
+    resolve: *const fn (ptr: *const anyopaque, name: []const u8) ?u16,
+};
+
 pub const ScrollSlot = struct { key: u64 = 0, offset: f32 = 0, offset_x: f32 = 0 };
 
 /// Scrollbar geometry, in logical units. The thumb has a floor or it becomes
@@ -1736,6 +1777,13 @@ pub fn Element(comptime M: type) type {
                 .bg = self.bg,
                 .fg = self.fg,
                 .border = self.border,
+                // `face` belongs here or the round trip drops it: `finish` reads
+                // the face back off `style()` to copy it into the text geometry,
+                // so a `style()` that omits the field makes that copy a no-op.
+                // The element carried the right face; this projection dropped it,
+                // and every styled label painted in the primary face -- tofu for
+                // any script the primary does not cover.
+                .face = self.face,
                 .radius = self.radius,
                 .pad = self.pad,
                 .halo = self.halo,
@@ -2839,6 +2887,19 @@ pub fn Ui(comptime M: type) type {
         /// share one typeface. Reset per element, not per frame, so a styled
         /// label cannot leak its font into the next element drawn.
         cur_face: u16 = 0,
+        /// Turns a font NAME into the face index paint wants, or null when the
+        /// name cannot be produced. Set by the runtime each frame from its
+        /// registry; a `view` never sees the index, and a headless test that
+        /// registers no fonts gets null and the primary face.
+        ///
+        /// A function rather than a slice of names because resolution LOADS the
+        /// file on first sight, and that needs the allocator and io the runtime
+        /// owns. `Ui` deliberately holds neither.
+        face_lookup: ?*const FaceLookup = null,
+        /// The theme files' named styles, for `style`. Points into the chain,
+        /// which outlives the frame; null when the app loaded no theme.
+        styles: ?[]const StyleEntry = null,
+
         /// which failure `failed` refers to; only meaningful when failed
         fail_kind: FailKind = .layout_allocation,
         /// Detail for the band, formatted in place. A fixed buffer rather
@@ -2855,6 +2916,42 @@ pub fn Ui(comptime M: type) type {
         ext_len: usize = 0,
         /// stands in for any node that could not be allocated
         dead: Elem,
+
+        /// Resolves a font name to the index `Style.face` wants.
+        ///
+        /// This is the ONLY surface a view has for choosing a typeface, and the
+        /// index it returns is an opaque handle -- correct to pass to `face`,
+        /// meaningless to read. A name that cannot be resolved yields null,
+        /// which is the primary face: a missing font must never silently become
+        /// a different font, and it must never fail the frame either.
+        pub fn font(self: *const Self, name: []const u8) ?u16 {
+            const l = self.face_lookup orelse return null;
+            return l.resolve(l.ptr, name);
+        }
+
+        /// Resolve a named style from the theme files into the values an
+        /// element wants, or null when the theme names no such style.
+        ///
+        /// A name, for the same reason `font` takes one: which style exists is
+        /// the theme author's decision, and a view that hardcoded colours would
+        /// be unaffected by an edit to `theme.zon`. An unknown name is not an
+        /// error -- the caller keeps its own default, which is what lets an app
+        /// ship with no theme file at all.
+        pub fn styleByName(self: *const Self, name: []const u8) ?Style {
+            const styles = self.styles orelse return null;
+            for (styles) |entry| {
+                if (!std.mem.eql(u8, entry.name, name)) continue;
+                var out: Style = .{};
+                // A role reference is resolved against THIS frame's palette,
+                // so editing `.colors` moves every style that names it.
+                if (entry.spec.bg) |r| out.bg = .{ .solid = roleColor(self.theme, r) };
+                if (entry.spec.fg) |r| out.fg = .{ .solid = roleColor(self.theme, r) };
+                if (entry.spec.border) |r| out.border = .{ .solid = roleColor(self.theme, r) };
+                if (entry.spec.font) |f| out.face = self.font(f);
+                return out;
+            }
+            return null;
+        }
 
         /// Current offset for a keyed viewport, or 0 if it has never moved.
         ///
@@ -3026,6 +3123,15 @@ pub fn Ui(comptime M: type) type {
         pub const TextOpts = struct {
             label: []const u8,
             size: f32 = 14,
+            /// The typeface to draw this label in, BY NAME, resolved through
+            /// the runtime's registry. A name, not an index: the index is a
+            /// load-order artefact and would silently mean a different
+            /// typeface the moment an app registers one more font.
+            ///
+            /// Unresolvable is not an error -- the label draws in the primary
+            /// face, the same rule the theme follows. A missing font must never
+            /// fail the frame, and must never become a different font quietly.
+            font: ?[]const u8 = null,
             tone: Tone = .normal,
             wrap: bool = false,
             on_press: ?M = null,
@@ -3210,6 +3316,9 @@ pub fn Ui(comptime M: type) type {
         /// paint default, so the common case writes one fewer field.
         pub fn text(self: *Self, o: TextOpts) *Elem {
             const e = self.mk(.{ .text = .{ .bytes = o.label, .size = o.size } });
+            // The ONLY place a name becomes a face. `font` returns an opaque
+            // handle; nothing downstream can forge one.
+            if (o.font) |n| e.face = self.font(n) orelse 0;
             e.wrap = o.wrap;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
@@ -3358,7 +3467,7 @@ pub fn Ui(comptime M: type) type {
                 .info => self.theme.accent,
                 .success => self.theme.success,
                 .warning => self.theme.warning,
-                .@"error" => self.theme.@"error",
+                .@"error" => self.theme.fail,
             };
         }
 
@@ -4477,6 +4586,13 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
 
         gpa: Allocator,
         state: S,
+        /// Name -> face index, supplied by whoever owns the font registry.
+        ///
+        /// Injected rather than owned, because the registry lives in the runner
+        /// and importing it here would be a cycle -- and because `Ui` must stay
+        /// free of allocation so a headless test can build a tree with no io at
+        /// all. Null means no fonts: every `font` call yields the primary face.
+        face_lookup: ?*const FaceLookup = null,
         updateFn: *const fn (*S, M) Action(M),
         viewFn: *const fn (*S, *UiT) *Elem,
         ui: UiT,
@@ -4788,6 +4904,10 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             self.ui.since_input = self.since_input;
             self.ui.hover_since = self.hover_since;
             self.ui.scrolls = self.scroll_slots[0..self.scroll_n];
+            // Mirrored every frame beside the scroll offsets, for the same
+            // reason: `view` must not have to remember how it was configured,
+            // and a runtime torn down and rebuilt cannot leave a stale handle.
+            self.ui.face_lookup = self.face_lookup;
 
             const root = self.viewFn(&self.state, &self.ui);
             // The root's path is a constant, so the window itself is the first
@@ -7738,7 +7858,7 @@ test "a toast carries the severity and ttl the runtime expires it by, and a clic
     const th = Theme{};
     try std.testing.expectEqual(@as(usize, 1), countSolidPrims(f.prims, th.success));
     try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, th.warning));
-    try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, th.@"error"));
+    try std.testing.expectEqual(@as(usize, 0), countSolidPrims(f.prims, th.fail));
     // `info` is the accent, so a toast that ignores its severity entirely --
     // the other way to get this wrong -- is caught by the success count above
     // only while the default stays `info`.

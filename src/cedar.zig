@@ -65,6 +65,7 @@ pub const Font = struct {
     /// re-open from the same bytes at the same index rather than silently
     /// dropping to face 0.
     index: u32 = 0,
+    dbg: bool = true,
 
     cache: cedar.Cache = undefined,
     cache_ok: bool = false,
@@ -371,6 +372,35 @@ pub const Font = struct {
         len: usize = 0,
     };
 
+    /// True when the run is Arabic script and needs joining forms.
+    ///
+    /// The Arabic and Arabic Supplement blocks plus the presentation forms.
+    /// A run is treated as Arabic if ANY character falls in them, because a
+    /// mixed digit/letter run in Arabic text still joins; the digits simply
+    /// carry no joining behaviour of their own.
+    fn isArabic(cps: []const u21) bool {
+        for (cps) |cp| {
+            switch (cp) {
+                0x0600...0x06FF, // Arabic
+                0x0750...0x077F, // Arabic Supplement
+                0x08A0...0x08FF, // Arabic Extended-A
+                0xFB50...0xFDFF, // Arabic Presentation Forms-A
+                0xFE70...0xFEFF, // Arabic Presentation Forms-B
+                => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Advance for one glyph id, in font units. The fallback when the generic
+    /// shaper declines a run, so a glyph still moves the pen.
+    fn advanceOfGid(face: *const cedar.Font, gid: u16) i32 {
+        if (face.hMetricsResolved(gid)) |m| return @as(i32, m.advance) else |_| {}
+        if (face.hMetrics(gid)) |m| return @as(i32, m.advance) else |_| {}
+        return 0;
+    }
+
     /// Lay out from `at`, stopping at a newline, the end of the text, or the
     /// window. Returns the byte to resume from.
     ///
@@ -388,7 +418,52 @@ pub const Font = struct {
             n += 1;
         }
         run.len = 0;
-        if (n == 0 or !self.ok) return i;
+        // Arabic runs take a DIFFERENT shaper. The generic `shape` applies
+        // ccmp/locl/rlig/liga/clig/calt and nothing else -- it has no notion of
+        // joining forms, so every letter comes back in its isolated shape and
+        // the run reads as loose letters rather than connected script.
+        // `shapeArabic` is where init/medi/fina/isol live.
+        //
+        // It is a separate entry point rather than a flag because the two do
+        // genuinely different work, and picking between them is a property of
+        // the TEXT, not of the font.
+        if (isArabic(cps[0..n])) {
+            run.len = self.face.shapeArabic(cps[0..n], run.gids[0..n], null) catch blk: {
+                for (cps[0..n], 0..) |cp, k| run.gids[k] = self.glyphFor(cp).gid;
+                break :blk n;
+            };
+            // Advances come from the generic path: `shapeArabic` answers with
+            // glyph ids only, and the hmtx walk it would need is private to
+            // Cedar. Shaping the same run twice costs a second layout but that
+            // layout is already paid for `measure`, and a wrong advance would
+            // misplace every glyph after the first.
+            // A SCRATCH buffer, not `run.gids`: `shape` WRITES glyph ids into
+            // its `out` slice before it does anything else, so passing the run's
+            // own gids here would overwrite the joined forms `shapeArabic` just
+            // produced with the generic unjoined ones -- and the run would draw
+            // as isolated letters with every advance correct. The advances are
+            // all this call is for.
+            var scratch: [run_max]u16 = undefined;
+            var adv: [run_max]i32 = undefined;
+            const m = self.face.shape(cps[0..n], scratch[0..n], null, .{
+                .advances = adv[0..n],
+                .substitute = false,
+                .kern_cache = self.kern,
+            }) catch null;
+            if (m != null) {
+                @memcpy(run.advs[0..n], adv[0..n]);
+            } else {
+                for (run.gids[0..n], 0..) |g, k| run.advs[k] = advanceOfGid(&self.face, g);
+            }
+            // Cedar returns LOGICAL order on purpose -- "the caller reverses
+            // for display, because reversing is a property of the writing
+            // direction and not of the shaping". This is that reversal. Both
+            // arrays move together: reversing gids alone would pair every
+            // glyph with the advance of a different one.
+            std.mem.reverse(u16, run.gids[0..run.len]);
+            std.mem.reverse(i32, run.advs[0..run.len]);
+            return i;
+        }
         run.len = self.face.shape(cps[0..n], run.gids[0..n], null, .{
             .advances = run.advs[0..n],
             .substitute = true,

@@ -152,6 +152,35 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&fonts_install.step);
     b.step("fonts", "build the headless font demo").dependOn(&fonts_install.step);
 
+    const languages = b.addExecutable(.{
+        .name = "languages",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/languages.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+            },
+        }),
+    });
+    b.getInstallStep().dependOn(&b.addInstallArtifact(languages, .{}).step);
+    b.step("languages", "build the six-language demo").dependOn(&languages.step);
+
+    const arsh = b.addExecutable(.{
+        .name = "arsh",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("arsh_tmp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "inkwell", .module = b.dependency("inkwell", .{ .target = target, .optimize = optimize }).module("inkwell") },
+            },
+        }),
+    });
+    b.step("arsh", "scratch").dependOn(&b.addInstallArtifact(arsh, .{}).step);
+
     const gallery = b.addExecutable(.{
         .name = "gallery",
         .root_module = b.createModule(.{
@@ -371,6 +400,10 @@ pub fn build(b: *std.Build) void {
 
     b.step("run-fonts", "render the font demo headlessly (writes fonts*.png)").dependOn(
         &runExample(b, fonts).step,
+    );
+
+    b.step("run-languages", "render the six-language demo (writes languages.png)").dependOn(
+        &runExample(b, languages).step,
     );
 
     const run = runExample(b, exe);

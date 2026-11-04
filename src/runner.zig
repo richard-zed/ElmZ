@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const elmz = @import("elmz");
+const theme_mod = elmz.theme;
 const software = @import("software");
 
 /// Whether the overlay is compiled in by default. Debug builds get it, release
@@ -112,6 +113,14 @@ pub const Options = struct {
     /// search to a fixture tree), or to `""` for "no user fonts" -- a headless
     /// run must not start depending on whatever the machine has installed.
     home: ?[]const u8 = null,
+    /// Serves `Ui.font(name)`. Built from this runner's own font registry, so
+    /// an app that writes `.font = "Noto Sans Thai"` gets the face without a
+    /// second configuration surface and without ever naming an index.
+    ///
+    /// Null when no allocator or io was supplied: resolution LOADS the file,
+    /// and a headless run with no io has nothing to load from. Every `font`
+    /// call then yields the primary face.
+    face_lookup: ?*const elmz.FaceLookup = null,
     /// Stop after this many events. null = run until the window says quit.
     max_events: ?u32 = null,
     /// Block this long in poll() before looping again. -1 = block forever.
@@ -197,6 +206,17 @@ pub fn ThemeWatchOf(comptime App: type) type {
         user_seen: bool = false,
         font_buf: [elmz.font_name_max]u8 = undefined,
         font_len: usize = 0,
+        /// Named styles from the files, OWNED: they hold strings and cannot
+        /// ride in a fixed buffer the way the font name does. Free with
+        /// `deinit`. Empty is the common case and means the files named none.
+        ///
+        /// Carried by the chain because a style is part of the palette's
+        /// meaning, not app data: a view asks for `style("body")` and gets
+        /// whatever the theme said that means, on every reload.
+        styles: []elmz.StyleEntry = &.{},
+        /// The loader's own table, which owns the strings `styles` points at.
+        /// Kept beside it rather than duplicated: `styles` is a VIEW of this.
+        owned_styles: theme_mod.StylesSpec = &.{},
 
         pub const Stamp = struct { mtime: i128 = 0, size: u64 = 0 };
 
@@ -297,6 +317,13 @@ pub fn ChainOf(comptime App: type) type {
         /// one, which is not a fault -- it means keep whatever is attached.
         font_buf: [elmz.font_name_max]u8 = undefined,
         font_len: usize = 0,
+        /// Named styles, as a view sees them. A VIEW of `owned_styles`, which
+        /// holds the strings these point at.
+        styles: []elmz.StyleEntry = &.{},
+        /// The loader's own table: owns every string `styles` points at.
+        owned_styles: theme_mod.StylesSpec = &.{},
+        /// Backing store for `styles`, which is `view_buf.items`.
+        view_buf: std.ArrayListUnmanaged(elmz.StyleEntry) = .empty,
         /// A `theme.defaults.zon` supplied the base rather than the compiled floor.
         base_from_file: bool = false,
         /// The defaults file was there and would not load; `diag` says why.
@@ -306,6 +333,12 @@ pub fn ChainOf(comptime App: type) type {
         /// The override was there and would not load; `diag` says why.
         user_rejected: bool = false,
         diag: elmz.ThemeDiag = .{},
+
+        /// Releases the owned style table. Safe to call twice.
+        pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+            theme_mod.freeStyles(gpa, &self.owned_styles);
+            self.view_buf.deinit(gpa);
+        }
 
         /// The typeface the chain names, or null when no file names one.
         pub fn fontName(self: *const @This()) ?[]const u8 {
@@ -358,6 +391,13 @@ pub fn resolveChain(
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
                 out.app = loaded.vars;
+                // Replaced, not merged: the files layer as documents, and a
+                // half-inherited style table would mean a style's `.fg` came
+                // from one file and its `.font` from another. Take the newer
+                // document whole, exactly as `.theme` does.
+                if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
+                out.owned_styles = loaded.styles;
+                out.styles = theme_mod.styleView(loaded.styles, &out.view_buf, gpa) catch &.{};
                 if (loaded.fontName()) |f| {
                     @memcpy(out.font_buf[0..f.len], f);
                     out.font_len = f.len;
@@ -382,6 +422,9 @@ pub fn resolveChain(
                 out.theme = loaded.theme;
                 out.gradients = loaded.gradients;
                 out.app = loaded.vars;
+                if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
+                out.owned_styles = loaded.styles;
+                out.styles = theme_mod.styleView(loaded.styles, &out.view_buf, gpa) catch &.{};
                 // The end user's name wins outright, and an override that omits
                 // `.font` inherits the developer's -- the same rule the colours
                 // follow, so one file cannot mean two things.
@@ -508,6 +551,15 @@ pub const FontSlot = struct {
 /// owner cannot be the theme file -- that buffer is freed the moment the parse
 /// finishes. They live as long as the registry, which lives as long as the
 /// window.
+/// Adapts `FontRegistry` to `elmz.FaceLookup`, which cannot name the registry
+/// without a cycle. Returns the index as `u16` because that is what
+/// `Style.face` holds; the registry caps at `max_faces`, well under 65535.
+fn registryResolve(ptr: *const anyopaque, name: []const u8) ?u16 {
+    const reg: *FontRegistry = @ptrCast(@alignCast(@constCast(ptr)));
+    const i = reg.indexOf(name) orelse return null;
+    return @intCast(i);
+}
+
 pub const FontRegistry = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -519,6 +571,10 @@ pub const FontRegistry = struct {
         /// dies with the parse, and this outlives it.
         name: []u8,
         bytes: []u8,
+        /// Which face INSIDE `bytes`. A `.ttc` holds several -- Noto Sans CJK
+        /// carries JP, KR and SC in one file -- so dropping this would resolve
+        /// "Simplified Chinese" to face 0, which is Japanese.
+        face_index: u32 = 0,
     };
 
     pub const max_faces = 8;
@@ -551,14 +607,18 @@ pub const FontRegistry = struct {
         }
         if (self.entries.items.len >= max_faces) return null;
 
-        const bytes = software.loadFontByNameHome(self.gpa, self.io, name, &.{}, self.home) catch return null;
+        const found = software.findFontByNameHome(self.gpa, self.io, name, &.{}, self.home) catch return null;
         const owned = self.gpa.dupe(u8, name) catch {
-            self.gpa.free(bytes);
+            self.gpa.free(found.bytes);
             return null;
         };
-        self.entries.append(self.gpa, .{ .name = owned, .bytes = bytes }) catch {
+        self.entries.append(self.gpa, .{
+            .name = owned,
+            .bytes = found.bytes,
+            .face_index = found.index,
+        }) catch {
             self.gpa.free(owned);
-            self.gpa.free(bytes);
+            self.gpa.free(found.bytes);
             return null;
         };
         return self.entries.items.len;
@@ -579,7 +639,8 @@ pub const FontRegistry = struct {
     /// once an index is occupied.
     pub fn attachAll(self: *FontRegistry, canvas: *software.Canvas) void {
         for (self.entries.items, 0..) |e, i| {
-            canvas.setFontIndex(i + 1, e.bytes, 0) catch |err| switch (err) {
+            // `e.face_index`, NOT 0: a collection's faces are not interchangeable.
+            canvas.setFontIndex(i + 1, e.bytes, e.face_index) catch |err| switch (err) {
                 error.FaceLimit, error.OutOfMemory => return,
             };
         }
@@ -734,6 +795,55 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
 /// another, differing only in whether the frame came back. Rasterising a frame
 /// is not any app's business, so it lives at the composition layer, which is
 /// the only place that can see both a Runtime and a Canvas.
+/// A registry the caller owns of exactly the size a headless run needs.
+///
+/// `run` builds one from `Options`; a headless caller has no event loop, so it
+/// builds this instead and attaches it. Same registry, same lookup, same
+/// resolution rules -- a PNG and a window cannot disagree about which face a
+/// name meant.
+pub const HeadlessFonts = struct {
+    reg: FontRegistry,
+    lookup: elmz.FaceLookup,
+
+    /// Built IN PLACE, never returned by value: `lookup.ptr` addresses `reg` by
+    /// location, and a returned struct is a temporary that the caller copies.
+    /// The copy would point at the dead original -- a dangling pointer that
+    /// fails as "the font is always missing", which looks like a bad name.
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8) *HeadlessFonts {
+        const self = gpa.create(HeadlessFonts) catch unreachable;
+        self.* = .{
+            .reg = FontRegistry.init(gpa, io, home),
+            .lookup = .{ .ptr = undefined, .resolve = registryResolve },
+        };
+        self.lookup.ptr = &self.reg;
+        return self;
+    }
+
+    pub fn deinit(self: *HeadlessFonts) void {
+        self.reg.gpa.destroy(self);
+        self.reg.deinit();
+    }
+
+    /// Wire the lookup AND register every loaded face with the canvas.
+    ///
+    /// Both halves, in one call, because they are useless apart and the split
+    /// version was silently wrong: `attach` alone gave the tree a way to NAME a
+    /// face and nothing that could DRAW it, so every styled label asked
+    /// `facePtrAt` for a slot that was never filled, got the default face back,
+    /// and rendered tofu for every script -- with no error anywhere. Loading a
+    /// font into the registry and registering it with the canvas are two steps,
+    /// and a caller that forgets the second sees boxes, not a failure.
+    ///
+    /// Call this AFTER the theme is loaded: the faces it registers are the ones
+    /// something has resolved, and a style's font is only known once the theme
+    /// that names it has been read.
+    pub fn attach(self: *HeadlessFonts, comptime S: type, comptime M: type, rt: *elmz.Runtime(S, M), canvas: *software.Canvas) void {
+        self.lookup.ptr = &self.reg;
+        rt.face_lookup = &self.lookup;
+        self.reg.attachAll(canvas);
+    }
+};
+
 pub fn paintInto(
     comptime S: type,
     comptime M: type,
@@ -869,6 +979,14 @@ pub fn run(
         font_slot.deinit(g);
         if (font_reg) |*r| r.deinit();
     };
+    // The lookup outlives nothing: it points at `font_reg`, which lives to the
+    // end of this function, and `rt` dies before that defer runs. Declared
+    // before the registry is used so the pointer is never dangling.
+    var lookup: elmz.FaceLookup = .{ .ptr = undefined, .resolve = registryResolve };
+    if (font_reg) |*r| {
+        lookup.ptr = r;
+        rt.face_lookup = &lookup;
+    }
     if (opts.io) |io_arg| {
         if (opts.gpa) |g| {
             base_owned = themePathBesideExe(g, io_arg, "theme.defaults.zon");

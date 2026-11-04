@@ -198,7 +198,27 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
 }
 
 /// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`.
-fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []const u8, font_home: ?[]const u8) ![]u8 {
+/// What a search found: the file's bytes and WHICH face inside it.
+///
+/// A `.ttc` holds a whole family of faces -- `NotoSansCJK-Regular.ttc` carries
+/// Japanese, Korean and Simplified/Traditional Chinese in ONE file. Returning
+/// bytes alone would hand back face 0 every time, so a request for Simplified
+/// Chinese would draw in the Japanese face: most glyphs identical, the ones a
+/// reader would actually notice different, and no error anywhere.
+pub const Found = struct {
+    bytes: []u8,
+    index: u32 = 0,
+};
+
+/// Count the faces in a file: 1 for a plain sfnt, N for a collection.
+pub fn faceCount(bytes: []const u8) u32 {
+    if (bytes.len < 12) return 1;
+    const tag = bytes[0..4];
+    if (!std.mem.eql(u8, tag, "ttcf")) return 1;
+    return std.mem.readInt(u32, bytes[8..12], .big);
+}
+
+fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []const u8, font_home: ?[]const u8) !Found {
     var paths: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
         for (paths.items) |p| gpa.free(p);
@@ -216,24 +236,43 @@ fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []cons
         }
     }.lt);
 
-    var best: ?[]u8 = null;
+    var best: ?Found = null;
     var best_rank: u8 = no_match;
     for (paths.items) |path| {
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
-        // No cache attached on purpose: `family` reads the name table and
-        // nothing else, so a search never pays for a glyph cache per candidate.
-        const face = Face.init(bytes);
-        const rank = faceRank(&face, name);
-        if (rank == no_match or rank >= best_rank) {
-            gpa.free(bytes);
-            continue;
+        // EVERY face in the file, not just the first: the whole point of a
+        // collection is that one name lives at index 3 and another at index 0.
+        const n = faceCount(bytes);
+        var found_here: ?Found = null;
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            const face = Face.initIndex(bytes, i);
+            const rank = faceRank(&face, name);
+            if (rank == no_match) continue;
+            // Keep the best rank; on a tie the LOWER index wins, so the result
+            // is deterministic rather than dependent on iteration order.
+            if (rank < best_rank) {
+                if (found_here) |f| gpa.free(f.bytes);
+                found_here = .{ .bytes = bytes, .index = i };
+                if (rank == 0) break;
+            }
         }
-        if (best) |b| gpa.free(b);
-        best = bytes;
-        best_rank = rank;
-        if (rank == 0) break;
+        if (found_here) |f| {
+            if (best) |b| gpa.free(b.bytes);
+            best = f;
+            best_rank = faceRankIndex(&f, name);
+            if (best_rank == 0) break;
+        } else {
+            gpa.free(bytes);
+        }
     }
     return best orelse error.FontNotFound;
+}
+
+/// Re-rank a found face, so the loop above can compare across files.
+fn faceRankIndex(f: *const Found, name: []const u8) u8 {
+    const face = Face.initIndex(f.bytes, f.index);
+    return faceRank(&face, name);
 }
 
 /// Resolve a FONT NAME to file bytes.
@@ -255,15 +294,36 @@ pub fn loadFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_di
 
     // Caller-provided directories win outright, the way PATH order works: an app
     // that ships a face gets it even when the system has the same family.
-    if (searchDirs(gpa, io, extra_dirs, name, font_home)) |bytes| {
-        return bytes;
+    if (searchDirs(gpa, io, extra_dirs, name, font_home)) |f| {
+        return f.bytes;
     } else |e| switch (e) {
         // The only failure a search can report: an unreadable file is skipped,
         // not fatal, because one broken font in a directory must not hide the
         // good ones next to it.
         error.FontNotFound => {},
     }
+    const f = try searchDirs(gpa, io, &font_dirs, name, font_home);
+    return f.bytes;
+}
+
+/// The same search, but reporting WHICH face inside the file matched.
+///
+/// This is the one a registry must use. The other form throws the index away,
+/// which is fine for a `.ttf` (exactly one face) and silently wrong for a
+/// `.ttc`: see `Found`.
+pub fn findFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8, font_home: ?[]const u8) !Found {
+    if (looksLikePath(name)) return .{ .bytes = try loadFont(gpa, io, name) };
+    if (searchDirs(gpa, io, extra_dirs, name, font_home)) |f| {
+        return f;
+    } else |e| switch (e) {
+        error.FontNotFound => {},
+    }
     return searchDirs(gpa, io, &font_dirs, name, font_home);
+}
+
+/// No-home form of `findFontByNameHome`.
+pub fn findFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8) !Found {
+    return findFontByNameHome(gpa, io, name, extra_dirs, null);
 }
 
 /// The search with no home directory, so `~` entries are skipped and only the
@@ -784,6 +844,7 @@ pub const Canvas = struct {
     /// of drawing: an element that sets it and then throws is exactly the case
     /// where a trailing reset would be skipped.
     cur_face: u16 = 0,
+    dbg_faces: bool = true,
 
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
     /// A 64-bit collision would hand back the width of a different string, and
@@ -955,7 +1016,16 @@ pub const Canvas = struct {
         // is always valid.
         while (self.extra_faces.items.len <= index) {
             const mem = try self.gpa.create(FontMem);
-            mem.* = .{};
+            // A fresh slot needs its storage explicitly formed: `FontMem` has
+            // no `{}` default (cedar.Kern is `undefined` until the face is
+            // attached), so `mem.* = .{}` does not compile. This path only
+            // runs for a SECOND face, which is why no test reached it.
+            mem.* = .{
+                .bytes = undefined,
+                .lookup = undefined,
+                .kern = undefined,
+                .kern_mem = undefined,
+            };
             self.extra_faces.append(self.gpa, .{ .mem = mem }) catch |e| {
                 self.gpa.destroy(mem);
                 return e;
@@ -1478,6 +1548,10 @@ pub const Canvas = struct {
     /// An absent face still falls back to the built-in bitmap, the same rule as
     /// the primary: invisible text is a worse answer than the wrong face.
     pub fn drawTextFace(self: *Self, face: *const Face, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+        const dbg = self.dbg_faces;
+        if (dbg and bytes.len > 0 and bytes[0] > 0x7F) {
+            std.debug.print("TF avail={} ok={} first=U+{X:0>4} size={d} x={d}\n", .{ face.available(), face.ok, bytes[0], size, x });
+        }
         if (!face.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
         face.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
     }

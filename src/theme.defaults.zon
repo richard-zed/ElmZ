@@ -53,7 +53,7 @@
             // still working, wants attention: a warning toast's bar
             .warning = 0xf9e2af,
             // a thing failed: the error band's text, an error toast's bar
-            .@"error" = 0xf38ba8,
+            .fail = 0xf38ba8,
         },
 
         // No gradient ships by default: a default gradient is a look, and the
@@ -63,5 +63,24 @@
         //     .accent = .{ .linear = .{ .dir = 135, .from = 0x89b4fa, .to = 0xf5c2e7 } },
         //     .panel = .{ .radial = .{ .inner = 0x45475a, .outer = 0x313244, .radius = 0.7 } },
         // },
+    },
+
+    // Named styles: a role reference per slot, resolved against THIS file's
+    // palette. A style names a ROLE, not a colour, so editing `.colors` moves
+    // every style that uses it and a style can never drift from the palette.
+    //
+    // The `font` below is a style's way of naming a typeface. Each script needs
+    // its own face: a Latin face has no Arabic, Thai or CJK glyphs, and the
+    // three CJK languages do NOT share one either -- they agree on most
+    // characters and disagree on exactly the ones a reader would notice.
+    .styles = .{
+        .{ .name = "latin", .spec = .{ .fg = "text", .font = "DejaVu Sans" } },
+        .{ .name = "arabic", .spec = .{ .fg = "text", .font = "Noto Sans Arabic" } },
+        .{ .name = "thai", .spec = .{ .fg = "text", .font = "Noto Sans Thai" } },
+        // The three CJK languages live in ONE collection file, so the name is
+        // the file and the language is chosen by index -- see `face_index`.
+        .{ .name = "chinese", .spec = .{ .fg = "text", .font = "Noto Sans CJK SC" } },
+        .{ .name = "japanese", .spec = .{ .fg = "text", .font = "Noto Sans CJK JP" } },
+        .{ .name = "korean", .spec = .{ .fg = "text", .font = "Noto Sans CJK KR" } },
     },
 }

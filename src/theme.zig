@@ -61,7 +61,7 @@ pub fn familyOf(name: []const u8) ?RoleFamily {
         // an outcome, so they are filed where they must stay distinct from it.
         .{ "success", RoleFamily.emphasis },
         .{ "warning", RoleFamily.emphasis },
-        .{ "error", RoleFamily.emphasis },
+        .{ "fail", RoleFamily.emphasis },
     };
     inline for (pairs) |pair| {
         if (std.mem.eql(u8, name, pair[0])) return pair[1];
@@ -238,7 +238,7 @@ pub const ColorsSpec = struct {
     accent: ?u32 = null,
     success: ?u32 = null,
     warning: ?u32 = null,
-    @"error": ?u32 = null,
+    fail: ?u32 = null,
 
     /// `base` supplies whatever the spec leaves null. The field names mirror
     /// `Theme`; a test proves they stay mirrored, and this inline loop is what
@@ -270,7 +270,7 @@ pub const GradientsSpec = struct {
     accent: ?GradientSpec = null,
     success: ?GradientSpec = null,
     warning: ?GradientSpec = null,
-    @"error": ?GradientSpec = null,
+    fail: ?GradientSpec = null,
 };
 
 /// The resolved gradients: a role with no gradient is null, which is how every
@@ -288,7 +288,7 @@ pub const Gradients = struct {
     accent: ?elmz.Fill = null,
     success: ?elmz.Fill = null,
     warning: ?elmz.Fill = null,
-    @"error": ?elmz.Fill = null,
+    fail: ?elmz.Fill = null,
 
     pub fn any(self: Gradients) bool {
         inline for (@typeInfo(Gradients).@"struct".fields) |f| {
@@ -553,7 +553,35 @@ pub fn loadTheme(
     return out;
 }
 
-/// Free the owned style table. Safe on the empty default.
+/// The view-side view of the style table, for `Ui.styleByName`.
+///
+/// The two entry types are NOT layout-compatible: the loader's `spec` is a
+/// named struct with defaults and the view's is anonymous. A pointer cast
+/// between them happens to work today and would break silently the moment
+/// either gained a field, so this converts explicitly instead.
+///
+/// Nothing is copied -- the strings stay owned by the loader's table, which
+/// outlives the frame. The returned slice points INTO `out`, so `out` must
+/// live at least as long as the view is used.
+pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntry), gpa: Allocator) ![]elmz.StyleEntry {
+    out.clearRetainingCapacity();
+    try out.ensureTotalCapacity(gpa, styles.len);
+    for (styles) |e| {
+        out.appendAssumeCapacity(.{
+            .name = e.name,
+            .spec = .{
+                .bg = e.spec.bg,
+                .fg = e.spec.fg,
+                .border = e.spec.border,
+                .font = e.spec.font,
+                .size = e.spec.size,
+            },
+        });
+    }
+    return out.items;
+}
+
+/// Free the owned style table. Safe on the empty default./// Free the owned style table. Safe on the empty default.
 pub fn freeStyles(gpa: std.mem.Allocator, styles: *StylesSpec) void {
     for (styles.*) |entry| {
         inline for (.{ "bg", "fg", "border", "font" }) |slot| {
