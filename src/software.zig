@@ -321,11 +321,6 @@ pub fn findFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_di
     return searchDirs(gpa, io, &font_dirs, name, font_home);
 }
 
-/// No-home form of `findFontByNameHome`.
-pub fn findFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8) !Found {
-    return findFontByNameHome(gpa, io, name, extra_dirs, null);
-}
-
 /// The search with no home directory, so `~` entries are skipped and only the
 /// system fonts are reachable. Kept because most callers are tests and tools
 /// that have no process `Init`; `loadFontByNameHome` is the one the runner

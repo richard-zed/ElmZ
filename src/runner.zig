@@ -3907,27 +3907,3 @@ test "a press on an option chooses it, rather than dismissing the list" {
     try std.testing.expectEqual(@as(u32, 1), rt.state.toggles);
     try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
 }
-
-/// Resolve the theme chain from the two files that ship beside the binary.
-///
-/// This exists so an example cannot FORGET `theme.zon`. Building the two paths
-/// by hand is three lines of boilerplate plus an allocator dance, and the
-/// failure when it is skipped is silent: the app loads the bundled defaults,
-/// looks correct, and ignores every edit the user makes to their own file.
-/// A forgotten call is indistinguishable from a working one without pixel
-/// comparison, which is why it has to be one call.
-///
-/// An ABSENT file is not an error -- `resolveChain` sees `FileNotFound` and
-/// moves on -- so this is safe in a directory that only ever ships defaults.
-pub fn resolveChainHere(
-    comptime App: type,
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    floor: elmz.Theme,
-) ChainOf(App) {
-    const base = themePathBesideExe(gpa, io, "theme.defaults.zon");
-    defer if (base) |b| gpa.free(b);
-    const user = themePathBesideExe(gpa, io, "theme.zon");
-    defer if (user) |u| gpa.free(u);
-    return resolveChain(App, gpa, io, floor, base, user);
-}

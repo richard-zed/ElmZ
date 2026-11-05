@@ -139,7 +139,7 @@ fn checkPalette(t: Theme) !void {
 //
 // Keeping `.colors` as hex is not laziness: ZON will not coerce a bare integer
 // into a union payload (verified by compiling), so a single unified field would
-// force `.{ .solid = 0x1e1e2e }` on all ten roles, in every file, forever.
+// force `.{ .solid = 0x1e1e2e }` on all thirteen roles, in every file, forever.
 
 /// The shipped listing is the library default. Embedded rather than shipped
 /// beside the binary so a missing file cannot quietly become "no theme".
@@ -251,7 +251,7 @@ pub const ColorsSpec = struct {
     /// anywhere a role name is: `.bg = "sidebar"`, a halo's `.color`, a
     /// gradient key.
     ///
-    /// This is why the tier exists: the ten built-ins describe a UI, not an
+    /// This is why the tier exists: the thirteen built-ins describe a UI, not an
     /// APP. A chart's series colours, a diff's added/removed, a tag's hue per
     /// tag -- none of those are `accent`, and squeezing them into `accent` is
     /// how a palette stops meaning anything.
@@ -699,7 +699,7 @@ fn diagFrom(diag: *ThemeDiag, name: []const u8, d: *std.zon.parse.Diagnostics, f
 /// Walker output -> the struct `loadTheme` reads.
 ///
 /// The file may write any name it likes, so each entry is checked against the
-/// built-in roles: a match RETUNES that role, anything else becomes a custom.
+/// built-in roles: a match RETURNS that role, anything else becomes a custom.
 /// Names are duped because `OpenTables` is freed before the caller sees this.
 /// `GradientLit` ends are colour LITERALS; the spec wants plain hex. A colour
 /// written as an array has to pick one channel width, so anything but hex is
@@ -856,10 +856,12 @@ pub fn loadTheme(
     // writes several -- `0xRRGGBB`, `.{ r, g, b }`, `.{ 0.1, 0.2, 0.3 }` --
     // under names the file itself invents. The token stream carries the shape,
     // so the shape decides how a value is read.
-    var tables = readOpenTables(gpa, src, diag) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Parse,
-    };
+    // The walker already distinguishes a malformed file from a bad palette
+    // from a bad style, and `ThemeLoadError` can carry all three. Collapsing
+    // every failure to `error.Parse` made the internal error more precise than
+    // the one callers see, so a caller had to grep the diagnostic to tell them
+    // apart. `Parse` is reserved for the typed `std.zon.parse` below.
+    var tables = try readOpenTables(gpa, src, diag);
     defer freeOpenTables(gpa, &tables);
 
     // `.vars` is still typed: `App` is a struct the APP declares, so it is the
@@ -2063,15 +2065,6 @@ pub fn freeOpenTables(gpa: Allocator, t: *OpenTables) void {
     t.* = .{};
 }
 
-/// Is `name` one of the compiled-in roles, ignoring any the file added?
-fn isBuiltinRole(name: []const u8) bool {
-    inline for (@typeInfo(Theme).@"struct".fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "custom")) continue;
-        if (std.mem.eql(u8, name, f.name)) return true;
-    }
-    return false;
-}
-
 /// Is `ref` one of the palette's role names?
 fn isRole(ref: []const u8, extra: []const Theme.CustomColor) bool {
     inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
@@ -2647,11 +2640,10 @@ test "an unknown .halo key is an error, not a silent default" {
     ;
     const gpa = std.testing.allocator;
     var diag: ThemeDiag = .{};
-    // `loadTheme` collapses every walker failure to `error.Parse`, so the
-    // error KIND is not the signal -- the diagnostic is, and it is what the
-    // error band shows the user.
+    // The walker's own error now propagates, so a caller can tell a bad
+    // palette from a malformed file without grepping the diagnostic.
     try std.testing.expectError(
-        error.Parse,
+        error.Palette,
         loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag),
     );
     try std.testing.expect(std.mem.indexOf(u8, diag.text(), "blurr") != null);
