@@ -736,7 +736,16 @@ pub const StyleEntry = struct {
         /// A glow or shadow, with its colour named as a theme role so it follows `.colors`
         /// instead of freezing a hex.
         halo: ?HaloSpecEntry = null,
+        /// Blur of what is behind this element, from a theme style.
+        frost: ?FrostSpecEntry = null,
+        /// Draw this style as a 1px outline instead of a fill.
+        stroke: bool = false,
     } = .{},
+};
+
+/// Frost as a theme file writes it.
+pub const FrostSpecEntry = struct {
+    blur: f32 = 12,
 };
 
 /// The styles every Ui has before any theme file is read.
@@ -1212,6 +1221,8 @@ pub const Style = struct {
     /// Blur of what is behind this element. Nothing shows unless something is drawn under
     /// it, so it pairs with a translucent `bg`.
     frost: ?Frost = null,
+    /// Draw this element as a 1px outline instead of a fill.
+    stroke: bool = false,
     /// All four margins at once. A named side wins over this, and this wins over whatever
     /// the element already carried.
     margin: ?f32 = null,
@@ -1275,6 +1286,9 @@ pub fn Element(comptime M: type) type {
         /// Blur of what is already drawn behind this element, before the element's own
         /// fill.
         frost: ?Frost = null,
+        /// Draw this element's fill as a 1px outline instead of a solid. `border` is a
+        /// second pass; `stroke` replaces the fill.
+        stroke: bool = false,
         /// A halo drawn only while the pointer is over this element, merged over `halo`.
         hover_halo: ?Halo = null,
         /// 1px inset outline, drawn inside the rect so it costs no layout
@@ -1378,6 +1392,7 @@ pub fn Element(comptime M: type) type {
             self.pad = s.pad orelse 0;
             self.halo = s.halo;
             self.frost = s.frost;
+            self.stroke = s.stroke;
             if (s.margin) |m| {
                 self.margin_left = m;
                 self.margin_right = m;
@@ -1402,6 +1417,10 @@ pub fn Element(comptime M: type) type {
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
             if (s.frost) |v| self.frost = v;
+            // A plain bool carries no "unset" state, so a merge can only turn a
+            // stroke ON -- it can never clear one a widget set. Turning it off
+            // is `applyStyle`, which replaces rather than merges.
+            if (s.stroke) self.stroke = true;
             if (s.margin) |v| {
                 self.margin_left = v;
                 self.margin_right = v;
@@ -1937,11 +1956,17 @@ pub fn Element(comptime M: type) type {
             // Backdrop first: a frost reads what is behind it, so it has to run
             // while the destination is still the backdrop and not the element.
             if (self.frost) |fr| r.frost(rect, self.radius, fr.blur, clip);
+            // A themed `stroke` draws the fill as an outline rather than a solid,
+            // which is the one thing a theme could not ask for before: `border`
+            // is a second pass, `stroke` replaces the fill.
+            const stroke_now = self.stroke;
             if (self.radius > 0) {
-                if (fill_now) |c| r.roundedRect(rect, self.radius, c, false, clip);
+                if (fill_now) |c| r.roundedRect(rect, self.radius, c, stroke_now, clip);
                 if (border_now) |c| r.roundedRect(rect, self.radius, c, true, clip);
             } else {
-                if (fill_now) |c| r.quad(rect, c, clip);
+                if (fill_now) |c| {
+                    if (stroke_now) r.roundedRect(rect, 0, c, true, clip) else r.quad(rect, c, clip);
+                }
                 if (border_now) |b| {
                     // A gradient border cannot be four thin quads: each quad's
                     // box is 1px on its short axis, so the ramp would restart
@@ -2504,6 +2529,8 @@ pub fn Ui(comptime M: type) type {
                 if (entry.spec.font) |f| out.face = self.font(f);
                 out.size = entry.spec.size;
                 out.weight = entry.spec.weight;
+                if (entry.spec.frost) |f| out.frost = .{ .blur = f.blur };
+                out.stroke = entry.spec.stroke;
                 if (entry.spec.halo) |h| out.halo = .{
                     .color = roleColor(self.theme, h.color),
                     .blur = h.blur,
@@ -5267,8 +5294,17 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     const S = Style;
     var full: S = .{};
     inline for (@typeInfo(S).@"struct".fields) |f| {
-        const Child = @typeInfo(f.type).optional.child;
-        const v: f.type = switch (Child) {
+        // `bool` fields are not optional -- `stroke` is a plain flag, not a
+        // tri-state -- so the unwrap has to be conditional or the whole test
+        // fails to compile with "access of union field 'optional' while field
+        // 'bool' is active".
+        const is_opt = @typeInfo(f.type) == .optional;
+        const Child = if (is_opt) @typeInfo(f.type).optional.child else f.type;
+        const v: f.type = if (!is_opt) switch (Child) {
+            bool => true,
+            else => @compileError("non-optional Style field '" ++ f.name ++ "' of type " ++
+                @typeName(Child) ++ " needs a value here"),
+        } else switch (Child) {
             Color => .{ .r = 1, .g = 2, .b = 3, .a = 4 },
             Fill => .{ .solid = .{ .r = 5, .g = 6, .b = 7, .a = 8 } },
             f32 => 7,
@@ -5285,6 +5321,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     var a: Element(void) = .{ .geometry = .{ .rect = {} } };
     a.applyStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
+        const is_opt2 = @typeInfo(f.type) == .optional;
         // `margin` is a RESOLVER, not a stored field: applyStyle fans it out
         // into the four sides, and an Element has no `margin` to compare with.
         // Its effect is covered by asserting the sides below.
@@ -5294,7 +5331,9 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
         // on an Element to compare. Covered by the text tests instead.
         if (comptime std.mem.eql(u8, f.name, "size")) continue;
         if (comptime std.mem.eql(u8, f.name, "weight")) continue;
-        if (@typeInfo(f.type).optional.child == f32) {
+        if (!is_opt2) {
+            try std.testing.expectEqual(@field(full, f.name), @field(a, f.name));
+        } else if (@typeInfo(f.type).optional.child == f32) {
             // applyStyle defaults an absent radius/pad, so compare as optional
             try std.testing.expect(@field(a, f.name) == @field(full, f.name).?);
         } else {
@@ -5310,12 +5349,15 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     var m: Element(void) = .{ .geometry = .{ .rect = {} } };
     m.mergeStyle(full);
     inline for (@typeInfo(S).@"struct".fields) |f| {
+        const is_opt3 = @typeInfo(f.type) == .optional;
         // Same three non-stored fields as above: none of them lands on an
         // Element, so there is nothing here to compare.
         if (comptime std.mem.eql(u8, f.name, "margin")) continue;
         if (comptime std.mem.eql(u8, f.name, "size")) continue;
         if (comptime std.mem.eql(u8, f.name, "weight")) continue;
-        if (@typeInfo(f.type).optional.child == f32) {
+        if (!is_opt3) {
+            try std.testing.expectEqual(@field(full, f.name), @field(m, f.name));
+        } else if (@typeInfo(f.type).optional.child == f32) {
             try std.testing.expect(@field(m, f.name) == @field(full, f.name).?);
         } else {
             try std.testing.expect(std.meta.eql(@field(m, f.name), @field(full, f.name).?));

@@ -462,6 +462,13 @@ pub const StyleSpec = struct {
     size: ?f32 = null,
     weight: ?u16 = null,
     halo: ?HaloSpec = null,
+    frost: ?FrostSpec = null,
+    stroke: bool = false,
+};
+
+/// Blur of what is behind an element, in the theme file.
+pub const FrostSpec = struct {
+    blur: f32 = 12,
 };
 
 /// A glow or shadow in a theme file.
@@ -879,6 +886,8 @@ pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntr
                     .mode = h.mode,
                     .quality = h.quality,
                 } else null,
+                .frost = if (e.spec.frost) |f| .{ .blur = f.blur } else null,
+                .stroke = e.spec.stroke,
             },
         });
     }
@@ -1447,6 +1456,17 @@ const Walker = struct {
             if (std.mem.eql(u8, key, "size")) entry.size = n else entry.weight = @intFromFloat(n);
             return;
         }
+        if (std.mem.eql(u8, key, "frost")) {
+            entry.frost = (try self.readFrost()) orelse {
+                self.diag.set("style .frost must be a struct of frost fields", .{});
+                return error.Palette;
+            };
+            return;
+        }
+        if (std.mem.eql(u8, key, "stroke")) {
+            entry.stroke = self.readBool("style .stroke");
+            return;
+        }
         if (std.mem.eql(u8, key, "halo")) {
             // Dropped silently before this branch existed: the field is in
             // `StyleSpec`, `copyStyles`, `styleView` and `styleByName`, so a
@@ -1459,6 +1479,57 @@ const Walker = struct {
             return;
         }
         self.skipValue();
+    }
+
+    /// `.{ .blur = 12 }` -- a frost has one field.
+    fn readFrost(self: *Walker) ThemeLoadError!?FrostSpec {
+        if (self.tok() != .period or !self.nextIsBrace()) return null;
+        self.advance(); // .
+        self.advance(); // {
+        var out: FrostSpec = .{};
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() != .period) {
+                self.advance();
+                continue;
+            }
+            self.advance();
+            if (self.tok() != .identifier) {
+                self.skipValue();
+                continue;
+            }
+            const key = self.slice();
+            self.advance();
+            if (self.tok() != .equal) {
+                self.skipValue();
+                continue;
+            }
+            self.advance();
+            if (std.mem.eql(u8, key, "blur")) {
+                out.blur = try self.readNumber("frost .blur");
+            } else {
+                self.diag.set("frost names .{s}, which is not a frost field", .{key});
+                return error.Palette;
+            }
+        }
+        self.advance(); // }
+        return out;
+    }
+
+    /// A bare `true` or `false`.
+    fn readBool(self: *Walker, what: []const u8) bool {
+        if (self.tok() == .identifier) {
+            const v = self.slice();
+            if (std.mem.eql(u8, v, "true")) {
+                self.advance();
+                return true;
+            }
+            if (std.mem.eql(u8, v, "false")) {
+                self.advance();
+                return false;
+            }
+        }
+        self.diag.set("{s} must be true or false", .{what});
+        return false;
     }
 
     /// `.{ .color = .accent, .blur = 8, .mode = .outer_glow, .offset = .{ 2, 4 } }` Every
@@ -2459,4 +2530,58 @@ test "an unknown .halo key is an error, not a silent default" {
         loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag),
     );
     try std.testing.expect(std.mem.indexOf(u8, diag.text(), "blurr") != null);
+}
+
+test "a style's .frost and .stroke are read, not dropped" {
+    // Both existed at the primitive level long before this: frost had a tested
+    // SDF blur, stroke was one line in the rounded-rect fill. Neither was
+    // reachable from a .zon, so writing either did nothing and said nothing --
+    // the same silent-drop class as `.halo`.
+    const App = struct {};
+    const src =
+        \\.{
+        \\    .version = 3,
+        \\    .theme = .{
+        \\        .colors = .{ .bg = 0x1e1e2e },
+        \\        .styles = .{
+        \\            .glass = .{ .bg = .bg, .frost = .{ .blur = 9 }, .stroke = true },
+        \\            .plain = .{},
+        \\        },
+        \\    },
+        \\}
+    ;
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var loaded = try loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag);
+    defer freeLoaded(App, gpa, &loaded);
+
+    try std.testing.expectEqual(@as(usize, 2), loaded.styles.len);
+    const f = loaded.styles[0].spec.frost orelse return error.TestExpectedFrost;
+    try std.testing.expectEqual(@as(f32, 9), f.blur);
+    try std.testing.expect(loaded.styles[0].spec.stroke);
+    // A style that writes neither stays off: a default frost would blur
+    // everything and a default stroke would empty every fill.
+    try std.testing.expectEqual(@as(?FrostSpec, null), loaded.styles[1].spec.frost);
+    try std.testing.expect(!loaded.styles[1].spec.stroke);
+}
+
+test "an unknown .frost key is an error, not a silent default" {
+    // `.blurrr` would otherwise leave the frost at the default radius and say
+    // nothing, which is indistinguishable from the key having been ignored.
+    const App = struct {};
+    const src =
+        \\.{
+        \\    .version = 3,
+        \\    .theme = .{
+        \\        .styles = .{ .a = .{ .frost = .{ .blurrr = 8 } } },
+        \\    },
+        \\}
+    ;
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    try std.testing.expectError(
+        error.Palette,
+        loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "blurrr") != null);
 }

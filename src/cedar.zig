@@ -5,11 +5,11 @@ const std = @import("std");
 const elmz = @import("elmz");
 const gamma = @import("gamma.zig");
 const cedar = @import("inkwell");
-const linebreak = @import("linebreak.zig");
+const linebreak = cedar.linebreak;
 
 // Line breaking is pure Unicode logic with no font data in it, so it lives in
-// its own file and is tested as pure functions. Re-exported because callers of
-// this module reach for these names here.
+// Inkwell, beside the other tables. Re-exported because callers of this module
+// reach for these names here.
 pub const BreakClass = linebreak.BreakClass;
 /// The RESOLVED class (LB1 applied), which is what wrapping wants: a raw table lookup
 /// leaves AI/SA/XX unresolved and every rule keyed on AL then misses.
@@ -262,6 +262,8 @@ pub const Font = struct {
     /// A laid-out window of text: glyph ids and their advances, in font units, with pair
     /// kerning already applied. Kerning is Cedar's business.
     const run_max = 128;
+    /// Codepoints one `wrap` call can see. A paragraph, not a document.
+    pub const wrap_max_cps = 2048;
 
     const Run = struct {
         gids: [run_max]u16 = undefined,
@@ -438,6 +440,148 @@ pub const Font = struct {
             return w;
         }
         return w;
+    }
+
+    /// One laid-out line: the bytes it covers and where the next one starts.
+    pub const Line = struct {
+        /// Byte range in the source, excluding the separator.
+        start: usize,
+        end: usize,
+        /// Width in pixels at the size the wrap was given.
+        width: f32,
+    };
+
+    /// Break `bytes` into lines no wider than `max_width`, by UAX #14.
+    ///
+    /// Writes at most `out.len` lines and returns how many. Fewer lines than the
+    /// text needs means `out` was too small; the caller can tell by whether the
+    /// last line ended at `bytes.len`.
+    ///
+    /// A break is taken at the LAST legal opportunity that fits, not the first
+    /// one past the edge, because breaking at the first overflow strands
+    /// everything that would have fitted. When no legal opportunity exists in a
+    /// line's worth of text -- one long word -- the line is cut at the last byte
+    /// that fits, since the alternative is an infinitely wide line.
+    ///
+    /// Newlines are hard breaks and are consumed, not emitted.
+    pub fn wrap(self: *const Font, bytes: []const u8, size: f32, max_width: f32, out: []Line) usize {
+        if (!self.ok) {
+            if (bytes.len != 0 and out.len != 0) {
+                out[0] = .{ .start = 0, .end = bytes.len, .width = self.measure(bytes, size).width };
+                return 1;
+            }
+            return 0;
+        }
+
+        // Codepoints for the whole string up front: the break rules are a query
+        // over a run, and re-folding per candidate line would be quadratic.
+        var cps_buf: [wrap_max_cps]u21 = undefined;
+        var byte_at: [wrap_max_cps]usize = undefined; // byte offset of each codepoint
+        var n: usize = 0;
+        var bi: usize = 0;
+        while (bi < bytes.len and n < wrap_max_cps) {
+            byte_at[n] = bi;
+            // decode answers u32; every value it can produce fits u21, since
+            // it rejects overlong and out-of-range sequences.
+            cps_buf[n] = @intCast(decode(bytes, &bi));
+            n += 1;
+        }
+        byte_at[n] = bytes.len;
+        if (n == 0) return 0;
+
+        var breaker: linebreak.Breaker(wrap_max_cps) = .{};
+        var can: [wrap_max_cps]bool = undefined;
+        breaker.breakBefore(cps_buf[0..n], can[0..n]);
+
+        // Per-codepoint advance in pixels, so a prefix is a running sum.
+        var adv: [wrap_max_cps]f32 = undefined;
+        self.advancesPerCodepoint(bytes, cps_buf[0..n], size, adv[0..n]);
+
+        var lines: usize = 0;
+        var first: usize = 0; // first codepoint of the current line
+        var acc: f32 = 0;
+        var last_break: ?usize = null; // best break opportunity so far
+        var last_break_w: f32 = 0;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            // A newline ends the line wherever it falls.
+            if (cps_buf[i] == '\n') {
+                if (lines == out.len) return lines;
+                out[lines] = .{ .start = byte_at[first], .end = byte_at[i], .width = acc };
+                lines += 1;
+                first = i + 1;
+                acc = 0;
+                last_break = null;
+                continue;
+            }
+            // `can[i]` answers "may a line break before cps[i]", so cps[i] is
+            // the FIRST character of the next line. The width of the line that
+            // ends here therefore excludes adv[i].
+            if (i > first and can[i]) {
+                last_break = i;
+                last_break_w = acc;
+            }
+            acc += adv[i];
+            if (acc <= max_width or i == first) continue;
+
+            // Overflow. Take the last opportunity that fitted; with none, cut
+            // here and accept the overflow.
+            const cut = last_break orelse i;
+            if (lines == out.len) return lines;
+            // Measure the line's own bytes. The running sum cannot be trusted
+            // across a break -- it is reset at the cut and the cut character is
+            // rescanned -- and a width that disagrees with the bytes it claims
+            // is worse than the re-measure.
+            out[lines] = .{
+                .start = byte_at[first],
+                .end = byte_at[cut],
+                .width = self.measure(bytes[byte_at[first]..byte_at[cut]], size).width,
+            };
+            lines += 1;
+            first = cut;
+            // The break position starts the next line; rescan it from scratch,
+            // since its advance belongs to the line that begins there.
+            acc = 0;
+            last_break = null;
+            i = cut - 1;
+        }
+        if (first < n) {
+            if (lines == out.len) return lines;
+            // Measured rather than accumulated: `acc` can be off by a rescanned
+            // break character, and a wrong width is worse than a re-measure.
+            out[lines] = .{
+                .start = byte_at[first],
+                .end = bytes.len,
+                .width = self.measure(bytes[byte_at[first]..], size).width,
+            };
+            lines += 1;
+        }
+        return lines;
+    }
+
+    /// Per-codepoint advances in pixels, honouring shaping.
+    ///
+    /// A shaping run can collapse several codepoints into one glyph, so the
+    /// per-codepoint figure is the run's total spread evenly over the codepoints
+    /// it covers. That is exact for a run's sum, which is what a line width is.
+    fn advancesPerCodepoint(self: *const Font, bytes: []const u8, cps: []const u21, size: f32, out: []f32) void {
+        _ = cps;
+        const s = self.scaleFor(size);
+        var run: Run = .{};
+        var at: usize = 0;
+        var k: usize = 0;
+        while (at < bytes.len) {
+            const run_start = at;
+            at = self.layoutRun(bytes, run_start, &run);
+            const nc = cpsIn(bytes, run_start, at);
+            if (nc == 0) continue;
+            const each = advanceSum(run.advs[0..run.len], s) / @as(f32, @floatFromInt(nc));
+            var c: usize = 0;
+            while (c < nc and k < out.len) : (c += 1) {
+                out[k] = each;
+                k += 1;
+            }
+        }
     }
 
     /// The byte boundary nearest `x` — what a click at `x` puts the caret before.
@@ -834,4 +978,73 @@ test "axis tags pack the way the tables spell them" {
     // nothing answers to, silently.
     try testing.expectEqual(@as(u32, 0x77676874), Font.tagOf("wght"));
     try testing.expectEqual(@as(u32, 0x77647468), Font.tagOf("wdth"));
+}
+
+test "wrap breaks at legal opportunities and never exceeds the width" {
+    // Real advances, because the whole question is arithmetic over them: a
+    // fabricated advance table would let the scale factor drop out and still
+    // pass, which is how an overflow check becomes decorative.
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const f = Font.init(bytes);
+    if (!f.ok) return error.SkipZigTest;
+
+    const text = "the quick brown fox jumps over the lazy dog";
+    const size: f32 = 16;
+    const max: f32 = 90;
+
+    var lines: [64]Font.Line = undefined;
+    const n = f.wrap(text, size, max, &lines);
+    try testing.expect(n > 1); // it must actually wrap
+    try testing.expect(lines[n - 1].end == text.len); // nothing dropped
+
+    var at: usize = 0;
+    for (lines[0..n]) |ln| {
+        try testing.expect(ln.start == at); // contiguous, no gaps
+        try testing.expect(ln.end > ln.start); // no empty line
+        // The width reported is the width of the bytes it claims.
+        const w = f.measure(text[ln.start..ln.end], size).width;
+        try testing.expect(@abs(w - ln.width) < 0.5);
+        // No line may be wider than the box, except a single unbreakable word.
+        try testing.expect(w <= max + 0.5 or ln.end == text.len);
+        at = ln.end;
+    }
+    try testing.expect(at == text.len);
+}
+
+test "wrap prefers the last opportunity that fits, not the first past the edge" {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const f = Font.init(bytes);
+    if (!f.ok) return error.SkipZigTest;
+
+    const text = "aa bb cc dd ee ff gg";
+    var lines: [64]Font.Line = undefined;
+    const n = f.wrap(text, 16, 60, &lines);
+    try testing.expect(n > 1);
+
+    // Every break must fall at a space, never mid-word: the words here are
+    // short enough that a correct walk always finds one.
+    for (lines[0 .. n - 1]) |ln| {
+        try testing.expect(text[ln.end - 1] == ' ' or text[ln.end] == ' ');
+        try testing.expect(!(ln.end > 0 and text[ln.end - 1] != ' ' and text[ln.end] != ' '));
+    }
+    // And no line should be a lone fragment when a fuller one would fit.
+    for (lines[0..n]) |ln| {
+        try testing.expect(ln.width <= 60 + 0.5);
+    }
+}
+
+test "wrap honours a hard newline and drops the separator" {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const f = Font.init(bytes);
+    if (!f.ok) return error.SkipZigTest;
+
+    const text = "aa\nbb";
+    var lines: [8]Font.Line = undefined;
+    const n = f.wrap(text, 16, 1000, &lines);
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqualStrings("aa", text[lines[0].start..lines[0].end]);
+    try testing.expectEqualStrings("bb", text[lines[1].start..lines[1].end]);
 }
