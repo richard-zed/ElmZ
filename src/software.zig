@@ -755,6 +755,9 @@ const FontMem = struct {
 /// does when it appends one.
 const ExtraFace = struct {
     face: Face = .none,
+    /// This face at its default instance. `face` is derived from it -- see
+    /// `Canvas.font_base`.
+    face_base: Face = .none,
     mem: *FontMem,
     vary_index: u32 = 0,
 };
@@ -811,6 +814,13 @@ pub const Canvas = struct {
     /// other. `Font.none` means no glyph data: text measures at zero and draws
     /// nothing. The caller supplies the bytes -- the library ships no typeface.
     font: Face = .none,
+
+    /// The PRIMARY face at its default instance. `font` is DERIVED from this
+    /// and is never varied in place: rebuilding a variation from an already
+    /// varied face compounds the deltas, and leaving `font` varied after a
+    /// weight-0 call made the default instance unreachable for the rest of the
+    /// frame. Every re-vary starts here.
+    font_base: Face = .none,
 
     /// Scratch for the glyph cache of the PRIMARY face.
     font_mem: ?*FontMem = null,
@@ -998,6 +1008,9 @@ pub const Canvas = struct {
         var face = Face.initIndex(bytes, index);
         if (coords.len > 0) face = face.atCoords(coords);
         self.font = face;
+        // `coords.len == 0` is the default instance, which is the only thing
+        // a later `setFaceWeight` may build FROM.
+        self.font_base = if (coords.len == 0) face else Face.initIndex(bytes, index);
         if (self.font_mem) |m| {
             self.font.attachCache(&m.bytes);
             self.font.attachLookup(&m.lookup);
@@ -1043,6 +1056,7 @@ pub const Canvas = struct {
         face.attachLookup(&slot.mem.lookup);
         face.attachKern(&slot.mem.kern, &slot.mem.kern_mem);
         slot.face = face;
+        slot.face_base = face;
         slot.vary_index = face_index;
     }
 
@@ -2259,8 +2273,11 @@ pub const Canvas = struct {
             .rrect => |q| r.roundedRect(q.rect, q.radius, q.fill, q.stroke, q.clip),
             .text => |t| {
                 if (t.face == 0) {
+                    r.setWeight(t.weight);
                     r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
                 } else {
+                    r.setFace(t.face);
+                    r.setWeight(t.weight);
                     const f = self.facePtrAt(t.face);
                     self.drawTextFace(f, t.x * self.scale, t.y * self.scale, t.size * self.scale, t.fill, t.bytes, self.scaledRect(t.clip));
                 }
@@ -2738,12 +2755,17 @@ pub const Canvas = struct {
     /// The caches are keyed by FACE INDEX, not by instance, so a rebuild must
     /// invalidate them or the new weight lays out the old weight's widths.
     fn revaryFace(self: *Self, index: u16) void {
-        if (self.cur_weight == 0) return;
-        const slot = if (index == 0) &self.font else blk: {
+        // Rebuild from the PRISTINE face, never from the current one. Applying a
+        // variation to an already-varied face compounds the deltas, and the old
+        // `cur_weight == 0` early-return left `font` pinned at whatever weight
+        // the last text element asked for -- so a weight-0 call could not get the
+        // default instance back, and the next frame varied from the wrong base.
+        const base = if (index == 0) &self.font_base else blk: {
             if (index >= self.extra_faces.items.len) return;
-            break :blk &self.extra_faces.items[index].face;
+            break :blk &self.extra_faces.items[index].face_base;
         };
-        if (!slot.ok) return;
+        if (!base.ok) return;
+        const slot = base;
 
         // `atCoords` takes coords in AXIS ORDER, so a one-element array sets
         // axis 0 -- which is `wght` only by luck. Roboto Flex declares twelve
@@ -2762,7 +2784,9 @@ pub const Canvas = struct {
             const a = slot.axis(i) orelse continue;
             coords[i] = if (a.tag == wght_tag) @floatFromInt(self.cur_weight) else a.default;
         }
-        const varied = slot.atCoords(coords[0..n]);
+        // Weight 0 means "the face's own default", not "do nothing": the base is
+        // already that instance, so no `atCoords` call is needed.
+        const varied = if (self.cur_weight == 0) slot.* else slot.atCoords(coords[0..n]);
         // `atCoords` on a face with no `gvar` returns the default instance;
         // keeping it costs nothing and keeps the call site unconditional.
         self.clearMeasureCache();
@@ -4975,6 +4999,7 @@ test "two weights of a variable face differ through the seam" {
     const light_hash = std.hash.Wyhash.hash(0, c.px);
     const light_ink = countInk(c.px);
 
+    std.debug.print("PROBE light inst={x} heavy_will={x} ncoords={d}\n", .{ probe.atCoords(wghtCoords(probe, 300, &cb)).instanceKey(), probe.atCoords(wghtCoords(probe, 900, &cb)).instanceKey(), probe.atCoords(wghtCoords(probe, 900, &cb)).face.n_coords });
     @memset(c.px, 0);
     c.setFontAt(bytes, 0, wghtCoords(probe, 900, &cb));
     r.text(10, 10, 60, ink, "H", area);
@@ -4990,7 +5015,7 @@ test "two weights of a variable face differ through the seam" {
     // And the caches must not answer across instances: redrawing the light
     // instance has to reproduce the light pixels exactly.
     @memset(c.px, 0);
-    c.setFontAt(bytes, 0, &.{300});
+    c.setFontAt(bytes, 0, wghtCoords(probe, 300, &cb));
     r.text(10, 10, 60, ink, "H", area);
     try std.testing.expectEqual(light_hash, std.hash.Wyhash.hash(0, c.px));
 }
@@ -5097,4 +5122,40 @@ test "a style weight reaches the pixels, not just the struct" {
     // for, never to whatever is drawn next.
     r.setFace(0);
     try std.testing.expectEqual(@as(u16, 0), c.cur_weight);
+}
+
+test "the sticky face honours setFaceWeight, not just setFontAt" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/usr/share/fonts/roboto-flex/RobotoFlex[GRAD,XOPQ,XTRA,YOPQ,YTAS,YTDE,YTFI,YTLC,YTUC,opsz,slnt,wdth,wght].ttf",
+        std.testing.allocator,
+        .limited(32 * 1024 * 1024),
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(bytes);
+
+    var c = try Canvas.init(std.testing.allocator, 200, 100);
+    defer c.deinit();
+    const r = c.renderer();
+    const probe = @import("cedar.zig").Font.init(bytes);
+    if (probe.axisCount() == 0) return error.SkipZigTest;
+    if (Canvas.wghtAxis(probe) == null) return error.SkipZigTest;
+
+    c.setFontAt(bytes, 0, &.{});
+    const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+
+    r.setFace(0);
+    r.setWeight(100);
+    r.text(10, 10, 60, ink, "H", area);
+    const light_ink = countInk(c.px);
+
+    @memset(c.px, 0);
+    r.setFace(0);
+    r.setWeight(900);
+    r.text(10, 10, 60, ink, "H", area);
+    const heavy_ink = countInk(c.px);
+
+    try std.testing.expect(light_ink > 0);
+    try std.testing.expect(heavy_ink > light_ink);
 }

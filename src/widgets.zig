@@ -605,7 +605,7 @@ pub fn tabs(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         const label = ui.text(.{
             .label = t.label,
             .size = o.size,
-            .style = .{ .fg = elmz.solid(if (live) th.text else th.text_muted) },
+            .style = .{ .color = elmz.solid(if (live) th.text else th.text_muted) },
         });
         const b = ui.row(.{
             .children = &.{label},
@@ -696,7 +696,7 @@ pub fn list(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         const label = ui.text(.{
             .label = r.label,
             .size = o.size,
-            .style = .{ .fg = elmz.solid(if (live) th.text else th.text_muted) },
+            .style = .{ .color = elmz.solid(if (live) th.text else th.text_muted) },
         });
         const item = ui.row(.{
             .children = &.{label},

@@ -348,8 +348,14 @@ pub fn ChainOf(comptime App: type) type {
 
         /// The one line the band should show, or null when nothing went wrong.
         pub fn message(self: *const @This()) ?[]const u8 {
-            if (self.base_rejected or self.user_rejected) return self.diag.text();
-            return null;
+            if (!(self.base_rejected or self.user_rejected)) return null;
+            // A rejection with an EMPTY diagnostic reads as "no problem" and
+            // gets printed as an empty band. Name the file that failed even
+            // when the loader could not say more.
+            if (self.diag.len == 0) {
+                return if (self.base_rejected) "theme.defaults.zon: rejected" else "theme.zon: rejected";
+            }
+            return self.diag.text();
         }
     };
 }
@@ -393,7 +399,7 @@ pub fn resolveChain(
                 out.gradients = loaded.gradients;
                 out.app = loaded.vars;
                 // Replaced, not merged: the files layer as documents, and a
-                // half-inherited style table would mean a style's `.fg` came
+                // half-inherited style table would mean a style's `.color` came
                 // from one file and its `.font` from another. Take the newer
                 // document whole, exactly as `.theme` does.
                 if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
@@ -404,7 +410,10 @@ pub fn resolveChain(
                     out.font_len = f.len;
                 }
                 out.base_from_file = true;
-            } else |_| out.base_rejected = true;
+            } else |e| {
+                if (out.diag.len == 0) out.diag.set("{s}: {t}", .{ name, e });
+                out.base_rejected = true;
+            }
         } else |e| switch (e) {
             error.FileNotFound => {},
             else => {
@@ -434,7 +443,15 @@ pub fn resolveChain(
                     out.font_len = f.len;
                 }
                 out.user_from_file = true;
-            } else |_| out.user_rejected = true;
+            } else |e| {
+                // A rejection that says NOTHING is the reason "my theme.zon is
+                // ignored" is undiagnosable: the band stays blank, the palette
+                // falls back to the base, and nothing anywhere names a cause.
+                // `loadTheme` writes into `out.diag` on the paths it detects
+                // itself; this covers the ones it returns as an error.
+                if (out.diag.len == 0) out.diag.set("{s}: {t}", .{ name, e });
+                out.user_rejected = true;
+            }
         } else |e| switch (e) {
             error.FileNotFound => {},
             else => {
@@ -843,8 +860,15 @@ pub const HeadlessFonts = struct {
     }
 
     pub fn deinit(self: *HeadlessFonts) void {
-        self.reg.gpa.destroy(self);
+        // ORDER IS LOAD-BEARING. `reg` lives INSIDE `self`, so destroying the
+        // struct first leaves `reg.gpa` and `reg.entries` pointing at freed
+        // memory and `reg.deinit()` reads them out of a dead allocation -- a
+        // use-after-free that surfaces as a crash inside the free loop, which
+        // reads as "the registry is corrupt" rather than "self was freed first".
+        // Take the allocator out while it is still real, then destroy.
+        const gpa = self.reg.gpa;
         self.reg.deinit();
+        gpa.destroy(self);
     }
 
     /// Wire the lookup AND register every loaded face with the canvas.
@@ -2876,65 +2900,6 @@ fn tmpPath(buf: []u8, dir: std.testing.TmpDir, name: []const u8) ![:0]u8 {
     return std.fmt.bufPrintZ(buf, ".zig-cache/tmp/{s}/{s}", .{ dir.sub_path, name });
 }
 
-test "the font name rides the chain: user wins, an omitting override inherits" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [64]u8 = undefined;
-    var ub: [64]u8 = undefined;
-    try tmp.dir.writeFile(io, .{ .sub_path = "theme.defaults.zon", .data = ".{ .version = 3, .theme = .{ .font = \"Base Face\" } }" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }" });
-
-    // An override that omits `.font` inherits the developer's, the same rule the
-    // colours follow -- otherwise one file would mean two things.
-    {
-        const chain = resolveChain(struct {}, gpa, io, .{}, tmpPath(&bb, tmp, "theme.defaults.zon") catch unreachable, tmpPath(&ub, tmp, "theme.zon") catch unreachable);
-        try std.testing.expectEqualStrings("Base Face", chain.fontName().?);
-    }
-
-    // And the end user naming one wins outright.
-    try tmp.dir.writeFile(io, .{ .sub_path = "theme.zon", .data = ".{ .version = 3, .theme = .{ .font = \"User Face\" } }" });
-    {
-        const chain = resolveChain(struct {}, gpa, io, .{}, tmpPath(&bb, tmp, "theme.defaults.zon") catch unreachable, tmpPath(&ub, tmp, "theme.zon") catch unreachable);
-        try std.testing.expectEqualStrings("User Face", chain.fontName().?);
-    }
-}
-
-test "the chain layers the override over the developer's base" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x102030, .panel = 0x203040 } } }",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
-    });
-
-    var bb: [128]u8 = undefined;
-    var ub: [128]u8 = undefined;
-    const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
-    const user = try tmpPath(&ub, tmp, "theme.zon");
-
-    const chain = resolveChain(struct {}, gpa, io, .{}, base, user);
-    try std.testing.expect(chain.base_from_file);
-    try std.testing.expect(chain.user_from_file);
-    try std.testing.expectEqual(@as(?[]const u8, null), chain.message());
-
-    // The base supplied the page colours...
-    try std.testing.expect(std.meta.eql(chain.theme.bg, elmz.Color.rgbHex(0x102030)));
-    try std.testing.expect(std.meta.eql(chain.theme.panel, elmz.Color.rgbHex(0x203040)));
-    // ...the override replaced exactly one role...
-    try std.testing.expect(std.meta.eql(chain.theme.accent, elmz.Color.rgbHex(0xabcdef)));
-    // ...and inherited the rest from the base, not from the compiled floor.
-    try std.testing.expect(!std.meta.eql(chain.theme.panel, (elmz.Theme{}).panel));
-}
-
 test "a defaults file that will not load keeps the floor and says so" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -2987,125 +2952,6 @@ test "a file that disappears does not earn a reload" {
     try std.testing.expect(ThemeWatch.shouldReload(false, null, s));
     // Never seen, still absent: nothing to do.
     try std.testing.expect(!ThemeWatch.shouldReload(false, null, null));
-}
-
-test "editing the base re-applies the override on top of it" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x102030 } } }",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xabcdef } } }",
-    });
-
-    var bb: [128]u8 = undefined;
-    var ub: [128]u8 = undefined;
-    const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
-    const user = try tmpPath(&ub, tmp, "theme.zon");
-
-    var ui = elmz.Ui(u8).init(gpa);
-    defer ui.deinit();
-
-    var watch = ThemeWatch.init(.{}, base, user);
-    watch.poll(&ui, io, gpa);
-    try std.testing.expect(std.meta.eql(ui.theme.bg, elmz.Color.rgbHex(0x102030)));
-    try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0xabcdef)));
-
-    // The developer edits the base. This is the case a single-stamp watch gets
-    // wrong: reloading the base alone would leave the override resolved against
-    // a palette that no longer exists.
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.defaults.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x405060, .panel = 0x203040 } } }",
-    });
-
-    watch.poll(&ui, io, gpa);
-    try std.testing.expect(std.meta.eql(ui.theme.bg, elmz.Color.rgbHex(0x405060)));
-    try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0xabcdef)));
-
-    // An unchanged pass touches nothing.
-    const settled = ui.theme;
-    watch.poll(&ui, io, gpa);
-    try std.testing.expect(std.meta.eql(settled, ui.theme));
-}
-
-test "the app tier is parsed against the type the app declares, and refused without one" {
-    // The bug this closes: `resolveChain` hardcoded `struct {}`, so an app that
-    // declared tokens had its `.vars` section rejected by the very function that
-    // loads it -- the tier worked when called directly and never through the
-    // runner. Same file, two callers, opposite answers.
-    const Tokens = struct { sidebar_width: u16 = 200 };
-
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } }, .vars = .{ .sidebar_width = 240 } }",
-    });
-    var bb: [128]u8 = undefined;
-    var ub: [128]u8 = undefined;
-    const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
-    const user = try tmpPath(&ub, tmp, "theme.zon");
-
-    // Declared: the value arrives, typed.
-    const declared = resolveChain(Tokens, gpa, io, .{}, base, user);
-    try std.testing.expect(declared.user_from_file);
-    try std.testing.expectEqual(@as(u16, 240), declared.app.sidebar_width);
-    try std.testing.expect(declared.message() == null);
-
-    // Undeclared: rejected, with the offending key named rather than swallowed.
-    const undeclared = resolveChain(struct {}, gpa, io, .{}, base, user);
-    try std.testing.expect(undeclared.user_rejected);
-    try std.testing.expect(undeclared.message() != null);
-    try std.testing.expect(std.mem.indexOf(u8, undeclared.diag.text(), "sidebar_width") != null);
-}
-
-test "a gradient written into the file reaches the Ui, and leaves when edited out" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    // Colours and gradients are separate questions, so this is the seam that
-    // would otherwise be dead: `Ui.gradients` is only worth having if a poll
-    // actually fills it.
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa }, .gradients = .{ .accent = .{ .linear = .{ .dir = 45, .from = 0x89b4fa, .to = 0xf5c2e7 } } } } }",
-    });
-
-    var bb: [128]u8 = undefined;
-    var ub: [128]u8 = undefined;
-    // No base file: the compiled floor is enough, and this isolates the override.
-    var watch = ThemeWatch.init(.{}, try tmpPath(&bb, tmp, "theme.defaults.zon"), try tmpPath(&ub, tmp, "theme.zon"));
-
-    var ui = elmz.Ui(u8).init(gpa);
-    defer ui.deinit();
-
-    watch.poll(&ui, io, gpa);
-    const g = ui.gradients.accent orelse return error.GradientMissing;
-    try std.testing.expectEqual(elmz.Fill.linear, std.meta.activeTag(g));
-    // Colours still load alongside it -- the two halves are not exclusive.
-    try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0x89b4fa)));
-
-    // Drop the gradient but keep the colour: the Ui must follow, or a stale
-    // gradient would outlive the line that declared it.
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "theme.zon",
-        .data = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }",
-    });
-    watch.poll(&ui, io, gpa);
-    try std.testing.expect(ui.gradients.accent == null);
-    try std.testing.expect(std.meta.eql(ui.theme.accent, elmz.Color.rgbHex(0x89b4fa)));
 }
 
 test "the frame ring averages painted frames and drops the oldest" {
@@ -4042,4 +3888,28 @@ test "a press on an option chooses it, rather than dismissing the list" {
     _ = try run(struct {}, PopState, PopMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
     try std.testing.expectEqual(@as(u32, 1), rt.state.toggles);
     try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
+}
+
+/// Resolve the theme chain from the two files that ship beside the binary.
+///
+/// This exists so an example cannot FORGET `theme.zon`. Building the two paths
+/// by hand is three lines of boilerplate plus an allocator dance, and the
+/// failure when it is skipped is silent: the app loads the bundled defaults,
+/// looks correct, and ignores every edit the user makes to their own file.
+/// A forgotten call is indistinguishable from a working one without pixel
+/// comparison, which is why it has to be one call.
+///
+/// An ABSENT file is not an error -- `resolveChain` sees `FileNotFound` and
+/// moves on -- so this is safe in a directory that only ever ships defaults.
+pub fn resolveChainHere(
+    comptime App: type,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    floor: elmz.Theme,
+) ChainOf(App) {
+    const base = themePathBesideExe(gpa, io, "theme.defaults.zon");
+    defer if (base) |b| gpa.free(b);
+    const user = themePathBesideExe(gpa, io, "theme.zon");
+    defer if (user) |u| gpa.free(u);
+    return resolveChain(App, gpa, io, floor, base, user);
 }

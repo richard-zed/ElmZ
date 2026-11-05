@@ -570,10 +570,9 @@ fn longestWord(r: Renderer, bytes: []const u8, size: f32) f32 {
     return best;
 }
 
-
 /// A flat colour as a fill. Free function because `Fill.solid` is already a
 /// union member, so a method of the same name cannot exist. This is what keeps
-/// `.fg = elmz.solid(c)` readable without spelling the union tag at each site.
+/// `.color = elmz.solid(c)` readable without spelling the union tag at each site.
 pub fn solid(c: Color) Fill {
     return .{ .solid = c };
 }
@@ -947,6 +946,12 @@ pub const ScrollChange = union(enum) {
 /// theme. It returns `text` rather than panicking because this is cold and a
 /// wrong-colour pixel beats a crash inside a paint.
 pub fn roleColor(pal: Theme, name: []const u8) Color {
+    // Custom FIRST, and the order is load-bearing: a file that writes
+    // `.roles = .{ .{ .name = "bg", ... } }` is retuning a built-in, and with
+    // the built-ins checked first that entry could never win -- the file would
+    // look ignored rather than wrong. A duplicate NAME is a parse error, so
+    // there is no ambiguity to resolve here, only precedence to get right.
+    if (pal.customColor(name)) |c| return c;
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
         if (comptime !std.mem.eql(u8, f.name, "custom")) {
             if (std.mem.eql(u8, name, f.name)) return @field(pal, f.name);
@@ -955,7 +960,7 @@ pub fn roleColor(pal: Theme, name: []const u8) Color {
     // A name the file defined beats the `text` fallback. Without this a custom
     // role resolved to `text` -- a real colour, so nothing looked broken, the
     // label just drew in the wrong one.
-    return pal.customColor(name) orelse pal.text;
+    return pal.text;
 }
 
 /// A halo as a DOCUMENT sees it: the colour is a role name, everything else is
@@ -984,7 +989,7 @@ pub const StyleEntry = struct {
     name: []const u8,
     spec: struct {
         bg: ?[]const u8 = null,
-        fg: ?[]const u8 = null,
+        color: ?[]const u8 = null,
         border: ?[]const u8 = null,
         font: ?[]const u8 = null,
         /// Point size named by the theme. Applied by `styleByName`; a call
@@ -1001,6 +1006,37 @@ pub const StyleEntry = struct {
         /// emission path and one set of rules.
         halo: ?HaloSpecEntry = null,
     } = .{},
+};
+
+/// The styles every Ui has before any theme file is read.
+///
+/// These are the SAME entries `theme.defaults.zon` ships -- one style per
+/// script, a heading and a card -- compiled in so a Ui with no file beside it
+/// still has them. Without this the table was `null` until a file supplied
+/// one, so a bare `Ui` could not resolve `heading`, and every scripted row fell
+/// to the primary face: tofu for Arabic and CJK, with nothing reporting why.
+///
+/// The strings are comptime literals, so this costs no allocation and needs no
+/// deinit. A file REPLACES the whole table rather than merging into it, which
+/// keeps one owner at a time -- a merge would make it impossible to look at a
+/// name and say which file defined it.
+///
+/// A test pins this to `theme.defaults.zon`, so the two cannot drift.
+pub const default_styles: []const StyleEntry = &.{
+    .{ .name = "latin", .spec = .{ .color = "text", .font = "Roboto Flex" } },
+    .{ .name = "arabic", .spec = .{ .color = "text", .font = "Noto Sans Arabic" } },
+    .{ .name = "thai", .spec = .{ .color = "text", .font = "Noto Sans Thai" } },
+    .{ .name = "chinese", .spec = .{ .color = "text", .font = "Noto Sans CJK SC" } },
+    .{ .name = "japanese", .spec = .{ .color = "text", .font = "Noto Sans CJK JP" } },
+    .{ .name = "korean", .spec = .{ .color = "text", .font = "Noto Sans CJK KR" } },
+    // `latin` above carries no weight on purpose: omitted means "whatever the
+    // face says", so a replacement face is not forced to a weight nobody chose.
+    .{ .name = "heading", .spec = .{ .color = "text", .font = "Roboto Flex", .size = 34, .weight = 800 } },
+    .{ .name = "card", .spec = .{
+        .bg = "panel",
+        .border = "border",
+        .halo = .{ .color = "bg", .blur = 10, .offset = .{ 0, 6 }, .mode = .outer_glow },
+    } },
 };
 
 pub const FaceLookup = struct {
@@ -1593,7 +1629,7 @@ fn hitAppend(
 /// The three hot slots carry a `?Color` plus a `?Fill` gradient override rather
 /// than one optional, because a bare `Color` does not coerce into the tagged
 /// union and `.bg = .{ .solid = c }` at every call site was worse than the pair.
-/// `bgFill`/`fgFill`/`borderFill` resolve that pair, and they are the only place
+/// `bgFill`/`colorFill`/`borderFill` resolve that pair, and they are the only place
 /// the precedence lives.
 ///
 /// A `Style` is a VALUE: it can be returned from a function, named once and
@@ -1621,7 +1657,7 @@ pub const Style = struct {
     /// default instance.
     weight: ?u16 = null,
     bg: ?Fill = null,
-    fg: ?Fill = null,
+    color: ?Fill = null,
     border: ?Fill = null,
     /// `null` means the caller did not specify, which is what lets a widget
     /// merge a caller style over its own defaults and still let someone force
@@ -1648,8 +1684,8 @@ pub const Style = struct {
     pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
         return self.bg orelse fallback;
     }
-    pub fn fgFill(self: Style, fallback: ?Fill) ?Fill {
-        return self.fg orelse fallback;
+    pub fn colorFill(self: Style, fallback: ?Fill) ?Fill {
+        return self.color orelse fallback;
     }
     pub fn borderFill(self: Style, fallback: ?Fill) ?Fill {
         return self.border orelse fallback;
@@ -1704,7 +1740,7 @@ pub fn Element(comptime M: type) type {
         /// `Geometry`, so the geometry describes structure only — which is what lets a
         /// widget take its colours from the theme instead of needing a variant
         /// per look.
-        fg: ?Fill = null,
+        color: ?Fill = null,
         /// Which registered typeface this element's text draws in. Set through
         /// `Style.face`, which is itself behind the scenes -- see `Style`.
         face: u16 = 0,
@@ -1826,7 +1862,7 @@ pub fn Element(comptime M: type) type {
         /// carry their bytes and label because that content is what the
         /// geometry applies to, not an interaction model — which is why a
         /// widget must never add a variant here. Appearance lives on the
-        /// element instead (see `fg`), so a geometry cannot imply a look.
+        /// element instead (see `color`), so a geometry cannot imply a look.
         pub const Geometry = union(enum) {
             column: struct { children: []const *Self },
             row: struct { children: []const *Self },
@@ -1859,7 +1895,7 @@ pub fn Element(comptime M: type) type {
         pub fn style(self: *const Self) Style {
             return .{
                 .bg = self.bg,
-                .fg = self.fg,
+                .color = self.color,
                 .border = self.border,
                 // `face` belongs here or the round trip drops it: `finish` reads
                 // the face back off `style()` to copy it into the text geometry,
@@ -1887,7 +1923,7 @@ pub fn Element(comptime M: type) type {
         /// compiles; this is the short path, not an enforced boundary.
         pub fn applyStyle(self: *Self, s: Style) void {
             self.bg = mergeFill(self.bg, s.bg);
-            self.fg = mergeFill(self.fg, s.fg);
+            self.color = mergeFill(self.color, s.color);
             self.border = mergeFill(self.border, s.border);
             if (s.face) |v| self.face = v;
             if (s.weight) |v| self.weight = v;
@@ -1917,7 +1953,7 @@ pub fn Element(comptime M: type) type {
         /// ask for square corners on a rounded widget.
         pub fn mergeStyle(self: *Self, s: Style) void {
             if (s.bg) |v| self.bg = v;
-            if (s.fg) |v| self.fg = v;
+            if (s.color) |v| self.color = v;
             if (s.border) |v| self.border = v;
             if (s.face) |v| self.face = v;
             if (s.weight) |v| self.weight = v;
@@ -2456,7 +2492,7 @@ pub fn Element(comptime M: type) type {
             // its geometry and drops to the muted role, which is the only
             // signal it gets, since the theme has no disabled colour and
             // cannot get one without duplicating a Mocha step.
-            const fg_now: Fill = if (self.disabled) .{ .solid = th.text_muted } else self.style().fgFill(.{ .solid = th.text }).?;
+            const fg_now: Fill = if (self.disabled) .{ .solid = th.text_muted } else self.style().colorFill(.{ .solid = th.text }).?;
             // Focus is the third derived appearance, after press and hover: the
             // runtime names a key, the element asks whether it is that key. A
             // focused control shows the accent as its border, so apps never
@@ -2650,7 +2686,7 @@ pub fn Element(comptime M: type) type {
                     // as a rectangle on top of it, covering the left corners.
                     var fill = rect;
                     fill.w = rect.w * std.math.clamp(b.value, 0, 1);
-                    r.vtable.rrect(r.ptr, fill, self.radius, self.style().fgFill(.{ .solid = th.accent }).?, false, clip);
+                    r.vtable.rrect(r.ptr, fill, self.radius, self.style().colorFill(.{ .solid = th.accent }).?, false, clip);
                 },
 
                 .rect => {},
@@ -3017,7 +3053,9 @@ pub fn Ui(comptime M: type) type {
         face_lookup: ?*const FaceLookup = null,
         /// The theme files' named styles, for `style`. Points into the chain,
         /// which outlives the frame; null when the app loaded no theme.
-        styles: ?[]const StyleEntry = null,
+        /// Starts as the compiled table so a Ui with no file still resolves
+        /// `heading`, `card` and every script. A file REPLACES it wholesale.
+        styles: ?[]const StyleEntry = default_styles,
 
         /// which failure `failed` refers to; only meaningful when failed
         fail_kind: FailKind = .layout_allocation,
@@ -3071,7 +3109,17 @@ pub fn Ui(comptime M: type) type {
         /// one the app declared, or this returns defaults rather than
         /// reinterpreting unrelated bytes.
         pub fn vars(self: *const Self, comptime T: type) T {
-            if (comptime @sizeOf(T) > @sizeOf(@TypeOf(self.vars_bytes))) return .{};
+            // Oversize is a compile error here too, for the same reason as
+            // `setVars`: the buffer can never hold this type, so returning
+            // defaults is a silent lie rather than a "nothing written yet".
+            // The `vars_len` check BELOW stays silent on purpose -- that is the
+            // documented first-frame behaviour, not a failure.
+            comptime {
+                if (@sizeOf(T) > @sizeOf([256]u8)) @compileError(std.fmt.comptimePrint(
+                    "theme_tokens: {s} is {d} bytes, over the {d}-byte vars buffer",
+                    .{ @typeName(T), @sizeOf(T), @sizeOf([256]u8) },
+                ));
+            }
             if (self.vars_len != @sizeOf(T)) return .{};
             var out: T = undefined;
             @memcpy(std.mem.asBytes(&out), self.vars_bytes[0..@sizeOf(T)]);
@@ -3082,7 +3130,21 @@ pub fn Ui(comptime M: type) type {
         /// the two cannot disagree, which is the same reason `resolveChain`
         /// exists for the palette.
         pub fn setVars(self: *Self, comptime T: type, value: T) void {
-            if (comptime @sizeOf(T) > @sizeOf(@TypeOf(self.vars_bytes))) return;
+            // A type too large for the buffer is a COMPILE error, not a quiet
+            // no-op. Returning early here was silent in the worst way: the write
+            // was skipped, `vars_len` stayed 0, `vars()` kept handing back the
+            // defaults, and the app looked like the file had been ignored --
+            // indistinguishable from a typo in the theme itself. The type is
+            // known at comptime, so refuse it there instead.
+            //
+            // Grow `vars_bytes` if an app legitimately needs more; the limit is
+            // a fixed buffer, not a design boundary.
+            comptime {
+                if (@sizeOf(T) > @sizeOf([256]u8)) @compileError(std.fmt.comptimePrint(
+                    "theme_tokens: {s} is {d} bytes, over the {d}-byte vars buffer",
+                    .{ @typeName(T), @sizeOf(T), @sizeOf([256]u8) },
+                ));
+            }
             @memcpy(self.vars_bytes[0..@sizeOf(T)], std.mem.asBytes(&value));
             self.vars_len = @sizeOf(T);
         }
@@ -3100,7 +3162,7 @@ pub fn Ui(comptime M: type) type {
                 // A role reference is resolved against THIS frame's palette,
                 // so editing `.colors` moves every style that names it.
                 if (entry.spec.bg) |r| out.bg = self.roleFill(r);
-                if (entry.spec.fg) |r| out.fg = self.roleFill(r);
+                if (entry.spec.color) |r| out.color = self.roleFill(r);
                 if (entry.spec.border) |r| out.border = self.roleFill(r);
                 if (entry.spec.font) |f| out.face = self.font(f);
                 out.size = entry.spec.size;
@@ -3488,7 +3550,7 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
-        /// Text. `fg` is only set for `tone = .muted`: leaving it unset is the
+        /// Text. `color` is only set for `tone = .muted`: leaving it unset is the
         /// paint default, so the common case writes one fewer field.
         pub fn text(self: *Self, o: TextOpts) *Elem {
             // Precedence, one place: an explicit call-site size wins, then the
@@ -3507,7 +3569,7 @@ pub fn Ui(comptime M: type) type {
             e.wrap = o.wrap;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
-            if (o.tone == .muted) e.fg = .{ .solid = self.theme.text_muted };
+            if (o.tone == .muted) e.color = .{ .solid = self.theme.text_muted };
             return self.finish(e, o);
         }
 
@@ -3536,7 +3598,7 @@ pub fn Ui(comptime M: type) type {
             e.hover_bg = .{ .solid = self.theme.hover };
             e.press_bg = .{ .solid = self.theme.pressed };
             // The geometry's own look, then the caller's overlay.
-            e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .fg = .{ .solid = self.theme.text } });
+            e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .color = .{ .solid = self.theme.text } });
             return self.finish(e, o);
         }
 
@@ -3544,7 +3606,7 @@ pub fn Ui(comptime M: type) type {
             const e = self.mk(.{ .bar = .{ .value = o.value } });
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
-            e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .fg = .{ .solid = self.theme.accent } });
+            e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .color = .{ .solid = self.theme.accent } });
             return self.finish(e, o);
         }
 
@@ -4032,6 +4094,7 @@ pub fn Collector(comptime M: type) type {
         /// it, so without that a styled label would leak its font into whatever
         /// is drawn next.
         cur_face: u16 = 0,
+        cur_weight: u16 = 0,
 
         pub fn renderer(self: *Self) Renderer {
             return .{ .ptr = @ptrCast(self), .vtable = &vtable };
@@ -4043,7 +4106,7 @@ pub fn Collector(comptime M: type) type {
             .rrect = vtRrect,
             .text = vtText,
             .set_face = vtSetFace,
-            .set_weight = nominalSetWeight,
+            .set_weight = vtSetWeight,
             .halo = vtHalo,
             .frost = vtFrost,
             .measure_text = vtMeasure,
@@ -4124,6 +4187,11 @@ pub fn Collector(comptime M: type) type {
             self.cur_face = face;
         }
 
+        fn vtSetWeight(ptr: *anyopaque, weight: u16) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.cur_weight = weight;
+        }
+
         fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             // Text has no rect of its own, so the prune needs the metrics that
@@ -4140,6 +4208,7 @@ pub fn Collector(comptime M: type) type {
                 .bytes = bytes,
                 .clip = clip,
                 .face = self.cur_face,
+                .weight = self.cur_weight,
             } }) catch {
                 self.failed = true;
             };
@@ -5808,7 +5877,7 @@ fn kUpdate(_: *KState, _: KMsg) Action(KMsg) {
 
 fn gradView(_: *KState, ui: *Ui(KMsg)) *Element(KMsg) {
     const box = ui.rect(.{ .width = 80, .height = 40, .style = .{ .bg = Fill.vgrad(ui.theme.accent, ui.theme.bg), .border = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
-    const label = ui.text(.{ .label = "grad", .size = 12, .style = .{ .fg = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
+    const label = ui.text(.{ .label = "grad", .size = 12, .style = .{ .color = Fill.hgrad(ui.theme.accent, ui.theme.text_muted) } });
     return ui.column(.{ .children = &.{ box, label } });
 }
 

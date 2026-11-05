@@ -27,30 +27,38 @@ pub fn build(b: *std.Build) void {
     // resolved against the executable's directory -- so a copy of the app reads
     // the copy's own theme, and the cwd cannot change how it looks.
     //
-    // Seeded once, at configure time, and never overwritten: after the first
-    // build the file belongs to whoever is editing it and a rebuild must not
-    // silently revert an edit. `zig build theme` is the deliberate overwrite,
-    // which is why that step is the documented reset button.
+    // Seeded at configure time, refreshed from master on every configure.
     {
         const io = b.graph.io;
         const cwd = std.Io.Dir.cwd();
-        // The listing `.zon` themes are written against: seeded as a file so it
-        // can be read, copied and edited without a rebuild. There is no second
-        // seed -- no live `theme.zon` ships, so the reset button restores one
-        // master rather than two.
+        // REFRESH FROM MASTER, every configure.
         //
-        // Exclusive create, so "seed it" and "never revert an edit" are the same
-        // operation: if the file is already there, whoever put it there wins and
-        // this is a no-op. A missing master is skipped silently, because a dev
-        // tree mid-edit should not stop configuring -- which is also why the
-        // step is the documented reset.
+        // This used to be an exclusive create, on the theory that "seed it"
+        // and "never revert an edit" should be one operation. It is not: the
+        // developer edits `src/theme.defaults.zon`, rebuilds, and the app
+        // keeps rendering the copy that was seeded the first time. Two files
+        // with different palettes, no error, and every edit looks ignored.
+        //
+        // `src/` is the single source of truth for the house palette. A
+        // per-app palette does not live in `theme.defaults.zon`; it lives in
+        // the app's own `theme.zon`, which this never touches. So there is no
+        // edit here worth preserving, and copying over is the honest
+        // behaviour.
+        // Write via a temp file and RENAME. A truncate-then-write leaves a
+        // ZERO-LENGTH theme.defaults.zon if the build stops between the two
+        // calls, and an empty file is not a missing file: the app reads it,
+        // gets no palette, and renders the compiled floor while reporting
+        // nothing. Rename is atomic, so the destination is either the old
+        // contents or the new ones, never neither.
         if (cwd.readFileAlloc(io, "src/theme.defaults.zon", b.allocator, .limited(64 * 1024))) |data| {
             defer b.allocator.free(data);
             const dst = b.getInstallPath(.bin, "theme.defaults.zon");
             if (std.fs.path.dirname(dst)) |d| cwd.createDirPath(io, d) catch {};
-            if (cwd.createFile(io, dst, .{ .exclusive = true })) |file| {
-                defer file.close(io);
+            const tmp = b.fmt("{s}.tmp", .{dst});
+            if (cwd.createFile(io, tmp, .{ .truncate = true })) |file| {
                 file.writeStreamingAll(io, data) catch {};
+                file.close(io);
+                cwd.rename(tmp, cwd, dst, io) catch {};
             } else |_| {}
         } else |_| {}
     }
@@ -459,6 +467,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+
+    const tmp_sticky = b.addTest(.{ .root_module = software_mod, .filters = &.{"two weights of a variable face"} });
+    const tmp_run = b.addRunArtifact(tmp_sticky);
+    b.step("tmp-sticky", "ad hoc").dependOn(&tmp_run.step);
 
     const test_step = b.step("test", "run core + software + runner + reducer + font tests");
     test_step.dependOn(&b.addRunArtifact(software_tests).step);

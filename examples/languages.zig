@@ -113,16 +113,20 @@ pub fn main(init: std.process.Init) !void {
     var buf: [64 * 1024]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
-    defer out.flush() catch {};
+    // NO `defer out.flush()`. `paint.zig` omits it and does not leak; adding it
+    // here produced the leak, because `sendFile` grows a HEAP buffer via
+    // `ensureTotalCapacity` when the payload exceeds `buf`, and the writer has
+    // no `deinit` to release it. The explicit flush at the end of `main` is the
+    // only one needed, and it runs while the writer is still alive.
 
     var canvas = try software.Canvas.init(gpa, W, H);
     defer canvas.deinit();
 
     // The primary face. Everything else arrives by NAME through the registry,
     // exactly as the theme file wrote it.
-    if (software.loadFontByName(gpa, io, "DejaVu Sans", &.{}) catch null) |b| {
-        canvas.setFont(b);
-    }
+    const primary: ?[]u8 = software.loadFontByName(gpa, io, "DejaVu Sans", &.{}) catch null;
+    defer if (primary) |b| gpa.free(b);
+    if (primary) |b| canvas.setFont(b);
 
     const fonts = runner.HeadlessFonts.init(gpa, io, null);
     defer fonts.deinit();
@@ -143,11 +147,30 @@ pub fn main(init: std.process.Init) !void {
     // proves nothing. The path is the whole point.
     const base: ?[:0]u8 = runner.themePathBesideExe(gpa, io, "theme.defaults.zon");
     defer if (base) |b| gpa.free(b);
-    var chain = runner.resolveChain(struct {}, gpa, io, rt.ui.theme, base, null);
+    // The USER file too, which this used to pass as null. Missing it meant the
+    // example read only `theme.defaults.zon`, so an edit to `theme.zon` changed
+    // nothing here and looked like the style system ignoring the file. Null is
+    // still the right answer when the file is absent -- resolveChain treats a
+    // null path as "no override", not as an error.
+    const user: ?[:0]u8 = runner.themePathBesideExe(gpa, io, "theme.zon");
+    defer if (user) |u| gpa.free(u);
+    // The app tier. `theme.zon` carries `.vars = .{ .weight = 600, .latin_font =
+    // "Roboto Flex" }`, and an app that declares nothing REJECTS `.vars` -- a
+    // structural refusal, not a warning, because `ignore_unknown_fields` is
+    // file-wide and would also swallow typos in `.colors`. Declaring the vars
+    // here is what lets the example's own theme.zon load at all.
+    const App = struct {
+        weight: ?u16 = null,
+        latin_font: ?[]const u8 = null,
+    };
+    var chain = runner.resolveChain(App, gpa, io, rt.ui.theme, base, user);
     defer chain.deinit(gpa);
     rt.ui.theme = chain.theme;
     rt.ui.gradients = chain.gradients;
-    rt.ui.styles = if (chain.styles.len > 0) chain.styles else null;
+    // Keep the COMPILED table when no file supplied one. Assigning null here
+    // would discard `elmz.default_styles` and put the example back to the state
+    // where `heading` and every script resolved to nothing.
+    rt.ui.styles = if (chain.styles.len > 0) chain.styles else elmz.default_styles;
     if (chain.message()) |m| try out.print("theme: {s}\n", .{m});
     try out.print("theme: {d} styles\n", .{chain.styles.len});
 
@@ -161,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
     // Through the REGISTRY, not `rt.ui.font`: `ui.face_lookup` is mirrored at
     // the top of a frame, so calling the Ui's resolver out here finds a null
     // handle and reports every face missing, including DejaVu.
-    for (chain.styles) |st| {
+    for (rt.ui.styles orelse &.{}) |st| {
         if (st.spec.font) |fname| {
             const got = fonts.reg.indexOf(fname);
             try out.print("  face {s}: {s}\n", .{ fname, if (got != null) "loaded" else "MISSING" });

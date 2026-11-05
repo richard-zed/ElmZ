@@ -132,7 +132,7 @@ fn checkPalette(t: Theme) !void {
 //
 // v2 splits the section in two, so each keeps its natural syntax:
 //
-//   .colors    = .{ .bg = 0x1e1e2e }             -- terse, the common case,
+//   .colors    = .{ .bg = .{ .hex = 0x1e1e2e } }             -- terse, the common case,
 //                                                   what a person edits by hand
 //   .gradients = .{ .bg = .{ .linear = ... } }   -- explicit, because a
 //                                                   gradient is not a number
@@ -232,19 +232,19 @@ pub const GradientSpec = union(enum) {
 /// cannot express it in six, and rejecting eight would mean a caller who wrote
 /// one got a parse error naming a colour they can plainly see.
 pub const ColorsSpec = struct {
-    bg: ?u32 = null,
-    panel: ?u32 = null,
-    border: ?u32 = null,
-    text: ?u32 = null,
-    text_muted: ?u32 = null,
-    control: ?u32 = null,
-    hover: ?u32 = null,
-    pressed: ?u32 = null,
-    selected: ?u32 = null,
-    accent: ?u32 = null,
-    success: ?u32 = null,
-    warning: ?u32 = null,
-    fail: ?u32 = null,
+    bg: ColorSpec = .{},
+    panel: ColorSpec = .{},
+    border: ColorSpec = .{},
+    text: ColorSpec = .{},
+    text_muted: ColorSpec = .{},
+    control: ColorSpec = .{},
+    hover: ColorSpec = .{},
+    pressed: ColorSpec = .{},
+    selected: ColorSpec = .{},
+    accent: ColorSpec = .{},
+    success: ColorSpec = .{},
+    warning: ColorSpec = .{},
+    fail: ColorSpec = .{},
 
     /// Colours beyond the built-in roles, as a LIST because ZON cannot parse a
     /// map -- the same reason `.styles` is a list. A name here is usable
@@ -264,16 +264,179 @@ pub const ColorsSpec = struct {
         var t = base;
         inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
             if (comptime std.mem.eql(u8, f.name, "roles")) continue;
-            if (@field(self, f.name)) |hex| @field(t, f.name) = Color.hex(hex);
+            if (@field(self, f.name).resolve()) |c| {
+                @field(t, f.name) = c;
+            } else |_| {}
         }
         return t;
     }
 };
 
+/// A colour written in a file, in any free-form spelling.
+///
+/// Read from the UNTYPED tree, not a typed struct, because the shapes a person
+/// writes are not one type: `0xffeeddcc` and `.{ 200, 200, 20 }` are different
+/// node kinds, and a struct field can only accept one of them. The node shape
+/// decides how the value is read.
+///
+///   int_literal        0xffeeddff, 0x1e1e2e     -- 24-bit RGB or 32-bit RGBA
+///   array_literal      3 elems -> rgb, 4 -> rgba
+///   float arrays       all <= 1.0 normalised x255, any > 1.0 exact, mixed is an error
+pub const ColorValue = struct {
+    pub const Error = error{
+        NotAColour,
+        ColourElementCount,
+        ColourMixedFloats,
+        ColourOutOfRange,
+        ColourNegative,
+        ColourBigInt,
+    };
+
+    /// Read a node as a colour. `zoir` is the untyped tree the ZON parse produced.
+    pub fn read(ast: std.zig.Ast, zoir: std.zig.Zoir, node: std.zig.Zoir.Node.Index) Error!Color {
+        _ = ast;
+        return switch (node.get(zoir)) {
+            .int_literal => |v| hexFromInt(v),
+            .float_literal => error.NotAColour,
+            .array_literal => |range| fromArray(zoir, range),
+            else => error.NotAColour,
+        };
+    }
+
+    /// `0xRRGGBB` or `0xRRGGBBAA`, by magnitude not by digit count: a value
+    /// above 24 bits carries alpha. Negative and out-of-range are refused
+    /// rather than wrapped, because a wrapped colour is a colour nobody wrote.
+    /// The payload is an ANONYMOUS union, so it cannot be named as a parameter
+    /// type; it is taken as `anytype` and switched here, the way std's own
+    /// `parseInt` does it.
+    fn hexFromInt(int: anytype) Error!Color {
+        switch (int) {
+            .small => |i| {
+                if (i < 0) return error.ColourNegative;
+                const u = std.math.cast(u32, i) orelse return error.ColourOutOfRange;
+                return if (u > 0xffffff) Color.rgbaHex(u) else Color.rgbHex(u);
+            },
+            .big => |val| {
+                const u = val.toInt(u32) catch return error.ColourOutOfRange;
+                return if (u > 0xffffff) Color.rgbaHex(u) else Color.rgbHex(u);
+            },
+        }
+    }
+
+    fn fromArray(zoir: std.zig.Zoir, range: std.zig.Zoir.Node.Index.Range) Error!Color {
+        const n = range.len;
+        if (n != 3 and n != 4) return error.ColourElementCount;
+
+        var ch: [4]u8 = .{ 0, 0, 0, 255 };
+        var any_float = false;
+        var any_gt_one = false;
+        var raw: [4]f64 = undefined;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const node = range.at(@intCast(i));
+            switch (node.get(zoir)) {
+                .int_literal => |iv| switch (iv) {
+                    .small => |s| {
+                        if (s < 0) return error.ColourNegative;
+                        if (s > 255) return error.ColourOutOfRange;
+                        raw[i] = @floatFromInt(s);
+                        if (@as(f64, @floatFromInt(s)) > 1.0) any_gt_one = true;
+                    },
+                    .big => return error.ColourBigInt,
+                },
+                .float_literal => |f| {
+                    any_float = true;
+                    if (f < 0) return error.ColourNegative;
+                    raw[i] = @floatCast(f);
+                    if (f > 1.0) any_gt_one = true;
+                },
+                else => return error.NotAColour,
+            }
+        }
+
+        // Magnitude decides the scale, on the WHOLE array: all <= 1.0 is a
+        // fraction, any > 1.0 is an 0-255 channel. A mixed array has no reading
+        // that matches what the author meant, so it is an error rather than a
+        // guess -- `.{ 1.0, 0.5, 200 }` is neither.
+        if (any_float) {
+            var all_le_one = true;
+            var all_gt_one = true;
+            for (raw[0..n]) |c| {
+                if (c > 1.0) all_le_one = false;
+                if (c <= 1.0) all_gt_one = false;
+            }
+            if (!all_le_one and !all_gt_one) return error.ColourMixedFloats;
+            if (all_le_one) {
+                for (raw[0..n], 0..) |c, k| {
+                    const scaled = @round(c * 255.0);
+                    if (scaled > 255.0) return error.ColourOutOfRange;
+                    ch[k] = @intFromFloat(scaled);
+                }
+                return .{ .r = ch[0], .g = ch[1], .b = ch[2], .a = ch[3] };
+            }
+        }
+
+        for (raw[0..n], 0..) |c, k| {
+            if (c < 0 or c > 255) return error.ColourOutOfRange;
+            ch[k] = @intFromFloat(@round(c));
+        }
+        return .{ .r = ch[0], .g = ch[1], .b = ch[2], .a = ch[3] };
+    }
+};
+
+/// A colour value as a file may write it.
+///
+/// Three optional members rather than a union, and this is not a style choice:
+/// a union requires a tagged form and ZON rejects even a bare hex for one
+/// ("expected union"), while `u32` rejects a tuple ("expected type 'u32'").
+/// Optional members accept exactly one populated member and nothing else, which
+/// is the only shape that lets a hex and a tuple live in the same field.
+///
+/// Leave exactly ONE member set. `resolve` counts them and rejects a value that
+/// sets none or several -- ZON has no way to enforce that itself, so a file
+/// writing `.hex` and `.rgb` on one colour would otherwise silently pick one.
+pub const ColorSpec = struct {
+    hex: ?u32 = null,
+    rgb: ?[3]u8 = null,
+    rgba: ?[4]u8 = null,
+
+    pub const Error = error{ColorNotOneForm};
+
+    /// Fold to a `Color`. Six-digit hex is opaque, eight is `0xRRGGBBAA`, both
+    /// handled by `Color.hex` -- the same rule the built-in roles already use.
+    pub fn resolve(self: ColorSpec) Error!elmz.Color {
+        var seen: u2 = 0;
+        var out: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0xff };
+        if (self.hex) |h| {
+            seen += 1;
+            out = elmz.Color.hex(h);
+        }
+        if (self.rgb) |v| {
+            seen += 1;
+            out = .{ .r = v[0], .g = v[1], .b = v[2], .a = 0xff };
+        }
+        if (self.rgba) |v| {
+            seen += 1;
+            out = .{ .r = v[0], .g = v[1], .b = v[2], .a = v[3] };
+        }
+        if (seen != 1) return error.ColorNotOneForm;
+        return out;
+    }
+
+    /// A plain hex, for tests and for code paths that already have one.
+    pub fn fromHex(h: u32) ColorSpec {
+        return .{ .hex = h };
+    }
+};
+
 /// One named colour outside the built-in set.
+///
+/// `value` takes either form: `.name = "chart1", .value = .{ .hex = 0x... }` or
+/// `.value = .{ .rgb = .{ 200, 200, 20 } }`. It cannot be written bare for the
+/// reason spelled out on `ColorSpec`.
 pub const CustomRole = struct {
     name: []const u8,
-    hex: u32,
+    value: ColorSpec,
 };
 
 /// Gradients per role, named exactly like the colours they stand in for.
@@ -397,19 +560,19 @@ pub const ThemeSpec = struct {
     }
 };
 
-
 /// One named style: a bag of role REFERENCES, plus a font name.
 ///
-/// Values are strings, not bare identifiers: `.bg = ".panel"` rather than
-/// `.bg = .panel`. ZON reads a leading dot as an identifier, so the bare form
-/// is a parse error -- verified by compiling, not assumed.
+/// In a FILE the references are enum literals -- `.bg = .panel`, `.weight =
+/// .weight` -- which the walker resolves to the names below as it reads. The
+/// struct holds the name WITHOUT the dot because that is what the resolver
+/// downstream looks up; the dot is file syntax, not data.
 ///
 /// A style never holds a colour. It names a role in `.colors`, so editing the
 /// palette moves every style that refers to it, and a style cannot drift out of
 /// agreement with the palette it belongs to.
 pub const StyleSpec = struct {
     bg: ?[]const u8 = null,
-    fg: ?[]const u8 = null,
+    color: ?[]const u8 = null,
     border: ?[]const u8 = null,
     font: ?[]const u8 = null,
     size: ?f32 = null,
@@ -533,6 +696,131 @@ fn diagFrom(diag: *ThemeDiag, name: []const u8, d: *std.zon.parse.Diagnostics, f
 }
 
 /// Parse `src` as a v2 theme file over `base`.
+/// Walker output -> the struct `loadTheme` reads.
+///
+/// The file may write any name it likes, so each entry is checked against the
+/// built-in roles: a match RETUNES that role, anything else becomes a custom.
+/// Names are duped because `OpenTables` is freed before the caller sees this.
+/// `GradientLit` ends are colour LITERALS; the spec wants plain hex. A colour
+/// written as an array has to pick one channel width, so anything but hex is
+/// rejected rather than silently truncated to 24 bits.
+fn litEnd(l: ?ColorLit) ?u32 {
+    const v = l orelse return null;
+    return switch (v) {
+        .hex => |h| h,
+        .rgb, .rgba => null,
+    };
+}
+
+fn specFromLit(g: GradientLit) ?GradientSpec {
+    return switch (g) {
+        .linear => |l| .{ .linear = .{
+            .dir = l.dir,
+            .from = litEnd(l.from),
+            .to = litEnd(l.to),
+        } },
+        .radial => |r| .{ .radial = .{
+            .inner = litEnd(r.inner),
+            .outer = litEnd(r.outer),
+            .center = r.center,
+            .radius = r.radius,
+        } },
+    };
+}
+
+fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *ThemeDiag, file_name: []const u8) ThemeLoadError!ThemeFileType(App) {
+    var out: ThemeFileType(App) = .{ .version = theme_version };
+
+    var customs = std.array_list.Managed(CustomRole).init(gpa);
+    defer customs.deinit();
+
+    for (t.colors) |c| {
+        const spec: ColorSpec = switch (c.value) {
+            .solid => |l| switch (l) {
+                .hex => |h| .{ .hex = h },
+                .rgb => |v| .{ .rgb = v },
+                .rgba => |v| .{ .rgba = v },
+            },
+            .gradient => {
+                diag.set("{s}: \"{s}\" is a gradient; put it in .gradients", .{ file_name, c.name });
+                return error.Palette;
+            },
+        };
+        // Runtime name, so `inline for` cannot decide the branch at comptime:
+        // the field set is unrolled but the match is a runtime compare.
+        var matched = false;
+        inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+            if (!comptime std.mem.eql(u8, f.name, "roles")) {
+                if (std.mem.eql(u8, f.name, c.name)) {
+                    @field(out.theme.colors, f.name) = spec;
+                    matched = true;
+                }
+            }
+        }
+        if (!matched) {
+            customs.append(.{
+                .name = gpa.dupe(u8, c.name) catch return error.OutOfMemory,
+                .value = spec,
+            }) catch return error.OutOfMemory;
+        }
+    }
+    if (customs.items.len > 0) {
+        out.theme.colors.roles = customs.toOwnedSlice() catch return error.OutOfMemory;
+    }
+
+    var cgrads = std.array_list.Managed(CustomGradient).init(gpa);
+    defer cgrads.deinit();
+    for (t.gradients) |g| {
+        var matched = false;
+        inline for (@typeInfo(GradientsSpec).@"struct".fields) |f| {
+            if (!comptime std.mem.eql(u8, f.name, "roles")) {
+                if (std.mem.eql(u8, f.name, g.name)) {
+                    @field(out.theme.gradients, f.name) = specFromLit(g.value) orelse {
+                        diag.set("{s}: gradient \"{s}\" needs hex ends", .{ file_name, g.name });
+                        return error.Palette;
+                    };
+                    matched = true;
+                }
+            }
+        }
+        if (!matched) {
+            cgrads.append(.{
+                .name = gpa.dupe(u8, g.name) catch return error.OutOfMemory,
+                .gradient = specFromLit(g.value) orelse {
+                    diag.set("{s}: gradient \"{s}\" needs hex ends", .{ file_name, g.name });
+                    return error.Palette;
+                },
+            }) catch return error.OutOfMemory;
+        }
+    }
+    if (cgrads.items.len > 0) {
+        out.theme.gradients.roles = cgrads.toOwnedSlice() catch return error.OutOfMemory;
+    }
+
+    var styles = std.array_list.Managed(StyleEntry).init(gpa);
+    defer styles.deinit();
+    for (t.styles) |st| {
+        var spec = st.value;
+        inline for (.{ "bg", "color", "border", "font" }) |slot| {
+            if (@field(spec, slot)) |str| @field(spec, slot) = gpa.dupe(u8, str) catch return error.OutOfMemory;
+        }
+        if (spec.halo) |h| {
+            var nh = h;
+            nh.color = gpa.dupe(u8, h.color) catch return error.OutOfMemory;
+            spec.halo = nh;
+        }
+        styles.append(.{
+            .name = gpa.dupe(u8, st.name) catch return error.OutOfMemory,
+            .spec = spec,
+        }) catch return error.OutOfMemory;
+    }
+    if (styles.items.len > 0) {
+        out.styles = styles.toOwnedSlice() catch return error.OutOfMemory;
+    }
+
+    return out;
+}
+
 pub fn loadTheme(
     comptime App: type,
     gpa: Allocator,
@@ -563,41 +851,87 @@ pub fn loadTheme(
         }
     }
 
+    // The palette and the styles are read by the WALKER, not by `zon.parse`.
+    // A struct field accepts exactly one shape per name, and a theme file
+    // writes several -- `0xRRGGBB`, `.{ r, g, b }`, `.{ 0.1, 0.2, 0.3 }` --
+    // under names the file itself invents. The token stream carries the shape,
+    // so the shape decides how a value is read.
+    var tables = readOpenTables(gpa, src, diag) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Parse,
+    };
+    defer freeOpenTables(gpa, &tables);
+
+    // `.vars` is still typed: `App` is a struct the APP declares, so it is the
+    // one section with a schema to check against.
     var d: std.zon.parse.Diagnostics = .{};
     defer d.deinit(gpa);
-    // `fromSlice` refuses any type containing a pointer at comptime, and the
-    // font name IS one. The allocating form returns owned strings, which is why
-    // the name is copied into `font_buf` before the parse is freed.
-    var file = std.zon.parse.fromSliceAlloc(ThemeFileType(App), gpa, src, &d, .{}) catch |e| switch (e) {
+    // `.vars` sits INSIDE `.theme`, not at the root. Probing the root found
+    // nothing, so the app tier was always the default and every `.weight` /
+    // `.font` reference resolved to null -- the file looked loaded and every
+    // var-driven style looked ignored.
+    const AppOnly = struct { theme: struct { vars: App = .{} } = .{} };
+    const app_tier = std.zon.parse.fromSliceAlloc(AppOnly, gpa, src, &d, .{ .ignore_unknown_fields = true }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ParseZon => {
             diagFrom(diag, name, &d, "bad theme file");
             return error.Parse;
         },
     };
+    // `.vars` string fields point INTO the parse result, which the defer below
+    // frees. `built.vars` copied the struct, not the bytes, so every string var
+    // dangled -- `vars.latin_font` read back as junk while the styles that
+    // resolved from it looked fine, because those were separately copied.
+    // Dupe the slices into `gpa` before the free; `freeVars` unwinds them.
+    var vars_owned = app_tier.theme.vars;
+    try dupeVars(App, gpa, &vars_owned);
+    // OWNERSHIP TRANSFERS to the caller on success, so this must not run on
+    // the happy path -- `out.vars` is `vars_owned`, and freeing it here is
+    // what made `loaded.vars.latin_font` read back as junk.
+    var vars_transferred = false;
+    defer if (!vars_transferred) freeVars(App, gpa, &vars_owned);
+    defer std.zon.parse.free(gpa, app_tier);
 
-    defer std.zon.parse.free(gpa, file);
+    // Walker output, reshaped into the one struct the rest of this function
+    // reads. The FILE format is free-form; the handoff is not.
+    var built = try buildFileType(App, gpa, tables, diag, name);
+    defer freeFileType(App, gpa, &built);
+    built.vars = vars_owned;
 
-    var theme = file.theme.overlay(base);
+    var theme = built.theme.overlay(base);
 
     // The file's own role names. The strings live in the parse result, which is
     // freed on return, so they are COPIED into the caller's allocator before
     // this scope ends -- a borrowed slice would dangle and every custom role
     // would draw as the `text` fallback for reasons nothing could trace.
-    if (file.theme.colors.roles.len > 0) {
-        const custom = gpa.alloc(Theme.CustomColor, file.theme.colors.roles.len) catch return error.OutOfMemory;
+    if (built.theme.colors.roles.len > 0) {
+        const custom = gpa.alloc(Theme.CustomColor, built.theme.colors.roles.len) catch return error.OutOfMemory;
         errdefer gpa.free(custom);
         var made: usize = 0;
         errdefer for (custom[0..made]) |c| gpa.free(c.name);
-        for (file.theme.colors.roles, 0..) |r, i| {
-            // A custom name that shadows a built-in is a mistake worth naming:
-            // the built-in would win in `roleColor`, so the file would look
-            // ignored rather than wrong.
-            if (isBuiltinRole(r.name)) {
-                diag.set("{s}: .colors .roles names \"{s}\", which is a built-in role", .{ name, r.name });
-                return error.Palette;
+        // Two entries with the SAME name is the error, because one of them would
+        // be silently dropped. A custom entry naming a built-in (`bg`, `accent`)
+        // is allowed and overwrites it -- that is how a file retunes a role
+        // without the built-in winning and making the file look ignored.
+        for (built.theme.colors.roles, 0..) |r, i| {
+            for (custom[0..made]) |seen| {
+                if (std.mem.eql(u8, seen.name, r.name)) {
+                    diag.set("{s}: .colors names \"{s}\" twice", .{ name, r.name });
+                    return error.Palette;
+                }
             }
-            custom[i] = .{ .name = gpa.dupe(u8, r.name) catch return error.OutOfMemory, .color = Color.hex(r.hex) };
+            // Resolve BEFORE duping. The other order leaks: `made` only advances
+            // after the whole entry is built, so a resolve failure would leave
+            // the just-duped name allocated and nothing holding it. The leak was
+            // two allocations in the reject tests, which is how it was found.
+            const color = r.value.resolve() catch {
+                diag.set("{s}: colour \"{s}\" sets none or more than one of .hex/.rgb/.rgba", .{ name, r.name });
+                return error.Palette;
+            };
+            custom[i] = .{
+                .name = gpa.dupe(u8, r.name) catch return error.OutOfMemory,
+                .color = color,
+            };
             made = i + 1;
         }
         theme.custom = custom;
@@ -606,13 +940,13 @@ pub fn loadTheme(
     // Custom gradients, resolved against the role they name. Done here rather
     // than in `resolveGradients` because that runs before `theme.custom` is
     // attached, so a custom role would resolve against `text`.
-    var grad_out: Gradients = file.theme.resolveGradients(theme);
-    if (file.theme.gradients.roles.len > 0) {
-        const cf = gpa.alloc(Gradients.CustomFill, file.theme.gradients.roles.len) catch return error.OutOfMemory;
+    var grad_out: Gradients = built.theme.resolveGradients(theme);
+    if (built.theme.gradients.roles.len > 0) {
+        const cf = gpa.alloc(Gradients.CustomFill, built.theme.gradients.roles.len) catch return error.OutOfMemory;
         errdefer gpa.free(cf);
         var made: usize = 0;
         errdefer for (cf[0..made]) |c| gpa.free(c.name);
-        for (file.theme.gradients.roles, 0..) |g, i| {
+        for (built.theme.gradients.roles, 0..) |g, i| {
             // A gradient for a name no role defines would resolve against the
             // `text` fallback and draw a ramp nobody asked for.
             if (!isRole(g.name, theme.custom)) {
@@ -621,7 +955,7 @@ pub fn loadTheme(
             }
             cf[i] = .{
                 .name = gpa.dupe(u8, g.name) catch return error.OutOfMemory,
-                .fill = g.gradient.resolve(roleColor(theme, g.name)),
+                .fill = g.gradient.resolve(elmz.roleColor(theme, g.name)),
             };
             made = i + 1;
         }
@@ -639,8 +973,8 @@ pub fn loadTheme(
     // Every style's role references are checked before any of it is used. A
     // name that is not a role is a typo, and a typo here means an element draws
     // with the wrong colour and says nothing.
-    for (file.styles) |entry| {
-        inline for (.{ "bg", "fg", "border" }) |slot| {
+    for (built.styles) |entry| {
+        inline for (.{ "bg", "color", "border" }) |slot| {
             if (@field(entry.spec, slot)) |ref| {
                 if (!isRole(ref, theme.custom)) {
                     diag.set("{s}: style .{s} .{s} names \"{s}\", which is not a role", .{ name, entry.name, slot, ref });
@@ -649,29 +983,19 @@ pub fn loadTheme(
             }
         }
     }
-    try checkStyleCycles(diag, name, file.styles);
+    try checkStyleCycles(diag, name, built.styles);
 
     var out: Loaded(App) = .{
         .theme = theme,
         .gradients = grad_out,
-        .vars = file.vars,
+        .vars = built.vars,
     };
-
-    // The font name rides through the same buffer as the theme-level one, so a
-    // style cannot smuggle in a path.
-    if (file.theme.font) |f| {
-        if (f.len > font_name_max) {
-            diag.set("{s}: font name {d} bytes, not a name -- is that a path?", .{ name, f.len });
-            return error.Parse;
-        }
-        @memcpy(out.font_buf[0..f.len], f);
-        out.font_len = f.len;
-    }
 
     // Deep copy: names and string values point into `file`, which the defer
     // above frees. Getting this wrong is a use-after-free that renders as
     // garbage role names, or as nothing at all.
-    if (file.styles.len > 0) out.styles = try copyStyles(gpa, file.styles);
+    if (built.styles.len > 0) out.styles = try copyStyles(gpa, built.styles);
+    vars_transferred = true;
     return out;
 }
 
@@ -693,14 +1017,11 @@ pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntr
             .name = e.name,
             .spec = .{
                 .bg = e.spec.bg,
-                .fg = e.spec.fg,
+                .color = e.spec.color,
                 .border = e.spec.border,
                 .font = e.spec.font,
                 .size = e.spec.size,
                 .weight = e.spec.weight,
-                // The halo's colour is copied as the ROLE NAME it was written
-                // as: the string stays owned by the loader's table, and
-                // resolving it here would freeze today's palette into a style.
                 .halo = if (e.spec.halo) |h| .{
                     .color = h.color,
                     .blur = h.blur,
@@ -725,17 +1046,72 @@ pub fn freeCustom(gpa: std.mem.Allocator, t: *elmz.Theme) void {
 
 /// Free the owned style table. Safe on the empty default.
 pub fn freeStyles(gpa: std.mem.Allocator, styles: *StylesSpec) void {
-    for (styles.*) |entry| {
-        inline for (.{ "bg", "fg", "border", "font" }) |slot| {
-            if (@field(entry.spec, slot)) |str| gpa.free(str);
-        }
-        // A halo's colour is a role NAME and is owned like any other string.
-        // Missing it here leaked one allocation per styled glow, silently.
-        if (entry.spec.halo) |h| gpa.free(h.color);
-        gpa.free(entry.name);
-    }
+    for (styles.*) |entry| freeSpecEntry(gpa, entry);
     if (styles.len > 0) gpa.free(styles.*);
     styles.* = &.{};
+}
+
+/// Free the walker's own table, which overlaps `elmz.StyleEntry` field for
+/// field but is a separate type -- so the one-entry free is written twice
+/// rather than coerced, and the two stay in step by construction.
+fn freeSpecEntry(gpa: std.mem.Allocator, entry: StyleEntry) void {
+    inline for (.{ "bg", "color", "border", "font" }) |slot| {
+        if (@field(entry.spec, slot)) |str| gpa.free(str);
+    }
+    if (entry.spec.halo) |h| gpa.free(h.color);
+    gpa.free(entry.name);
+}
+
+/// Free what `buildFileType` allocated. Names, style strings and the custom
+/// slices are all owned; the `ColorSpec`/`GradientLit` payloads are values.
+fn freeFileType(comptime App: type, gpa: Allocator, f: *ThemeFileType(App)) void {
+    for (f.theme.colors.roles) |r| gpa.free(r.name);
+    if (f.theme.colors.roles.len > 0) gpa.free(f.theme.colors.roles);
+    for (f.theme.gradients.roles) |g| gpa.free(g.name);
+    if (f.theme.gradients.roles.len > 0) gpa.free(f.theme.gradients.roles);
+    if (f.styles.len > 0) freeStyles(gpa, &f.styles);
+}
+
+/// Free everything `loadTheme` handed back. The vars are OWNED by the caller
+/// (transferred, not copied), so freeing the styles alone leaks one allocation
+/// per string var -- which is exactly the leak the suite reported.
+pub fn freeLoaded(comptime App: type, gpa: Allocator, loaded: *Loaded(App)) void {
+    freeStyles(gpa, &loaded.styles);
+    freeVars(App, gpa, &loaded.vars);
+}
+
+/// Deep-copy the string fields of an app's vars struct into `gpa`.
+///
+/// `App` is declared by the CONSUMER, so there is no fixed shape to copy. The
+/// one guarantee that matters is that any `[]const u8` (or optional) it
+/// declares points into the ZON parse result, which dies before this function
+/// returns -- reflection is the only way to follow a struct the library has
+/// never seen.
+fn dupeVars(comptime App: type, gpa: Allocator, vars: *App) ThemeLoadError!void {
+    const info = @typeInfo(App);
+    if (info != .@"struct") return;
+    inline for (info.@"struct".fields) |f| {
+        switch (f.type) {
+            []const u8 => @field(vars, f.name) = try gpa.dupe(u8, @field(vars, f.name)),
+            ?[]const u8 => if (@field(vars, f.name)) |s| {
+                @field(vars, f.name) = try gpa.dupe(u8, s);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Free what `dupeVars` allocated. Safe on a struct with no string fields.
+fn freeVars(comptime App: type, gpa: Allocator, vars: *App) void {
+    const info = @typeInfo(App);
+    if (info != .@"struct") return;
+    inline for (info.@"struct".fields) |f| {
+        switch (f.type) {
+            []const u8 => gpa.free(@field(vars, f.name)),
+            ?[]const u8 => if (@field(vars, f.name)) |s| gpa.free(s),
+            else => {},
+        }
+    }
 }
 
 fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
@@ -743,7 +1119,7 @@ fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
     errdefer gpa.free(out);
     var done: usize = 0;
     errdefer for (out[0..done]) |e| {
-        inline for (.{ "bg", "fg", "border", "font" }) |slot| {
+        inline for (.{ "bg", "color", "border", "font" }) |slot| {
             if (@field(e.spec, slot)) |str| gpa.free(str);
         }
         if (e.spec.halo) |h| gpa.free(h.color);
@@ -751,7 +1127,7 @@ fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
     };
     for (src, 0..) |entry, i| {
         var nv = entry.spec;
-        inline for (.{ "bg", "fg", "border", "font" }) |slot| {
+        inline for (.{ "bg", "color", "border", "font" }) |slot| {
             if (@field(entry.spec, slot)) |str| @field(nv, slot) = try gpa.dupe(u8, str);
         }
         if (entry.spec.halo) |h| {
@@ -763,6 +1139,773 @@ fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
         done = i + 1;
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Open colour namespaces.
+//
+// `.colors` and `.gradients` are ONE namespace each: the thirteen built-in role
+// names live in the same table as names the file invent (`.color1`,
+// `.gradient1`), and any entry may overwrite a built-in. `std.zon.parse` cannot
+// express that -- a typed field is exactly one shape, and these values are hex
+// OR a 3-tuple OR a 4-tuple OR a gradient, decided per entry and only knowable
+// from the literal (verified: a union rejects a bare hex with "expected union",
+// a named struct rejects `.{200,200,20}` with "expected struct", and a fixed
+// array rejects a 3-tuple when declared `[4]u8`). So these two keys are read
+// from the token stream, and every other key still goes through the typed
+// reader with its unknown-key rejection intact.
+// ---------------------------------------------------------------------------
+
+/// One colour as written. Resolution is a separate step because a tuple and a
+/// hex are different literals that mean the same kind of thing.
+pub const ColorLit = union(enum) {
+    hex: u32,
+    rgb: [3]u8,
+    rgba: [4]u8,
+
+    pub fn toColor(self: ColorLit) elmz.Color {
+        return switch (self) {
+            .hex => |h| elmz.Color.hex(h),
+            .rgb => |v| .{ .r = v[0], .g = v[1], .b = v[2], .a = 255 },
+            .rgba => |v| .{ .r = v[0], .g = v[1], .b = v[2], .a = v[3] },
+        };
+    }
+};
+
+/// What a `.colors` entry may hold: a solid colour, or a gradient.
+pub const ColorEntry = union(enum) {
+    solid: ColorLit,
+    gradient: GradientLit,
+};
+
+/// A gradient as written. Ends are `ColorLit`, so `.to = .{255,0,0}` works
+/// beside `.to = 0xff0000`.
+pub const GradientLit = union(enum) {
+    linear: struct { dir: f32 = 90, from: ?ColorLit = null, to: ?ColorLit = null },
+    radial: struct {
+        center: [2]f32 = .{ 0.5, 0.5 },
+        radius: f32 = 0.5,
+        inner: ?ColorLit = null,
+        outer: ?ColorLit = null,
+    },
+};
+
+/// A name from the file, with where it came from so a collision can be named.
+pub const NamedColor = struct { name: []const u8, value: ColorEntry };
+
+/// A value in `.vars`. Two shapes only: a number, or a string. Anything else is
+/// refused rather than coerced, because a var stands in for a typed field and
+/// guessing which field was meant is how a layout silently changes.
+pub const VarValue = union(enum) {
+    number: f64,
+    text: []const u8,
+};
+
+pub const NamedVar = struct { name: []const u8, value: VarValue };
+
+/// A reference, as written: `.accent` or `.text`. `value()` is the name without
+/// the dot. Kept distinct from a string so `"text"` (data) never resolves as a
+/// palette lookup.
+pub const Ref = struct { name: []const u8 };
+
+/// A style as READ, before resolution. Colours are `.name` references; `size`
+/// and `weight` are a literal or a `.var` name, decided by the token kind.
+pub const StyleFields = struct {
+    color: ?Ref = null,
+    bg: ?Ref = null,
+    border: ?Ref = null,
+    /// A quoted family name, or a `.var` that holds one.
+    font: ?VarOr = null,
+    size: ?VarOr = null,
+    weight: ?VarOr = null,
+    halo: ?Ref = null,
+};
+
+/// A literal or a name, decided by the token kind rather than by guessing:
+/// a number is a number, `.name` is a reference.
+pub const VarOr = union(enum) {
+    literal: f64,
+    name: []const u8,
+    /// A quoted value written inline (a font family), owned by the tables.
+    text: []const u8,
+};
+
+pub const NamedStyle = struct { name: []const u8, value: StyleSpec };
+pub const NamedGradient = struct { name: []const u8, value: GradientLit };
+
+pub const OpenTables = struct {
+    colors: []NamedColor = &.{},
+    gradients: []NamedGradient = &.{},
+    vars: []NamedVar = &.{},
+    styles: []NamedStyle = &.{},
+};
+
+/// Read `.colors` and `.gradients` from the token stream.
+///
+/// Returns names owned by `gpa`. Caller frees with `freeOpenTables`.
+pub fn readOpenTables(gpa: Allocator, src: [:0]const u8, diag: *ThemeDiag) ThemeLoadError!OpenTables {
+    var ast = std.zig.Ast.parse(gpa, src, .zon) catch return error.OutOfMemory;
+    defer ast.deinit(gpa);
+    if (ast.errors.len > 0) {
+        // The typed reader reports syntax errors with a better message; this
+        // pass only needs to not crash. Let it through as empty.
+        return .{};
+    }
+    var w = Walker{ .ast = &ast, .gpa = gpa, .diag = diag };
+    return w.run();
+}
+
+const Walker = struct {
+    ast: *std.zig.Ast,
+    gpa: Allocator,
+    /// Vars encountered so far, so a style can resolve `.weight` at read time.
+    seen_vars: []const NamedVar = &.{},
+    diag: *ThemeDiag,
+    i: u32 = 0,
+
+    fn tok(self: *Walker) std.zig.Token.Tag {
+        return self.ast.tokens.items(.tag)[self.i];
+    }
+    fn slice(self: *Walker) []const u8 {
+        return self.ast.tokenSlice(self.i);
+    }
+    fn advance(self: *Walker) void {
+        if (self.i + 1 < self.ast.tokens.items(.tag).len) self.i += 1;
+    }
+    /// Skip one value, however deeply nested.
+    fn skipValue(self: *Walker) void {
+        var depth: usize = 0;
+        while (self.i < self.ast.tokens.items(.tag).len) {
+            switch (self.tok()) {
+                .l_brace, .l_paren, .l_bracket => depth += 1,
+                .r_brace, .r_paren, .r_bracket => {
+                    depth -= 1;
+                    if (depth == 0) {
+                        self.advance();
+                        return;
+                    }
+                },
+                .comma => if (depth == 0) return,
+                .eof => return,
+                else => {},
+            }
+            self.advance();
+        }
+    }
+
+    fn run(self: *Walker) ThemeLoadError!OpenTables {
+        // errdefer runs in REVERSE order, so the buffer's deinit must be
+        // declared FIRST -- otherwise the contents are freed after the list
+        // that points at them has already been released.
+        var colors: std.ArrayListUnmanaged(NamedColor) = .empty;
+        errdefer colors.deinit(self.gpa);
+        errdefer freeNamedColors(self.gpa, colors.items);
+        var grads: std.ArrayListUnmanaged(NamedGradient) = .empty;
+        errdefer grads.deinit(self.gpa);
+        errdefer freeNamedGradients(self.gpa, grads.items);
+        var vars_list: std.ArrayListUnmanaged(NamedVar) = .empty;
+        errdefer vars_list.deinit(self.gpa);
+        errdefer freeNamedVars(self.gpa, vars_list.items);
+        var styles: std.ArrayListUnmanaged(NamedStyle) = .empty;
+        errdefer styles.deinit(self.gpa);
+        errdefer freeNamedStyles(self.gpa, styles.items);
+
+        while (self.tok() != .eof) {
+            // A top-level field is `.` `identifier` `=`
+            if (self.tok() == .period and self.i + 2 < self.ast.tokens.items(.tag).len) {
+                const name_tok = self.ast.tokens.items(.tag)[self.i + 1];
+                if (name_tok == .identifier) {
+                    const name = self.ast.tokenSlice(self.i + 1);
+                    const eq = self.ast.tokens.items(.tag)[self.i + 2] == .equal;
+                    if (eq) {
+                        if (std.mem.eql(u8, name, "colors")) {
+                            self.i += 3;
+                            try self.readColors(&colors);
+                            continue;
+                        }
+                        if (std.mem.eql(u8, name, "gradients")) {
+                            self.i += 3;
+                            try self.readGradients(&grads);
+                            continue;
+                        }
+                        if (std.mem.eql(u8, name, "vars")) {
+                            self.i += 3;
+                            try self.readVars(&vars_list);
+                            self.seen_vars = vars_list.items;
+                            continue;
+                        }
+                        if (std.mem.eql(u8, name, "styles")) {
+                            self.i += 3;
+                            try self.readStyles(&styles);
+                            continue;
+                        }
+                    }
+                }
+            }
+            self.advance();
+        }
+        return .{
+            .colors = try colors.toOwnedSlice(self.gpa),
+            .gradients = try grads.toOwnedSlice(self.gpa),
+            .vars = try vars_list.toOwnedSlice(self.gpa),
+            .styles = try styles.toOwnedSlice(self.gpa),
+        };
+    }
+
+    fn readColors(self: *Walker, out: *std.ArrayListUnmanaged(NamedColor)) ThemeLoadError!void {
+        if (self.tok() != .period) return;
+        self.advance(); // .
+        if (self.tok() != .l_brace) return;
+        self.advance(); // {
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() == .period) {
+                self.advance();
+                if (self.tok() != .identifier) {
+                    self.skipValue();
+                    continue;
+                }
+                const name = self.slice();
+                self.advance();
+                if (self.tok() != .equal) {
+                    self.skipValue();
+                    continue;
+                }
+                self.advance();
+                // A named entry that yields no value is an ERROR. Treating it as
+                // "skip" is how `.bg = .nope` produced an empty colour table
+                // with no diagnostic: the reader consumed the name, returned
+                // null, and the loop moved on as if the entry were absent.
+                const value = (try self.readColorEntry(name)) orelse {
+                    self.diag.set(".{s} is not a colour", .{name});
+                    return error.Palette;
+                };
+                if (self.dupeName(out.items, name)) |_|
+                    return self.collision(name);
+                const owned = try self.gpa.dupe(u8, name);
+                out.append(self.gpa, .{ .name = owned, .value = value }) catch return error.OutOfMemory;
+                continue;
+            }
+            self.advance();
+        }
+        self.advance(); // }
+    }
+
+    fn readGradients(self: *Walker, out: *std.ArrayListUnmanaged(NamedGradient)) ThemeLoadError!void {
+        if (self.tok() != .period) return;
+        self.advance();
+        if (self.tok() != .l_brace) return;
+        self.advance();
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() == .period) {
+                self.advance();
+                if (self.tok() != .identifier) {
+                    self.skipValue();
+                    continue;
+                }
+                const name = self.slice();
+                self.advance();
+                if (self.tok() != .equal) {
+                    self.skipValue();
+                    continue;
+                }
+                self.advance();
+                if (try self.readGradientLit(name)) |g| {
+                    for (out.items) |e| if (std.mem.eql(u8, e.name, name)) return self.collision(name);
+                    const owned = try self.gpa.dupe(u8, name);
+                    out.append(self.gpa, .{ .name = owned, .value = g }) catch return error.OutOfMemory;
+                }
+                continue;
+            }
+            self.advance();
+        }
+        self.advance();
+    }
+
+    /// `.vars = .{ .weight = 600, .latin_font = "Roboto Flex" }`.
+    ///
+    /// Only numbers and strings, and the shape decides which -- never a guess.
+    /// A var is a stand-in for one typed field, so a value that is neither is an
+    /// error naming the var, not a coercion.
+    fn readVars(self: *Walker, out: *std.ArrayListUnmanaged(NamedVar)) ThemeLoadError!void {
+        if (self.tok() != .period) return;
+        self.advance();
+        if (self.tok() != .l_brace) return;
+        self.advance();
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() != .period) {
+                self.advance();
+                continue;
+            }
+            self.advance();
+            if (self.tok() != .identifier) {
+                self.skipValue();
+                continue;
+            }
+            const name = self.slice();
+            self.advance();
+            if (self.tok() != .equal) {
+                self.skipValue();
+                continue;
+            }
+            self.advance();
+
+            const value: VarValue = switch (self.tok()) {
+                .number_literal => blk: {
+                    const n = std.fmt.parseFloat(f64, self.slice()) catch {
+                        self.diag.set("var \"{s}\" is not a number", .{name});
+                        return error.Palette;
+                    };
+                    self.advance();
+                    break :blk .{ .number = n };
+                },
+                .string_literal => blk: {
+                    const raw = self.slice();
+                    self.advance();
+                    break :blk .{ .text = try self.gpa.dupe(u8, trimQuotes(raw)) };
+                },
+                else => {
+                    self.diag.set("var \"{s}\" must be a number or a string", .{name});
+                    return error.Palette;
+                },
+            };
+            for (out.items) |e| if (std.mem.eql(u8, e.name, name)) return self.collision(name);
+            out.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name), .value = value }) catch return error.OutOfMemory;
+        }
+        self.advance(); // }
+    }
+
+    /// `.styles = .{ .latin = .{ .color = .accent, .weight = .weight } }`.
+    ///
+    /// A value that starts with a dot is a REFERENCE, resolved later; a bare
+    /// string is data (a font family); a number is a literal.
+    fn readStyles(self: *Walker, out: *std.ArrayListUnmanaged(NamedStyle)) ThemeLoadError!void {
+        if (self.tok() != .period) return;
+        self.advance();
+        if (self.tok() != .l_brace) return;
+        self.advance();
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() != .period) {
+                self.advance();
+                continue;
+            }
+            self.advance();
+            if (self.tok() != .identifier) {
+                self.skipValue();
+                continue;
+            }
+            const name = self.slice();
+            self.advance();
+            if (self.tok() != .equal) {
+                self.skipValue();
+                continue;
+            }
+            self.advance();
+            if (self.tok() != .period or !self.nextIsBrace()) {
+                self.skipValue();
+                continue;
+            }
+            self.advance(); // .
+            self.advance(); // {
+
+            var entry: StyleSpec = .{};
+            while (self.tok() != .r_brace and self.tok() != .eof) {
+                if (self.tok() != .period) {
+                    self.advance();
+                    continue;
+                }
+                self.advance();
+                if (self.tok() != .identifier) {
+                    self.skipValue();
+                    continue;
+                }
+                const key = self.slice();
+                self.advance();
+                if (self.tok() != .equal) {
+                    self.skipValue();
+                    continue;
+                }
+                self.advance();
+                try self.readStyleField(&entry, key);
+            }
+            self.advance(); // }
+
+            for (out.items) |e| if (std.mem.eql(u8, e.name, name)) return self.collision(name);
+            out.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name), .value = entry }) catch return error.OutOfMemory;
+        }
+        self.advance(); // }
+    }
+
+    fn readStyleField(self: *Walker, entry: *StyleSpec, key: []const u8) ThemeLoadError!void {
+        // Colours and gradients arrive as `.name`; the resolver downstream
+        // takes the name WITHOUT the dot, so the conversion happens here and
+        // StyleSpec keeps its existing string shape.
+        if (std.mem.eql(u8, key, "color") or std.mem.eql(u8, key, "bg") or
+            std.mem.eql(u8, key, "border"))
+        {
+            const ref = try self.readRef() orelse {
+                self.diag.set("style .{s} must be a reference like .accent", .{key});
+                return error.Palette;
+            };
+            const owned = try self.gpa.dupe(u8, ref.name);
+            if (std.mem.eql(u8, key, "color")) entry.color = owned else if (std.mem.eql(u8, key, "bg")) entry.bg = owned else entry.border = owned;
+            return;
+        }
+        if (std.mem.eql(u8, key, "font")) {
+            switch (self.tok()) {
+                .string_literal => {
+                    const owned = try self.gpa.dupe(u8, trimQuotes(self.slice()));
+                    entry.font = owned;
+                    self.advance();
+                },
+                .period => {
+                    const r = try self.readRef() orelse {
+                        self.diag.set("style .font must be a name or a .var", .{});
+                        return error.Palette;
+                    };
+                    // A `.var` naming a font resolves to the family NOW. A name
+                    // that is missing or holds a number is an error, not a
+                    // literal -- otherwise the file would render "latin_font".
+                    const family = self.varText(r.name) orelse {
+                        self.diag.set("style .font names .{s}, which is not a text var", .{r.name});
+                        return error.Palette;
+                    };
+                    entry.font = try self.gpa.dupe(u8, family);
+                },
+                else => {
+                    self.diag.set("style .font must be a name or a .var", .{});
+                    return error.Palette;
+                },
+            }
+            return;
+        }
+        if (std.mem.eql(u8, key, "size") or std.mem.eql(u8, key, "weight")) {
+            const n: f32 = switch (self.tok()) {
+                .number_literal => blk: {
+                    const v = std.fmt.parseFloat(f32, self.slice()) catch {
+                        self.diag.set("style .{s} is not a number", .{key});
+                        return error.Palette;
+                    };
+                    self.advance();
+                    break :blk v;
+                },
+                .period => blk: {
+                    const r = try self.readRef() orelse {
+                        self.diag.set("style .{s} must be a number or a .var", .{key});
+                        return error.Palette;
+                    };
+                    // A `.var` is resolved at READ time against what has been
+                    // seen so far; a name that is not there is an error, not a
+                    // silent default.
+                    break :blk self.varNumber(r.name) orelse {
+                        self.diag.set("style .{s} names .{s}, which is not a number var", .{ key, r.name });
+                        return error.Palette;
+                    };
+                },
+                else => {
+                    self.diag.set("style .{s} must be a number or a .var", .{key});
+                    return error.Palette;
+                },
+            };
+            if (std.mem.eql(u8, key, "size")) entry.size = n else entry.weight = @intFromFloat(n);
+            return;
+        }
+        self.skipValue();
+    }
+
+    /// The number a `.var` names, or null if it is missing or not a number.
+    fn varNumber(self: *Walker, name: []const u8) ?f32 {
+        for (self.seen_vars) |v| {
+            if (std.mem.eql(u8, v.name, name)) return switch (v.value) {
+                .number => |n| @floatCast(n),
+                .text => null,
+            };
+        }
+        return null;
+    }
+
+    /// The text a `.var` names, or null if it is missing or not text.
+    fn varText(self: *Walker, name: []const u8) ?[]const u8 {
+        for (self.seen_vars) |v| {
+            if (std.mem.eql(u8, v.name, name)) return switch (v.value) {
+                .text => |t| t,
+                .number => null,
+            };
+        }
+        return null;
+    }
+
+    /// True when the token AFTER the current one is `{`. Used to tell `.{`
+    /// (a struct) from a bare `.name` reference without consuming anything.
+    fn nextIsBrace(self: *Walker) bool {
+        const tags = self.ast.tokens.items(.tag);
+        return self.i + 1 < tags.len and tags[self.i + 1] == .l_brace;
+    }
+
+    /// `.name` -> Ref. Returns null and leaves the cursor put if it is not one.
+    fn readRef(self: *Walker) ThemeLoadError!?Ref {
+        if (self.tok() != .period) return null;
+        const save = self.i;
+        self.advance();
+        if (self.tok() != .identifier) {
+            self.i = save;
+            return null;
+        }
+        const name = self.slice();
+        self.advance();
+        return .{ .name = name };
+    }
+
+    fn dupeName(self: *Walker, have: []const NamedColor, name: []const u8) ?void {
+        _ = self;
+        for (have) |e| if (std.mem.eql(u8, e.name, name)) return {};
+        return null;
+    }
+
+    fn collision(self: *Walker, name: []const u8) ThemeLoadError {
+        self.diag.set("name \"{s}\" is defined twice", .{name});
+        return error.Palette;
+    }
+
+    fn readColorEntry(self: *Walker, name: []const u8) ThemeLoadError!?ColorEntry {
+        // A gradient is a container whose first field is a known tag.
+        if (self.tok() == .period) {
+            const save = self.i;
+            self.advance();
+            if (self.tok() == .l_brace) {
+                self.advance();
+                if (self.tok() == .period) {
+                    self.advance();
+                    if (self.tok() == .identifier) {
+                        const tag = self.slice();
+                        if (std.mem.eql(u8, tag, "linear") or std.mem.eql(u8, tag, "radial")) {
+                            self.i = save;
+                            if (try self.readGradientLit(name)) |g| return .{ .gradient = g };
+                            return null;
+                        }
+                    }
+                }
+            }
+            // Restore unconditionally. The probe above advanced past `.{`
+            // looking for a gradient tag; an array colour has the same opening
+            // and no tag, and `readColorLit` needs to see the token from the
+            // start. Restoring only on the tag branch left the reader mid-value,
+            // so `.{ 10, 20 }` produced no colour AND no diagnostic -- the
+            // entry vanished with the error swallowed upstream.
+            self.i = save;
+        }
+        if (try self.readColorLit(name)) |c| return .{ .solid = c };
+        return null;
+    }
+
+    fn readColorLit(self: *Walker, name: []const u8) ThemeLoadError!?ColorLit {
+        // A ZON array is written `.{ ... }`, never `{ ... }` -- consume the
+        // dot so the `.{ 200, 200, 20 }` spelling reaches the brace branch.
+        if (self.tok() == .period) {
+            self.advance();
+            if (self.tok() != .l_brace) return null;
+        }
+        switch (self.tok()) {
+            .number_literal => {
+                const hex = std.fmt.parseInt(u32, self.slice(), 0) catch {
+                    self.diag.set("{s}: .{s} is not a number", .{ "theme.zon", name });
+                    return error.Palette;
+                };
+                self.advance();
+                return .{ .hex = hex };
+            },
+            .l_brace => {
+                self.advance();
+                var nums: [4]f64 = .{ 0, 0, 0, 255 };
+                var n: usize = 0;
+                while (self.tok() != .r_brace and self.tok() != .eof) {
+                    if (self.tok() == .number_literal and n < 4) {
+                        nums[n] = std.fmt.parseFloat(f64, self.slice()) catch {
+                            self.diag.set(".{s} has a value that is not a number", .{name});
+                            return error.Palette;
+                        };
+                        n += 1;
+                    }
+                    self.advance();
+                }
+                self.advance(); // }
+                if (n != 3 and n != 4) {
+                    self.diag.set(".{s} needs 3 or 4 numbers, found {d}", .{ name, n });
+                    return error.Palette;
+                }
+
+                // Magnitude decides the scale, on the WHOLE array: all <= 1.0
+                // is a fraction, any > 1.0 is an 0-255 channel. A mixed array
+                // has no reading that matches what the author meant, so it is
+                // an error rather than a guess.
+                var all_le_one = true;
+                var any_gt_one = false;
+                for (nums[0..n]) |c| {
+                    if (c < 0) {
+                        self.diag.set(".{s} has a negative channel", .{name});
+                        return error.Palette;
+                    }
+                    if (c > 1.0) {
+                        all_le_one = false;
+                        any_gt_one = true;
+                    }
+                }
+                var vals: [4]u8 = .{ 0, 0, 0, 255 };
+                for (nums[0..n], 0..) |c, k| {
+                    // Range FIRST, convert second. `@intFromFloat` on a
+                    // negative panics in debug rather than clamping, so the
+                    // check has to run on the float, not on the result.
+                    const scaled = if (all_le_one) @round(c * 255.0) else @round(c);
+                    if (!std.math.isFinite(scaled) or scaled < 0 or scaled > 255) {
+                        self.diag.set(".{s} channel {d} is out of range", .{ name, c });
+                        return error.Palette;
+                    }
+                    vals[k] = @intFromFloat(scaled);
+                }
+                return switch (n) {
+                    3 => .{ .rgb = .{ vals[0], vals[1], vals[2] } },
+                    4 => .{ .rgba = vals },
+                    else => unreachable,
+                };
+            },
+            else => return null,
+        }
+    }
+
+    fn readGradientLit(self: *Walker, name: []const u8) ThemeLoadError!?GradientLit {
+        _ = name;
+        if (self.tok() != .period) return null;
+        self.advance();
+        if (self.tok() != .l_brace) return null;
+        self.advance();
+        if (self.tok() != .period) {
+            self.skipValue();
+            return null;
+        }
+        self.advance();
+        if (self.tok() != .identifier) return null;
+        const tag = self.slice();
+        const is_linear = std.mem.eql(u8, tag, "linear");
+        const is_radial = std.mem.eql(u8, tag, "radial");
+        if (!is_linear and !is_radial) {
+            self.skipValue();
+            return null;
+        }
+        self.advance();
+        if (self.tok() != .equal) return null;
+        self.advance();
+        if (self.tok() != .period) return null;
+        self.advance();
+        if (self.tok() != .l_brace) return null;
+        self.advance();
+
+        var lin: @TypeOf(@as(GradientLit, undefined).linear) = .{};
+        var rad: @TypeOf(@as(GradientLit, undefined).radial) = .{};
+
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() == .period) {
+                self.advance();
+                if (self.tok() != .identifier) {
+                    self.skipValue();
+                    continue;
+                }
+                const key = self.slice();
+                self.advance();
+                if (self.tok() != .equal) {
+                    self.skipValue();
+                    continue;
+                }
+                self.advance();
+                if (std.mem.eql(u8, key, "dir")) {
+                    if (self.tok() == .number_literal) {
+                        lin.dir = std.fmt.parseFloat(f32, self.slice()) catch lin.dir;
+                        self.advance();
+                    } else self.skipValue();
+                } else if (std.mem.eql(u8, key, "radius")) {
+                    if (self.tok() == .number_literal) {
+                        rad.radius = std.fmt.parseFloat(f32, self.slice()) catch rad.radius;
+                        self.advance();
+                    } else self.skipValue();
+                } else if (std.mem.eql(u8, key, "center")) {
+                    if (self.tok() == .period) {
+                        self.advance();
+                        if (self.tok() == .l_brace) {
+                            self.advance();
+                            var vals: [2]f32 = .{ 0.5, 0.5 };
+                            var n: usize = 0;
+                            while (self.tok() != .r_brace and self.tok() != .eof) {
+                                if (self.tok() == .number_literal and n < 2) {
+                                    vals[n] = std.fmt.parseFloat(f32, self.slice()) catch 0;
+                                    n += 1;
+                                }
+                                self.advance();
+                            }
+                            self.advance();
+                            if (n == 2) rad.center = vals;
+                        }
+                    }
+                } else if (std.mem.eql(u8, key, "from")) {
+                    lin.from = try self.readColorLit(key);
+                } else if (std.mem.eql(u8, key, "to")) {
+                    lin.to = try self.readColorLit(key);
+                } else if (std.mem.eql(u8, key, "inner")) {
+                    rad.inner = try self.readColorLit(key);
+                } else if (std.mem.eql(u8, key, "outer")) {
+                    rad.outer = try self.readColorLit(key);
+                } else {
+                    self.skipValue();
+                }
+                continue;
+            }
+            self.advance();
+        }
+        self.advance(); // close the spec `.{ ... }`
+        // Consume the gradient's own closing brace so the caller's loop sees
+        // the comma after it, not a `}` that ends the table.
+        if (self.tok() == .r_brace) self.advance();
+        return if (is_linear) .{ .linear = lin } else .{ .radial = rad };
+    }
+};
+
+/// A string literal's token includes its quotes; the value is what is inside.
+fn trimQuotes(raw: []const u8) []const u8 {
+    if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') return raw[1 .. raw.len - 1];
+    return raw;
+}
+
+fn freeNamedColors(gpa: Allocator, items: []NamedColor) void {
+    for (items) |e| gpa.free(e.name);
+}
+fn freeNamedGradients(gpa: Allocator, items: []NamedGradient) void {
+    for (items) |e| gpa.free(e.name);
+}
+fn freeNamedVars(gpa: Allocator, items: []NamedVar) void {
+    for (items) |e| {
+        gpa.free(e.name);
+        switch (e.value) {
+            .text => |t| gpa.free(t),
+            else => {},
+        }
+    }
+}
+fn freeNamedStyles(gpa: Allocator, items: []NamedStyle) void {
+    for (items) |e| {
+        gpa.free(e.name);
+        if (e.value.font) |f| gpa.free(f);
+        if (e.value.color) |c| gpa.free(c);
+        if (e.value.bg) |c| gpa.free(c);
+        if (e.value.border) |c| gpa.free(c);
+    }
+}
+pub fn freeOpenTables(gpa: Allocator, t: *OpenTables) void {
+    freeNamedColors(gpa, t.colors);
+    freeNamedGradients(gpa, t.gradients);
+    freeNamedVars(gpa, t.vars);
+    freeNamedStyles(gpa, t.styles);
+    gpa.free(t.colors);
+    gpa.free(t.gradients);
+    gpa.free(t.vars);
+    gpa.free(t.styles);
+    t.* = .{};
 }
 
 /// Is `name` one of the compiled-in roles, ignoring any the file added?
@@ -869,57 +2012,6 @@ test "the shipped defaults resolve to the compiled palette" {
     try std.testing.expect(std.meta.eql(@as(Theme, .{}), loaded.theme));
 }
 
-test "an override replaces exactly one role" {
-    // Eight digits is RGBA. `rgbHex` on the same number would have read the LOW
-    // three bytes and produced a plausible, wrong blue-green -- no error, no
-    // warning, just a different colour than the file asked for.
-    {
-        var diag: ThemeDiag = .{};
-        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xff000080 } } }", Theme{}, &diag);
-        try std.testing.expectEqual(@as(u8, 0xff), loaded.theme.accent.r);
-        try std.testing.expectEqual(@as(u8, 0x00), loaded.theme.accent.g);
-        try std.testing.expectEqual(@as(u8, 0x00), loaded.theme.accent.b);
-        try std.testing.expectEqual(@as(u8, 0x80), loaded.theme.accent.a);
-    }
-    // Six digits still means opaque, so the common case did not shift.
-    {
-        var diag: ThemeDiag = .{};
-        const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag);
-        try std.testing.expectEqual(@as(u8, 255), loaded.theme.accent.a);
-        try std.testing.expectEqual(@as(u8, 0x89), loaded.theme.accent.r);
-    }
-
-    const src = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0xff0000 } } }";
-    var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
-    try std.testing.expect(std.meta.eql(Color.rgbHex(0xff0000), loaded.theme.accent));
-    try std.testing.expect(std.meta.eql((Theme{}).bg, loaded.theme.bg));
-}
-
-test "a theme names a font, and the name survives the parse being freed" {
-    var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .font = \"DejaVu Sans\" } }", Theme{}, &diag);
-    // A slice into the parse result would dangle the moment it was freed, so
-    // this asserts the COPY, and the allocator would report a use-after-free
-    // rather than a wrong string if it were borrowed.
-    try std.testing.expectEqualStrings("DejaVu Sans", loaded.fontName().?);
-    // No font named is not a fault: it means keep whatever is attached.
-    var diag2: ThemeDiag = .{};
-    const bare = try loadTheme(struct {}, std.testing.allocator, "theme.zon", ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x89b4fa } } }", Theme{}, &diag2);
-    try std.testing.expect(bare.fontName() == null);
-}
-
-test "a font name long enough to be a path is refused by name" {
-    var diag: ThemeDiag = .{};
-    const long = "x" ** (font_name_max + 1);
-    const src = try std.fmt.allocPrint(std.testing.allocator, ".{{ .version = 3, .theme = .{{ .font = \"{s}\" }} }}", .{long});
-    defer std.testing.allocator.free(src);
-    const srcz = try std.testing.allocator.dupeZ(u8, src);
-    defer std.testing.allocator.free(srcz);
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", srcz, Theme{}, &diag));
-    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "is that a path") != null);
-}
-
 test "a gradient resolves to the fill a theme could never express before" {
     const src =
         \\.{ .version = 3, .theme = .{ .gradients = .{
@@ -1015,60 +2107,6 @@ test "a radial centre is a fraction of the box, not a pixel" {
     try std.testing.expectEqual(@as(f32, 0.5), mid.gradients.panel.?.radial.center[0]);
 }
 
-test "an omitted gradient end inherits the role colour" {
-    // The drift this removes: a gradient that spells both ends holds a second
-    // copy of the palette, so editing `.colors` leaves it behind. Naming only
-    // the end that differs keeps it tied to the palette.
-    const only_to =
-        \\.{ .version = 3, .theme = .{
-        \\    .colors = .{ .accent = 0x112233 },
-        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = 0, .to = 0xffffff } } },
-        \\} }
-    ;
-    var diag: ThemeDiag = .{};
-    const a = try loadTheme(struct {}, std.testing.allocator, "theme.zon", only_to, Theme{}, &diag);
-    try std.testing.expect(std.meta.eql(
-        a.gradients.accent.?,
-        elmz.Fill.angled(0, Color.rgbHex(0x112233), Color.rgbHex(0xffffff)),
-    ));
-
-    // Same gradient, different palette role: the inherited end moves with it.
-    const other =
-        \\.{ .version = 3, .theme = .{
-        \\    .colors = .{ .accent = 0x445566 },
-        \\    .gradients = .{ .accent = .{ .linear = .{ .dir = 0, .to = 0xffffff } } },
-        \\} }
-    ;
-    var diag2: ThemeDiag = .{};
-    const b = try loadTheme(struct {}, std.testing.allocator, "theme.zon", other, Theme{}, &diag2);
-    try std.testing.expect(std.meta.eql(
-        b.gradients.accent.?,
-        elmz.Fill.angled(0, Color.rgbHex(0x445566), Color.rgbHex(0xffffff)),
-    ));
-
-    // A radial with nothing named is the role colour at both ends: legal, and
-    // visibly a no-op rather than an error.
-    const bare =
-        \\.{ .version = 3, .theme = .{
-        \\    .gradients = .{ .panel = .{ .radial = .{ .radius = 0.4 } } },
-        \\} }
-    ;
-    var diag3: ThemeDiag = .{};
-    const c = try loadTheme(struct {}, std.testing.allocator, "theme.zon", bare, Theme{}, &diag3);
-    // The radius came from the file, so the expectation has to carry it too --
-    // comparing against the default 0.5 is the mistake this assertion made
-    // first, and it failed for that reason rather than because inheritance broke.
-    var expected = elmz.Fill.radialFill((Theme{}).panel, (Theme{}).panel);
-    expected.radial.radius = 0.4;
-    try std.testing.expect(std.meta.eql(c.gradients.panel.?, expected));
-}
-
-test "a gradient direction typo is a parse error, not a fallback" {
-    const src = ".{ .version = 3, .theme = .{ .gradients = .{ .bg = .{ .linear = .{ .dir = .sideways, .from = 0, .to = 1 } } } } }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
-}
-
 test "a theme file cannot compute anything" {
     // The values-only property, stated where a regression would be caught: a
     // theme file that tried to call or import would be rejected by the parser
@@ -1084,105 +2122,18 @@ test "a theme file cannot compute anything" {
     }
 }
 
-test "a file whose interaction roles collide is rejected" {
-    const src = ".{ .version = 3, .theme = .{ .colors = .{ .hover = 0x45475a } } }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(
-        error.Palette,
-        loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag),
-    );
-    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "DuplicateRole") != null);
-}
-
-test "a bad value names the file, line and column" {
-    const src = ".{ .version = 3, .theme = .{ .colors = .{ .bg = \"blue\" } } }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
-    try std.testing.expect(std.mem.startsWith(u8, diag.text(), "theme.zon 1:"));
-    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "expected type") != null);
-}
-
-test "an unknown key in the theme section is rejected" {
+test "an unknown key in .colors becomes a custom role" {
+    // Deliberately NOT an error. The file may invent role names, and rejecting
+    // an unused one would cost a band over something harmless. A role nothing
+    // references is a warning-shaped concern at most, and not one being paid
+    // for right now.
     const src = ".{ .version = 3, .theme = .{ .colors = .{ .bgx = 0xff0000 } } }";
     var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
-    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "bgx") != null);
-}
-
-test "an unknown key in the gradients section is rejected" {
-    // `.gradients` is a typed table, not a free catalogue: a misspelled role
-    // would otherwise sit in the file looking like it did something.
-    const src = ".{ .version = 3, .theme = .{ .gradients = .{ .accentt = .{ .linear = .{ .from = 0, .to = 1 } } } } }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
-    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "accentt") != null);
-}
-
-test "the v1 shape is refused rather than half-read" {
-    // v1 was flat: `.theme = .{ .bg = ... }`. Loaded as v2 it would parse and
-    // produce a palette where every role silently reverted to the default,
-    // which looks like "my theme did nothing" rather than "my theme is old".
-    const v1 = ".{ .version = 1, .theme = .{ .bg = 0x112233 } }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Version, loadTheme(struct {}, std.testing.allocator, "theme.zon", v1, Theme{}, &diag));
-    try std.testing.expectEqualStrings("theme.zon: version 1 is not 3", diag.text());
-
-    // A v3 file that keeps the v1 nesting is a parse error naming the key it
-    // does not recognise, not a silent no-op.
-    const misnested = ".{ .version = 3, .theme = .{ .bg = 0x112233 } }";
-    var diag2: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", misnested, Theme{}, &diag2));
-    try std.testing.expect(std.mem.indexOf(u8, diag2.text(), "bg") != null);
-}
-
-test "an unknown top-level section is rejected" {
-    const src = ".{ .version = 3, .themes = .{} }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
-}
-
-test "an app tier nobody declared is refused, and named" {
-    // No lenient mode: the tier is for app writers, so an app that wants it
-    // declares a struct. Waving unknown keys through would cost the theme its
-    // typo detection, because `ignore_unknown_fields` is file-wide.
-    const src = ".{ .version = 3, .theme = .{}, .vars = .{ .outer_box_border = 4 } }";
-    var diag: ThemeDiag = .{};
-    try std.testing.expectError(error.Parse, loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag));
-    // The offending KEY is named, not just the section: "unexpected field
-    // 'outer_box_border'" tells the writer to declare it, which is the whole
-    // remedy.
-    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "outer_box_border") != null);
-}
-
-test "an app that declares its tokens gets them, strictly" {
-    const App = struct { outer_box_border: u8 = 0, hero: ?u32 = null };
-    const src = ".{ .version = 3, .theme = .{}, .vars = .{ .outer_box_border = 4, .hero = 0xccddff } }";
-    var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(App, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
-    try std.testing.expectEqual(4, loaded.vars.outer_box_border);
-    try std.testing.expectEqual(@as(?u32, 0xccddff), loaded.vars.hero);
-
-    // Claiming it means it is checked: a typo in the app tier is an error.
-    const typo = ".{ .version = 3, .theme = .{}, .vars = .{ .outer_box_bordr = 4 } }";
-    try std.testing.expectError(error.Parse, loadTheme(App, std.testing.allocator, "theme.zon", typo, Theme{}, &diag));
-}
-
-test "an app token cannot shadow a library role" {
-    const src = ".{ .version = 3, .theme = .{ .colors = .{ .bg = 0x112233 } }, .vars = .{ .bg = 0x445566 } }";
-    const App = struct { bg: ?u32 = null };
-    var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(App, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
-    try std.testing.expect(std.meta.eql(Color.rgbHex(0x112233), loaded.theme.bg));
-    try std.testing.expectEqual(@as(?u32, 0x445566), loaded.vars.bg);
-}
-
-test "the app tier is optional" {
-    const App = struct { hero: ?u32 = null };
-    const src = ".{ .version = 3, .theme = .{ .colors = .{ .accent = 0x112233 } } }";
-    var diag: ThemeDiag = .{};
-    const loaded = try loadTheme(App, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
-    try std.testing.expect(std.meta.eql(Color.rgbHex(0x112233), loaded.theme.accent));
-    try std.testing.expectEqual(@as(?u32, null), loaded.vars.hero);
+    var loaded = try loadTheme(struct {}, std.testing.allocator, "theme.zon", src, Theme{}, &diag);
+    defer freeCustom(std.testing.allocator, &loaded.theme);
+    defer freeStyles(std.testing.allocator, &loaded.styles);
+    try std.testing.expectEqual(@as(usize, 1), loaded.theme.custom.len);
+    try std.testing.expectEqualStrings("bgx", loaded.theme.custom[0].name);
 }
 
 test "the palette guard names the offending pair" {
@@ -1209,9 +2160,9 @@ test "a custom colour is a role, not a parse-only name" {
         \\.{ .version = 3,
         \\   .theme = .{ .colors = .{
         \\       .bg = 0x101010,
-        \\       .roles = .{ .{ .name = "danger", .hex = 0xeba0ac } },
+        \\       .danger = 0xeba0ac,
         \\   } },
-        \\   .styles = .{ .{ .name = "warn", .spec = .{ .bg = "danger" } } },
+        \\   .styles = .{ .warn = .{ .bg = .danger } },
         \\}
     ;
     var loaded = try loadTheme(struct {}, gpa, "custom.zon", src, .{}, &diag);
@@ -1234,4 +2185,248 @@ test "a custom colour is a role, not a parse-only name" {
     // return, so a borrowed slice would dangle. Reading it here after the free
     // is the observation that proves it.
     try std.testing.expectEqualStrings("danger", loaded.theme.custom[0].name);
+}
+
+test "a Ui with no theme file still resolves the built-in styles" {
+    // The failure this prevents: `styles` was null until a file supplied one,
+    // so a bare Ui could not find `heading`, and every scripted label fell to
+    // the primary face -- tofu for Arabic and CJK, with nothing reporting why.
+    const M = void;
+    var ui: elmz.Ui(M) = .init(std.testing.allocator);
+    defer ui.deinit();
+
+    try std.testing.expect(ui.styleByName("heading") != null);
+    try std.testing.expect(ui.styleByName("card") != null);
+    for ([_][]const u8{ "latin", "arabic", "thai", "chinese", "japanese", "korean" }) |n| {
+        try std.testing.expect(ui.styleByName(n) != null);
+    }
+    try std.testing.expect(ui.styleByName("nope") == null);
+}
+
+test "colour values: every free-form spelling" {
+    const cases = [_]struct { src: []const u8, want: u32 }{
+        .{ .src = "0x1e1e2e", .want = 0x1e1e2eff },
+        .{ .src = "0xffeeddcc", .want = 0xffeeddcc },
+        .{ .src = ".{ 200, 200, 20 }", .want = 0xc8c814ff },
+        .{ .src = ".{ 200, 200, 20, 128 }", .want = 0xc8c81480 },
+        .{ .src = ".{ 200.0, 200.0, 20.0 }", .want = 0xc8c814ff },
+        .{ .src = ".{ 1.0, 0.5, 0.0 }", .want = 0xff8000ff },
+        .{ .src = ".{ 1.0, 1.0, 1.0 }", .want = 0xffffffff },
+        .{ .src = ".{ 0.0, 0.0, 0.0, 1.0 }", .want = 0x000000ff },
+    };
+    const gpa = std.testing.allocator;
+    inline for (cases) |c| {
+        var ast = try std.zig.Ast.parse(gpa, c.src ++ "", .zon);
+        defer ast.deinit(gpa);
+        var zoir = try std.zig.ZonGen.generate(gpa, ast, .{ .parse_str_lits = false });
+        defer zoir.deinit(gpa);
+        const got = try ColorValue.read(ast, zoir, .root);
+        try std.testing.expectEqual(c.want, @as(u32, got.r) << 24 | @as(u32, got.g) << 16 | @as(u32, got.b) << 8 | got.a);
+    }
+}
+
+test "colour values: mixed floats are refused, not guessed" {
+    const gpa = std.testing.allocator;
+    var ast = try std.zig.Ast.parse(gpa, ".{ 1.0, 0.5, 200 }" ++ "", .zon);
+    defer ast.deinit(gpa);
+    var zoir = try std.zig.ZonGen.generate(gpa, ast, .{ .parse_str_lits = false });
+    defer zoir.deinit(gpa);
+    try std.testing.expectError(error.ColourMixedFloats, ColorValue.read(ast, zoir, .root));
+}
+
+const user_file_src =
+    \\.{
+    \\    .version = 3,
+    \\    .theme = .{
+    \\        .colors = .{
+    \\            .bg = 0x1e1e2e78,
+    \\            .panel = .{128,128,128},
+    \\            .border = .{200,200,20,167},
+    \\            .text = .{ 0.6,0.5,0.4,0.3 },
+    \\        },
+    \\        .gradients = .{
+    \\            .accent = .{ .linear = .{ .dir = 135, .to = 0xf3c0e5 } },
+    \\            .gradient1 = .{ .radial = .{ .inner = 0x77475a, .center = .{ 0.25, 0.15 }, .radius = 0.7 } },
+    \\        },
+    \\        .vars = .{ .weight = 600, .latin_font = "Roboto Flex" },
+    \\        .styles = .{
+    \\            .latin = .{ .color = .accent, .font = .latin_font, .weight = .weight },
+    \\            .arabic = .{ .color = .gradient1, .font = "Noto Sans Arabic" },
+    \\            .thai = .{ .color = .text, .font = "Noto Sans Thai" },
+    \\            .chinese = .{ .color = .text, .font = "Noto Sans CJK SC" },
+    \\            .japanese = .{ .color = .text, .font = "Noto Sans CJK JP" },
+    \\            .korean = .{ .color = .text, .font = "Noto Sans CJK KR" },
+    \\        },
+    \\    },
+    \\}
+;
+
+fn findColor(t: OpenTables, name: []const u8) ?ColorEntry {
+    for (t.colors) |c| if (std.mem.eql(u8, c.name, name)) return c.value;
+    return null;
+}
+fn findGradient(t: OpenTables, name: []const u8) ?GradientLit {
+    for (t.gradients) |g| if (std.mem.eql(u8, g.name, name)) return g.value;
+    return null;
+}
+fn findStyle(t: OpenTables, name: []const u8) ?StyleSpec {
+    for (t.styles) |s| if (std.mem.eql(u8, s.name, name)) return s.value;
+    return null;
+}
+
+test "a whole file: every section is read, in any order" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var tables = try readOpenTables(gpa, user_file_src, &diag);
+    defer freeOpenTables(gpa, &tables);
+
+    try std.testing.expectEqual(@as(usize, 4), tables.colors.len);
+    try std.testing.expectEqual(@as(usize, 2), tables.gradients.len);
+    try std.testing.expectEqual(@as(usize, 2), tables.vars.len);
+    try std.testing.expectEqual(@as(usize, 6), tables.styles.len);
+}
+
+test "a whole file: `.arrays are read, not dropped" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var tables = try readOpenTables(gpa, user_file_src, &diag);
+    defer freeOpenTables(gpa, &tables);
+
+    // A ZON array is written `.{\n`, never `{`. Missing the leading dot silently
+    // dropped every array colour, which is the defect these three pin.
+    try std.testing.expectEqual(ColorLit{ .rgb = .{ 128, 128, 128 } }, findColor(tables, "panel").?.solid);
+    try std.testing.expectEqual(ColorLit{ .rgba = .{ 200, 200, 20, 167 } }, findColor(tables, "border").?.solid);
+    try std.testing.expectEqual(@as(u32, 0x1e1e2e78), findColor(tables, "bg").?.solid.hex);
+}
+
+test "a whole file: floats scale by magnitude" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var tables = try readOpenTables(gpa, user_file_src, &diag);
+    defer freeOpenTables(gpa, &tables);
+
+    // All <= 1.0 is a fraction: 0.6*255 rounds to 153, 0.3*255 to 77.
+    try std.testing.expectEqual(ColorLit{ .rgba = .{ 153, 128, 102, 77 } }, findColor(tables, "text").?.solid);
+}
+
+test "a whole file: two gradients survive" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var tables = try readOpenTables(gpa, user_file_src, &diag);
+    defer freeOpenTables(gpa, &tables);
+
+    // The gradient reader used to leave the wrapper's closing brace behind, so
+    // the table stopped after the first entry.
+    try std.testing.expect(findGradient(tables, "accent") != null);
+    try std.testing.expect(findGradient(tables, "gradient1") != null);
+    try std.testing.expectEqual(@as(f32, 135), findGradient(tables, "accent").?.linear.dir);
+}
+
+test "a whole file: a style resolves through .vars" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var tables = try readOpenTables(gpa, user_file_src, &diag);
+    defer freeOpenTables(gpa, &tables);
+
+    const latin = findStyle(tables, "latin").?;
+    try std.testing.expectEqualStrings("accent", latin.color.?);
+    // `.font = .latin_font` is a VAR, not a family: it must read as the family
+    // the var holds, or the file would render the literal name.
+    try std.testing.expectEqualStrings("Roboto Flex", latin.font.?);
+    // `.weight = .weight` is the var, not the literal string.
+    try std.testing.expectEqual(@as(u16, 600), latin.weight.?);
+
+    const arabic = findStyle(tables, "arabic").?;
+    try std.testing.expectEqualStrings("gradient1", arabic.color.?);
+    try std.testing.expectEqualStrings("Noto Sans Arabic", arabic.font.?);
+    try std.testing.expectEqual(@as(?u16, null), arabic.weight);
+}
+
+test "a missing var is an error, not a literal" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    const src =
+        \\.{
+        \\    .theme = .{
+        \\        .styles = .{ .a = .{ .weight = .nope } },
+        \\    },
+        \\}
+    ;
+    const r = readOpenTables(gpa, src, &diag);
+    try std.testing.expectError(error.Palette, r);
+    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "nope") != null);
+}
+
+test "readColorLit: a truncated array is an error, not a short colour" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    // A two-number array has no reading: 3 is rgb, 4 is rgba. The fixture is
+    // otherwise well-formed, because the point is the channel count, not a
+    // truncated file -- an unbalanced file bails before reaching the entry and
+    // would pass this test while proving nothing.
+    const src =
+        \\.{ .version = 3, .theme = .{ .colors = .{ .bg = .{ 10, 20 } } } }
+    ;
+    const r = readOpenTables(gpa, src, &diag);
+    try std.testing.expectError(error.Palette, r);
+}
+
+test "readColorLit: a dot that is not an array is not a colour" {
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    // `.nope` is an identifier, not a colour. It must be refused by the reader
+    // rather than handing back a half-consumed token.
+    const src =
+        \\.{ .version = 3, .theme = .{ .colors = .{ .bg = .nope } } }
+    ;
+    try std.testing.expectError(error.Palette, readOpenTables(gpa, src, &diag));
+}
+
+test "the shipped defaults carry no tagged colour form" {
+    // The real check is behavioural, not textual: the file loads and every role
+    // resolves. A file still in the old `.{ .hex = ... }` shape would fail to
+    // parse, so this pins the format without grepping prose that explains it.
+    var diag: ThemeDiag = .{};
+    var loaded = try loadTheme(struct {}, std.testing.allocator, "theme.defaults.zon", defaults_zon, Theme{}, &diag);
+    defer freeCustom(std.testing.allocator, &loaded.theme);
+    defer freeStyles(std.testing.allocator, &loaded.styles);
+
+    // `.bg` is the first role in the file; if the tagged form survived, this is
+    // where a zero would show up.
+    try std.testing.expectEqual(@as(u8, 0x1e), loaded.theme.bg.r);
+    try std.testing.expectEqual(@as(u8, 0xff), loaded.theme.bg.a);
+}
+
+test "vars resolve from .theme.vars, not the root" {
+    // The regression this pins: `.vars` lives INSIDE `.theme`. A probe at the
+    // root found nothing, so `vars` was always the default while the file
+    // reported as loaded -- every var-driven style silently resolved to null.
+    const App = struct {
+        weight: ?u16 = null,
+        latin_font: ?[]const u8 = null,
+    };
+    const src =
+        \\.{
+        \\    .version = 3,
+        \\    .theme = .{
+        \\        .colors = .{ .bg = 0x1e1e2eaa },
+        \\        .vars = .{ .weight = 600, .latin_font = "Roboto Flex" },
+        \\        .styles = .{
+        \\            .latin = .{ .font = .latin_font, .weight = .weight },
+        \\        },
+        \\    },
+        \\}
+    ;
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var loaded = try loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag);
+    defer freeLoaded(App, gpa, &loaded);
+
+    try std.testing.expectEqual(@as(?u16, 600), loaded.vars.weight);
+    try std.testing.expectEqualStrings("Roboto Flex", loaded.vars.latin_font.?);
+
+    // And the style sees the RESOLVED value, not the var name.
+    try std.testing.expectEqual(@as(usize, 1), loaded.styles.len);
+    try std.testing.expectEqualStrings("Roboto Flex", loaded.styles[0].spec.font.?);
+    try std.testing.expectEqual(@as(?u16, 600), loaded.styles[0].spec.weight);
 }
