@@ -947,12 +947,15 @@ pub fn loadTheme(
         var made: usize = 0;
         errdefer for (cf[0..made]) |c| gpa.free(c.name);
         for (built.theme.gradients.roles, 0..) |g, i| {
-            // A gradient for a name no role defines would resolve against the
-            // `text` fallback and draw a ramp nobody asked for.
-            if (!isRole(g.name, theme.custom)) {
-                diag.set("{s}: .gradients names \"{s}\", which is not a role", .{ name, g.name });
-                return error.Style;
-            }
+            // A gradient name is the name being DEFINED. It can never be an
+            // existing role, so rejecting non-role names here rejected every
+            // custom gradient by construction -- and rejecting one key discards
+            // the whole file, colours and vars included. The file is the
+            // extension point; a name written in `.gradients` may be used by
+            // styles and by other gradients.
+            // An omitted end inherits `roleColor(theme, <own name>)`, which for
+            // a name with no `.colors` entry is `text` -- the documented
+            // fallback, not an accident.
             cf[i] = .{
                 .name = gpa.dupe(u8, g.name) catch return error.OutOfMemory,
                 .fill = g.gradient.resolve(elmz.roleColor(theme, g.name)),
@@ -976,7 +979,9 @@ pub fn loadTheme(
     for (built.styles) |entry| {
         inline for (.{ "bg", "color", "border" }) |slot| {
             if (@field(entry.spec, slot)) |ref| {
-                if (!isRole(ref, theme.custom)) {
+                if (!isRole(ref, theme.custom) and
+                    !isGradientName(ref, built.theme.gradients.roles))
+                {
                     diag.set("{s}: style .{s} .{s} names \"{s}\", which is not a role", .{ name, entry.name, slot, ref });
                     return error.Style;
                 }
@@ -1072,12 +1077,24 @@ fn freeFileType(comptime App: type, gpa: Allocator, f: *ThemeFileType(App)) void
     if (f.styles.len > 0) freeStyles(gpa, &f.styles);
 }
 
+/// Free the custom gradient table `loadTheme` built.
+///
+/// Each entry owns a duped `name`; the slice owns the entries. Safe to call
+/// twice, and safe on a table the loader never filled.
+pub fn freeGradients(gpa: Allocator, grads: *Gradients) void {
+    for (grads.custom) |c| gpa.free(c.name);
+    if (grads.custom.len > 0) gpa.free(grads.custom);
+    grads.custom = &.{};
+}
+
 /// Free everything `loadTheme` handed back. The vars are OWNED by the caller
 /// (transferred, not copied), so freeing the styles alone leaks one allocation
-/// per string var -- which is exactly the leak the suite reported.
+/// per string var -- which is exactly the leak the suite reported. The custom
+/// gradient table is owned the same way and leaked the same way.
 pub fn freeLoaded(comptime App: type, gpa: Allocator, loaded: *Loaded(App)) void {
     freeStyles(gpa, &loaded.styles);
     freeVars(App, gpa, &loaded.vars);
+    freeGradients(gpa, &loaded.gradients);
 }
 
 /// Deep-copy the string fields of an app's vars struct into `gpa`.
@@ -1102,7 +1119,7 @@ fn dupeVars(comptime App: type, gpa: Allocator, vars: *App) ThemeLoadError!void 
 }
 
 /// Free what `dupeVars` allocated. Safe on a struct with no string fields.
-fn freeVars(comptime App: type, gpa: Allocator, vars: *App) void {
+pub fn freeVars(comptime App: type, gpa: Allocator, vars: *App) void {
     const info = @typeInfo(App);
     if (info != .@"struct") return;
     inline for (info.@"struct".fields) |f| {
@@ -1924,6 +1941,18 @@ fn isRole(ref: []const u8, extra: []const Theme.CustomColor) bool {
         if (std.mem.eql(u8, ref, f.name)) return true;
     }
     for (extra) |c| if (std.mem.eql(u8, c.name, ref)) return true;
+    return false;
+}
+
+/// A name the file gave a `.gradients` entry. Those names are data, not schema,
+/// so a style may paint itself with one (`.color = .gradient1`) and a gradient
+/// may inherit one end from another. Without this a file that defines a gradient
+/// and then uses it is rejected whole, so nothing in it applies at all.
+fn isGradientName(
+    ref: []const u8,
+    grads: []const CustomGradient,
+) bool {
+    for (grads) |g| if (std.mem.eql(u8, g.name, ref)) return true;
     return false;
 }
 

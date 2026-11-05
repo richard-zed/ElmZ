@@ -2,3 +2,4 @@
 zig-out/
 *.png
 zig-pkg/
+deps-cedar

@@ -119,7 +119,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .width = 74,
         .style = .{
             .bg = elmz.solid(th.accent),
-            .fg = elmz.solid(th.bg),
+            .color = elmz.solid(th.bg),
             .radius = 10,
             .halo = .{ .color = glow_color, .blur = 14, .spread = 2, .mode = .glow, .quality = .sdf },
         },
@@ -136,7 +136,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         .width = 74,
         .style = .{
             .bg = elmz.solid(th.accent),
-            .fg = elmz.solid(th.bg),
+            .color = elmz.solid(th.bg),
             .radius = 10,
             // Same numbers, different path: one stencil built once and blitted,
             // instead of a distance field evaluated per pixel every frame.
@@ -168,7 +168,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             .width = 124,
             .style = .{
                 .bg = elmz.solid(th.control),
-                .fg = elmz.solid(th.text),
+                .color = elmz.solid(th.text),
                 .radius = 10,
                 // Identical in every field except `mode`, so a difference on
                 // screen is the cut and nothing else.

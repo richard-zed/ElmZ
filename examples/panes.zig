@@ -98,7 +98,7 @@ fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *
             .pad = 10,
             .radius = 8,
             .bg = elmz.solid(if (active) ui.theme.selected else ui.theme.control),
-            .fg = elmz.solid(if (active) ui.theme.text else ui.theme.text_muted),
+            .color = elmz.solid(if (active) ui.theme.text else ui.theme.text_muted),
         },
     });
     // Focus is a plain field, not a builder option: it only matters to Tab,
@@ -124,7 +124,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const accent_fill = ui.gradients.get("accent") orelse elmz.Fill.hgrad(th.accent, elmz.Color.rgbHex(0xf5c2e7));
 
     // -- header ------------------------------------------------------------
-    const title = ui.text(.{ .label = "panes", .size = 30, .style = .{ .fg = accent_fill } });
+    const title = ui.text(.{ .label = "panes", .size = 30, .style = .{ .color = accent_fill } });
     const sub = ui.text(.{
         .label = "scroll, tabs, one face at four sizes, and a popup that dismisses on an outside click",
         .size = 12,
@@ -160,7 +160,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 
     const primary = ui.button(.{ .label = "Open menu", .msg = .menu_open, .key = 4, .width = 200, .style = .{
         .bg = accent_fill,
-        .fg = elmz.solid(th.text),
+        .color = elmz.solid(th.text),
     } });
     const inert = ui.button(.{ .label = "Unavailable", .msg = .pick, .key = 5, .width = 200, .disabled = true });
 

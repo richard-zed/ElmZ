@@ -61,7 +61,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
         // "dimmer" fill was either invisible (mantle, 1.07) or identical to the
         // normal row (surface0, 1.00). The edge border keeps the row legible.
         const label = ui.text(.{ .label = item.label, .size = 14 });
-        if (item.done) label.fg = elmz.solid(ui.theme.text_muted);
+        if (item.done) label.color = elmz.solid(ui.theme.text_muted);
 
         const row = ui.row(.{ .children = &.{ mark, label }, .gap = 10, .on_press = .{ .toggle = i }, .style = .{ .pad = 10, .bg = elmz.solid(if (item.done) ui.theme.bg else ui.theme.panel), .border = elmz.solid(ui.theme.border) } });
         rows[i] = row;

@@ -40,7 +40,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const pink = elmz.Color.rgbHex(0xf5c2e7);
     const green = elmz.Color.rgbHex(0xa6e3a1);
 
-    const title = ui.text(.{ .label = "fills", .size = 22, .style = .{ .fg = elmz.Fill.hgrad(th.accent, pink) } });
+    const title = ui.text(.{ .label = "fills", .size = 22, .style = .{ .color = elmz.Fill.hgrad(th.accent, pink) } });
 
     // -- backgrounds -------------------------------------------------------
     const vert = ui.rect(.{ .width = 160, .height = 90, .style = .{ .bg = elmz.Fill.vgrad(th.accent, th.bg), .radius = 10 } });
@@ -61,9 +61,9 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     const border_row = ui.row(.{ .children = &.{ square, round, tri }, .gap = 12 });
 
     // -- text and a bar ----------------------------------------------------
-    const grad_text = ui.text(.{ .label = "gradient text runs", .size = 26, .style = .{ .fg = elmz.Fill.hgrad(th.accent, pink) } });
+    const grad_text = ui.text(.{ .label = "gradient text runs", .size = 26, .style = .{ .color = elmz.Fill.hgrad(th.accent, pink) } });
 
-    const bar = ui.bar(.{ .value = 0.65, .width = 504, .height = 14, .style = .{ .fg = elmz.Fill.hgrad(th.accent, green) } });
+    const bar = ui.bar(.{ .value = 0.65, .width = 504, .height = 14, .style = .{ .color = elmz.Fill.hgrad(th.accent, green) } });
 
     const note = ui.text(.{ .label = "backgrounds, borders (square and rounded) and text all take a Fill", .size = 12, .tone = .muted });
 

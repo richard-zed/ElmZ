@@ -339,6 +339,12 @@ pub fn ChainOf(comptime App: type) type {
         pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
             theme_mod.freeStyles(gpa, &self.owned_styles);
             self.view_buf.deinit(gpa);
+            // `.vars` strings and the custom gradient table are duped into
+            // `gpa` by the loader and handed over whole. Nothing else owns
+            // them, so not freeing here leaks once per chain resolve -- which
+            // is per startup and per hot reload.
+            theme_mod.freeVars(@TypeOf(self.app), gpa, &self.app);
+            theme_mod.freeGradients(gpa, &self.gradients);
         }
 
         /// The typeface the chain names, or null when no file names one.
@@ -396,7 +402,13 @@ pub fn resolveChain(
             defer gpa.free(src);
             if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
+                // The previous tier's table dies here: it was allocated into
+                // `gpa` and this overwrites the only handle to it.
+                theme_mod.freeGradients(gpa, &out.gradients);
                 out.gradients = loaded.gradients;
+                // The previous tier's vars die here: they were duped into
+                // `gpa` and this overwrites the only handle to them.
+                theme_mod.freeVars(App, gpa, &out.app);
                 out.app = loaded.vars;
                 // Replaced, not merged: the files layer as documents, and a
                 // half-inherited style table would mean a style's `.color` came
@@ -430,7 +442,13 @@ pub fn resolveChain(
             defer gpa.free(src);
             if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
                 out.theme = loaded.theme;
+                // The previous tier's table dies here: it was allocated into
+                // `gpa` and this overwrites the only handle to it.
+                theme_mod.freeGradients(gpa, &out.gradients);
                 out.gradients = loaded.gradients;
+                // The previous tier's vars die here: they were duped into
+                // `gpa` and this overwrites the only handle to them.
+                theme_mod.freeVars(App, gpa, &out.app);
                 out.app = loaded.vars;
                 if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
                 out.owned_styles = loaded.styles;
