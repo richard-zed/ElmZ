@@ -1626,7 +1626,142 @@ const Walker = struct {
             if (std.mem.eql(u8, key, "size")) entry.size = n else entry.weight = @intFromFloat(n);
             return;
         }
+        if (std.mem.eql(u8, key, "halo")) {
+            // Dropped silently before this branch existed: the field is in
+            // `StyleSpec`, `copyStyles`, `styleView` and `styleByName`, so a
+            // halo parsed nowhere looked like a style that simply had none.
+            // The symptom was an element that emitted no halo prim at all.
+            entry.halo = (try self.readHalo()) orelse {
+                self.diag.set("style .halo must be a struct of halo fields", .{});
+                return error.Palette;
+            };
+            return;
+        }
         self.skipValue();
+    }
+
+    /// `.{ .color = .accent, .blur = 8, .mode = .outer_glow, .offset = .{ 2, 4 } }`
+    ///
+    /// Every field is optional and defaults to `HaloSpec`, so a style may name
+    /// only the colour. The colour stays a ROLE NAME: the halo is resolved
+    /// against the frame's palette at paint time like every other style colour,
+    /// so editing `.colors` moves a shadow with it.
+    fn readHalo(self: *Walker) ThemeLoadError!?HaloSpec {
+        if (self.tok() != .period or !self.nextIsBrace()) return null;
+        self.advance(); // .
+        self.advance(); // {
+
+        var out: HaloSpec = .{};
+
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() != .period) {
+                self.advance();
+                continue;
+            }
+            self.advance();
+            if (self.tok() != .identifier) {
+                self.skipValue();
+                continue;
+            }
+            const key = self.slice();
+            self.advance();
+            if (self.tok() != .equal) {
+                self.skipValue();
+                continue;
+            }
+            self.advance();
+
+            if (std.mem.eql(u8, key, "color")) {
+                const r = try self.readRef() orelse {
+                    self.diag.set("halo .color must be a role like .accent", .{});
+                    return error.Palette;
+                };
+                out.color = try self.gpa.dupe(u8, r.name);
+            } else if (std.mem.eql(u8, key, "blur")) {
+                out.blur = try self.readNumber("halo .blur");
+            } else if (std.mem.eql(u8, key, "spread")) {
+                out.spread = try self.readNumber("halo .spread");
+            } else if (std.mem.eql(u8, key, "light")) {
+                out.light = try self.readNumber("halo .light");
+            } else if (std.mem.eql(u8, key, "offset")) {
+                out.offset = try self.readNumberPair("halo .offset");
+            } else if (std.mem.eql(u8, key, "mode")) {
+                const r = try self.readRef() orelse {
+                    self.diag.set("halo .mode must be .glow, .outer_glow or .inner_glow", .{});
+                    return error.Palette;
+                };
+                out.mode = std.meta.stringToEnum(elmz.Halo.Mode, r.name) orelse {
+                    self.diag.set("halo .mode \"{s}\" is not glow, outer_glow or inner_glow", .{r.name});
+                    return error.Palette;
+                };
+            } else if (std.mem.eql(u8, key, "quality")) {
+                const r = try self.readRef() orelse {
+                    self.diag.set("halo .quality must be .baked or .sdf", .{});
+                    return error.Palette;
+                };
+                out.quality = std.meta.stringToEnum(elmz.Halo.Quality, r.name) orelse {
+                    self.diag.set("halo .quality \"{s}\" is not baked or sdf", .{r.name});
+                    return error.Palette;
+                };
+            } else {
+                // An unknown halo key is a typo inside a table the file itself
+                // opened, not a new named thing: `.blurr = 8` would otherwise
+                // leave a halo at the default blur and say nothing.
+                self.diag.set("halo names .{s}, which is not a halo field", .{key});
+                return error.Palette;
+            }
+        }
+        self.advance(); // }
+        return out;
+    }
+
+    /// A bare number. Rejects a `.var` here on purpose: every halo field is
+    /// geometry, and a var that held text would silently become 0.
+    fn readNumber(self: *Walker, what: []const u8) ThemeLoadError!f32 {
+        if (self.tok() != .number_literal) {
+            self.diag.set("{s} must be a number", .{what});
+            return error.Palette;
+        }
+        const v = std.fmt.parseFloat(f32, self.slice()) catch {
+            self.diag.set("{s} is not a number", .{what});
+            return error.Palette;
+        };
+        self.advance();
+        return v;
+    }
+
+    /// `.{ 2, 4 }` -- an offset pair.
+    fn readNumberPair(self: *Walker, what: []const u8) ThemeLoadError![2]f32 {
+        if (self.tok() != .period) {
+            self.diag.set("{s} must be .{{ x, y }}", .{what});
+            return error.Palette;
+        }
+        self.advance(); // .
+        if (self.tok() != .l_brace) {
+            self.diag.set("{s} must be .{{ x, y }}", .{what});
+            return error.Palette;
+        }
+        self.advance(); // {
+        var pair: [2]f32 = .{ 0, 0 };
+        var n: usize = 0;
+        while (self.tok() != .r_brace and self.tok() != .eof) {
+            if (self.tok() == .number_literal) {
+                if (n < 2) {
+                    pair[n] = std.fmt.parseFloat(f32, self.slice()) catch {
+                        self.diag.set("{s} is not a number", .{what});
+                        return error.Palette;
+                    };
+                    n += 1;
+                }
+            }
+            self.advance();
+        }
+        if (self.tok() != .r_brace or n != 2) {
+            self.diag.set("{s} must be exactly two numbers", .{what});
+            return error.Palette;
+        }
+        self.advance(); // }
+        return pair;
     }
 
     /// The number a `.var` names, or null if it is missing or not a number.
@@ -1911,6 +2046,9 @@ fn freeNamedStyles(gpa: Allocator, items: []NamedStyle) void {
         if (e.value.color) |c| gpa.free(c);
         if (e.value.bg) |c| gpa.free(c);
         if (e.value.border) |c| gpa.free(c);
+        // The halo's colour is a role NAME this walker duped, exactly like the
+        // four above. Leaving it out leaked one allocation per styled halo.
+        if (e.value.halo) |h| gpa.free(h.color);
     }
 }
 pub fn freeOpenTables(gpa: Allocator, t: *OpenTables) void {
@@ -2458,4 +2596,63 @@ test "vars resolve from .theme.vars, not the root" {
     try std.testing.expectEqual(@as(usize, 1), loaded.styles.len);
     try std.testing.expectEqualStrings("Roboto Flex", loaded.styles[0].spec.font.?);
     try std.testing.expectEqual(@as(?u16, 600), loaded.styles[0].spec.weight);
+}
+
+test "a style's .halo is read, not dropped" {
+    // The regression this pins: `readStyleField` handled color/bg/border/font/
+    // size/weight and fell through to `skipValue` for everything else, so a
+    // `.halo` in a theme file produced NOTHING -- no error, no diagnostic, no
+    // halo prim. The field existed downstream the whole time, which is why the
+    // symptom was an element that simply had no glow rather than a rejection.
+    const App = struct {};
+    const src =
+        \\.{
+        \\    .version = 3,
+        \\    .theme = .{
+        \\        .colors = .{ .bg = 0x1e1e2e },
+        \\        .styles = .{
+        \\            .latin = .{ .halo = .{ .color = .bg, .blur = 8, .spread = 2, .offset = .{ 3, 4 } } },
+        \\            .bare = .{},
+        \\        },
+        \\    },
+        \\}
+    ;
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    var loaded = try loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag);
+    defer freeLoaded(App, gpa, &loaded);
+
+    try std.testing.expectEqual(@as(usize, 2), loaded.styles.len);
+    const h = loaded.styles[0].spec.halo orelse return error.TestExpectedHalo;
+    try std.testing.expectEqualStrings("bg", h.color);
+    try std.testing.expectEqual(@as(f32, 8), h.blur);
+    try std.testing.expectEqual(@as(f32, 2), h.spread);
+    try std.testing.expectEqual(@as([2]f32, .{ 3, 4 }), h.offset);
+    // A style that writes none stays null: a default halo would glow everything.
+    try std.testing.expectEqual(@as(?HaloSpec, null), loaded.styles[1].spec.halo);
+}
+
+test "an unknown .halo key is an error, not a silent default" {
+    // Inside a table the file itself opened, an unrecognised key is a typo.
+    // `.blurr = 8` would otherwise leave the halo at the default blur and say
+    // nothing -- the same silent-drop class as `.halo` being ignored outright.
+    const App = struct {};
+    const src =
+        \\.{
+        \\    .version = 3,
+        \\    .theme = .{
+        \\        .styles = .{ .a = .{ .halo = .{ .blurr = 8 } } },
+        \\    },
+        \\}
+    ;
+    const gpa = std.testing.allocator;
+    var diag: ThemeDiag = .{};
+    // `loadTheme` collapses every walker failure to `error.Parse`, so the
+    // error KIND is not the signal -- the diagnostic is, and it is what the
+    // error band shows the user.
+    try std.testing.expectError(
+        error.Parse,
+        loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "blurr") != null);
 }
