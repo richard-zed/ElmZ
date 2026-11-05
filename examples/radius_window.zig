@@ -1,11 +1,4 @@
 //! Corner radii in a real window.
-//!
-//! The same `view` as the headless example, with a pointer attached -- which is
-//! what makes it worth a window: rounded hit testing is a claim about where a
-//! click COUNTS, and the only way to check that is to click the corner and see
-//! whether anything happens. A picture cannot answer it.
-//!
-//!   zig build run-radius-sdl3      (needs libsdl3-dev)
 
 const std = @import("std");
 const runner = @import("runner");

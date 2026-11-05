@@ -1,19 +1,4 @@
 //! A form, driven headlessly: two text fields, one of them masked.
-//!
-//! This is the caller `ui.textInput` did not have until now, and it exists to
-//! pin the three seams a field needs from an APP, none of which the widget can
-//! supply itself:
-//!
-//!   focus  -- an Msg decides it, through `Action.focus`, because the runtime
-//!             is what reflects focus into paint and the app is what decides it
-//!   text   -- `on_text` hands over typed bytes, and the reducer writes the
-//!             new value with an allocator that OUTLIVES the frame
-//!   keys   -- `on_key` hands arrows and Backspace to `TextEdit.handleKey`
-//!
-//! The caret on a CLICK is the runtime's job (`elmz.caretAtClick` in the event
-//! loop), because an advance depends on the face and `view` holds no renderer.
-//! A click here therefore only moves focus, and the caret is moved by the same
-//! reducer the runtime would call.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -39,8 +24,8 @@ const key_pass = 2;
 
 pub const Msg = enum { focus_name, focus_pass, edited };
 
-/// Which field the keyboard is going into. The runtime knows it too, but the
-/// reducer needs it and a hook is given only the Model.
+/// Which field the keyboard is going into. The runtime knows it too, but the reducer needs
+/// it and a hook is given only the Model.
 const Target = enum { name, pass };
 
 pub const Model = struct {
@@ -48,9 +33,8 @@ pub const Model = struct {
     pass: elmz.TextEdit = .{},
     target: Target = .name,
     edits: u32 = 0,
-    /// Bytes a keystroke produces must outlive the frame that produced them,
-    /// so they cannot come from `Ui`'s per-frame arena. An app-owned arena is
-    /// the smallest thing that satisfies "lives until the document changes".
+    /// Bytes a keystroke produces must outlive the frame that produced them, so they cannot
+    /// come from `Ui`'s per-frame arena.
     arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
 };
 
@@ -78,8 +62,8 @@ fn field(m: *Model) *elmz.TextEdit {
     };
 }
 
-/// Typed bytes. Returning a message is how the frame gets marked dirty -- a
-/// hook that returns null has changed the Model and told nobody.
+/// Typed bytes. Returning a message is how the frame gets marked dirty -- a hook that
+/// returns null has changed the Model and told nobody.
 pub fn onText(m: *Model, bytes: []const u8) ?Msg {
     if (field(m).typeBytes(m.arena.allocator(), bytes)) return .edited;
     return null;

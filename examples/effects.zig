@@ -1,11 +1,5 @@
-//! Two effects that read the destination rather than the element: a cast shadow
-//! and a frosted backdrop.
-//!
-//! Rendered through the software canvas directly, not through `Ui`, because both
-//! of these want OVERLAP -- a frost has nothing to blur unless there is detail
-//! under the panel it frosts, and a cast shadow has to sit partly under the thing
-//! casting it. Layout here is flow-only, so the demonstration drops a level rather
-//! than pretending a pair of side-by-side cards shows either effect.
+//! Two effects that read the destination rather than the element: a cast shadow and a
+//! frosted backdrop.
 
 const std = @import("std");
 const elmz = @import("elmz");

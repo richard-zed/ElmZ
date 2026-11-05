@@ -1,25 +1,5 @@
-//! A whole screen of the pre-widget pieces: a scrolling viewport with its
-//! automatic thumb, tabs, one face at four sizes, baseline alignment, a haloed
-//! popup, and a click on nothing dismissing it.
-//!
-//! Headless: `zig build run-panes` writes three PNGs.
-//!
-//!    panes.png           the Rows tab at rest
-//!    panes-scrolled.png  the same list scrolled, thumb off the top
-//!    panes-menu.png      the popup open
-//!
-//! The list is 24 rows in a 250-tall viewport, so it overflows by construction
-//! and the thumb appears without the app asking for one. Nothing here sets a
-//! scrollbar: the frame derives the thumb from content height over view height,
-//! and the thumb carries a drag region of its own so the rows underneath stay
-//! clickable everywhere else.
-//!
-//! One face, four sizes. `Font` is a VALUE type but the canvas holds exactly one
-//! (`Canvas.setFont`), so "different fonts" in a single window is not something
-//! this library can do yet -- per-element faces arrive with the font roadmap,
-//! where a theme file names a face and the library resolves it. What is shown
-//! here is the same face at 11 / 13 / 18 / 26, which is what a real screen's
-//! hierarchy is built from anyway.
+//! A whole screen of the pre-widget pieces: a scrolling viewport with its automatic thumb,
+//! tabs, one face at four sizes, baseline alignment.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -70,8 +50,8 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
     return .{};
 }
 
-/// Escape closes the popup. The runtime owns Tab (it is the only thing that
-/// knows document order); everything else is the app's to interpret.
+/// Escape closes the popup. The runtime owns Tab (it is the only thing that knows document
+/// order); everything else is the app's to interpret.
 pub fn onKey(m: *Model, k: elmz.Key, phase: elmz.Phase) ?Msg {
     if (phase != .down) return null;
     if (!m.menu) return null;
@@ -79,15 +59,14 @@ pub fn onKey(m: *Model, k: elmz.Key, phase: elmz.Phase) ?Msg {
     return null;
 }
 
-/// A press that claimed no region at all. This is the only press no element can
-/// ever see, so it is the only way a popup can hear the click that dismisses it.
+/// A press that claimed no region at all.
 pub fn onOutside(m: *Model, _: [2]f32) ?Msg {
     if (m.menu) return .menu_close;
     return null;
 }
 
-/// A nav tab is a text element with a fill and padding, not a widget: the only
-/// thing that makes it "selected" is which theme role it is painted with.
+/// A nav tab is a text element with a fill and padding, not a widget: the only thing that
+/// makes it "selected" is which theme role it is painted with.
 fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *elmz.Element(Msg) {
     const e = ui.text(.{
         .label = label,

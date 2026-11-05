@@ -1,8 +1,5 @@
-//! Software backend for elmz: an RGB framebuffer with a dependency-free PNG
-//! encoder, plus `elmfont` -- the built-in 5x6 face used when no real typeface
-//! is attached, so a missing font is legible instead of blank. This is the backend you want while you are
-//! still arguing with layout; swap in a GPU backend later behind the same
-//! `elmz.Renderer` vtable.
+//! Software backend for elmz: an RGB framebuffer with a dependency-free PNG encoder, plus
+//! `elmfont`.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -10,33 +7,24 @@ const cedar = @import("cedar.zig");
 const gamma = @import("gamma.zig");
 const elmfont = @import("elmfont.zig");
 
-/// Cache identity of the built-in face. Any value works as long as it cannot
-/// collide with a real `instanceKey()` (which is 0 for absent, else a hash of
-/// the bytes plus the instance) -- this is a high bit pattern for that reason.
+/// Cache identity of the built-in face.
 const elmfont_face_key: usize = 0xe1f0_0000;
 
-/// Cedar is the font backend. One name, because a canvas built against a face
-/// the rest of the library does not know is not a configuration anyone wants.
+/// Cedar is the font backend. One name, because a canvas built against a face the rest of
+/// the library does not know is not a configuration anyone wants.
 const Face = cedar.Font;
-/// A canvas with NO typeface, which is the state an app that names no font is
-/// in: text goes through the built-in bitmap face.
+/// A canvas with NO typeface, which is the state an app that names no font is in: text goes
+/// through the built-in bitmap face.
 fn testCanvas(gpa: Allocator, w: u32, h: u32) !Canvas {
     return Canvas.init(gpa, w, h);
 }
 
-/// Attach a real face from this machine, or null. Tests that assert glyph
-/// behaviour -- outlines, kerning, cache hits, CJK kinsoku -- cannot run on the
-/// bitmap face, and the alternative to borrowing the system's is carrying a
-/// typeface in the repo. On a machine with no fonts they skip; the gate then
-/// says what it did not check instead of pretending.
+/// Attach a real face from this machine, or null.
 fn withFace(c: *Canvas) ?[]u8 {
     return withFaceIf(c, 'H');
 }
 
-/// A real face from this machine that maps `cp`, or null. Tests that assert on
-/// actual glyphs ask for the character they are about to draw: taking whatever
-/// font the directory lists first meant a Noto Arabic subset was handed to a
-/// Latin assertion, which fails on valid data and reads like a bug in us.
+/// A real face from this machine that maps `cp`, or null.
 fn withFaceIf(c: *Canvas, cp: u21) ?[]u8 {
     const all = testing_font.systemFonts(testing.allocator, std.testing.io) orelse return null;
     defer {
@@ -56,11 +44,8 @@ fn withFaceIf(c: *Canvas, cp: u21) ?[]u8 {
 
 const builtin = @import("builtin");
 
-/// Tests measure and draw with real glyph data, but the library must not embed
-/// a face -- so this decl is unreachable outside a test build.
-/// Read a font file, trying `path` as given and then the same name beside the
-/// executable -- so a binary in `zig-out/bin` finds its font without relying on
-/// the working directory. Caller owns the bytes; they must outlive the canvas.
+/// Tests measure and draw with real glyph data, but the library must not embed a face -- so
+/// this decl is unreachable outside a test build.
 pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
     if (std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 * 1024 * 1024))) |b| {
         return b;
@@ -74,24 +59,6 @@ pub fn loadFont(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
 }
 
 /// Where a NAMED face is looked for, in order.
-///
-/// A user font directory is deliberately absent: finding one means reading
-/// HOME, which needs environment access this file has no `io`-free way to do.
-/// A caller that has one passes it in `extra_dirs`, searched FIRST, so an app
-/// can prefer its own shipped directory over the system's.
-/// Where a face is looked up, in order.
-///
-/// The system entries are absolute and need nothing. The two `~` entries are
-/// resolved per-call against `HOME`, because a user font lives under the
-/// user's home and there is no reading of "the font directory" that excludes
-/// it -- a face installed with `fc-cache` into `~/.local/share/fonts` is a
-/// fully installed font, and a library that only sees `/usr/share/fonts` looks
-/// broken to anyone who has ever installed one. `~/.fonts` is still read
-/// because plenty of installs predate the XDG location and were never moved.
-///
-/// Order is USER before SYSTEM: a font someone put in their own directory was
-/// put there to be used, and the same reasoning applies as for caller-supplied
-/// directories above.
 pub const font_dirs = [_][]const u8{
     "~/.local/share/fonts",
     "~/.fonts",
@@ -106,9 +73,6 @@ fn isHomeRelative(dir: []const u8) bool {
 }
 
 /// The single face the tests measure, and the only one they look for.
-///
-/// Not a search: a test that asserts different things on different machines is
-/// not much of a test. Absent means the caller skips.
 pub const fixture_face: []const u8 = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
 fn looksLikePath(name: []const u8) bool {
@@ -161,12 +125,8 @@ fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-/// Style strings that mean "the plain one".
-///
-/// A query naming a family and no style must resolve to that family's Regular
-/// face. Five DejaVu files share the family name, and `DejaVuSans-Bold.ttf` is
-/// a different face -- picking it because it sorted first is a substitution
-/// nobody asked for, and it renders perfectly, so nobody would notice.
+/// Style strings that mean "the plain one". A query naming a family and no style must
+/// resolve to that family's Regular face.
 fn isRegular(style: []const u8) bool {
     if (style.len == 0) return true;
     inline for ([_][]const u8{ "Regular", "Book", "Normal" }) |r| {
@@ -178,10 +138,6 @@ fn isRegular(style: []const u8) bool {
 const no_match: u8 = 0xff;
 
 /// How well a face answers to `name`, lower being better.
-///
-/// 0 = this family, plain style; 1 = this family, some other style; 2 = the
-/// `"Family Style"` form; `no_match` otherwise. A RANK rather than a yes/no
-/// because "the family matches" is not enough to identify a face.
 fn faceRank(face: *const Face, name: []const u8) u8 {
     var fam_buf: [128]u8 = undefined;
     var sty_buf: [128]u8 = undefined;
@@ -197,14 +153,8 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
     return if (eqlIgnoreCase(sty, name[cut + 1 ..])) 2 else no_match;
 }
 
-/// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`.
-/// What a search found: the file's bytes and WHICH face inside it.
-///
-/// A `.ttc` holds a whole family of faces -- `NotoSansCJK-Regular.ttc` carries
-/// Japanese, Korean and Simplified/Traditional Chinese in ONE file. Returning
-/// bytes alone would hand back face 0 every time, so a request for Simplified
-/// Chinese would draw in the Japanese face: most glyphs identical, the ones a
-/// reader would actually notice different, and no error anywhere.
+/// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`. What a
+/// search found: the file's bytes and WHICH face inside it.
 pub const Found = struct {
     bytes: []u8,
     index: u32 = 0,
@@ -276,19 +226,6 @@ fn faceRankIndex(f: *const Found, name: []const u8) u8 {
 }
 
 /// Resolve a FONT NAME to file bytes.
-///
-/// Matching happens against the face's own `name` table, never the filename: a
-/// theme naming "Inter" must find `Inter-Regular.otf`, and must NOT find some
-/// other face that merely happens to be called Inter.ttf. That distinction is
-/// the entire reason this is not a filename join.
-///
-/// A name containing a path separator, or ending in `.ttf`/`.otf`/`.ttc`, is
-/// taken as a PATH and handed to `loadFont` -- the escape hatch for an app that
-/// ships one private face and would rather name the file than the family.
-///
-/// Returns the bytes of the first match; the caller owns them. Nothing found is
-/// `error.FontNotFound`, which the runner bands rather than papering over with a
-/// substitute face nobody could see was wrong.
 pub fn loadFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8, font_home: ?[]const u8) ![]u8 {
     if (looksLikePath(name)) return loadFont(gpa, io, name);
 
@@ -306,11 +243,8 @@ pub fn loadFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_di
     return f.bytes;
 }
 
-/// The same search, but reporting WHICH face inside the file matched.
-///
-/// This is the one a registry must use. The other form throws the index away,
-/// which is fine for a `.ttf` (exactly one face) and silently wrong for a
-/// `.ttc`: see `Found`.
+/// The same search, but reporting WHICH face inside the file matched. This is the one a
+/// registry must use.
 pub fn findFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8, font_home: ?[]const u8) !Found {
     if (looksLikePath(name)) return .{ .bytes = try loadFont(gpa, io, name) };
     if (searchDirs(gpa, io, extra_dirs, name, font_home)) |f| {
@@ -321,21 +255,13 @@ pub fn findFontByNameHome(gpa: Allocator, io: std.Io, name: []const u8, extra_di
     return searchDirs(gpa, io, &font_dirs, name, font_home);
 }
 
-/// The search with no home directory, so `~` entries are skipped and only the
-/// system fonts are reachable. Kept because most callers are tests and tools
-/// that have no process `Init`; `loadFontByNameHome` is the one the runner
-/// uses, and the only one that can see a user's own fonts.
+/// The search with no home directory, so `~` entries are skipped and only the system fonts
+/// are reachable.
 pub fn loadFontByName(gpa: Allocator, io: std.Io, name: []const u8, extra_dirs: []const []const u8) ![]u8 {
     return loadFontByNameHome(gpa, io, name, extra_dirs, null);
 }
 
 /// An ABSOLUTE fixture directory.
-///
-/// `std.testing.tmpDir` hands back a path relative to the process's cwd, and
-/// re-resolving it from a different cwd is exactly how a test passes for the
-/// wrong reason: the first version of this test "found" the system's own
-/// DejaVu after the fixture directory failed to open, and the two files are
-/// byte-identical, so nothing distinguished a working search from a broken one.
 fn fontFixture(io: std.Io, dir_path: []const u8) !std.Io.Dir {
     std.Io.Dir.deleteDirAbsolute(io, dir_path) catch {};
     try std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir);
@@ -419,10 +345,8 @@ test "a name that is a path is treated as a path, not a family" {
     try std.testing.expect(!looksLikePath("Sans Book"));
 }
 
-/// What tests measure with: the built-in bitmap face, the same one a canvas
-/// with no typeface attached uses. There is no sfnt in the repo, so a test that
-/// wants real outlines BORROWS one from the system (`anySystemFont`) and skips
-/// when the machine has none.
+/// What tests measure with: the built-in bitmap face, the same one a canvas with no
+/// typeface attached uses.
 pub const testing_font = struct {
     pub fn get() @This() {
         return .{};
@@ -434,14 +358,7 @@ pub const testing_font = struct {
         return elmfont.wrap(bytes, dev, max_w, out);
     }
 
-    /// Any real face this machine has. A few tests need an sfnt -- one to rename,
-    /// one to count as a second face for cache invalidation -- and the
-    /// alternative to borrowing the system's is carrying a font in the repo,
-    /// which is a binary asset with a licence attached to buy nothing.
-    /// Every readable face on this machine; caller frees each and the slice.
-    /// `anySystemFont` returns only the first, which is fine for "is there a
-    /// face at all" but wrong for anything that needs a CAPABILITY -- a machine
-    /// holding only Noto Arabic/CJK still has fonts and still has no Latin.
+    /// Any real face this machine has.
     pub fn systemFonts(gpa: Allocator, io: std.Io) ?[][]u8 {
         var out: std.ArrayListUnmanaged([]u8) = .empty;
         for (font_dirs) |d| {
@@ -469,13 +386,6 @@ pub const testing_font = struct {
     }
 
     /// A face that actually maps every one of `cps`, or null.
-    ///
-    /// `anySystemFont` answers "is there a face at all", which is the wrong
-    /// question for a test that measures a specific string: the first face in
-    /// directory order on a stock Linux box is Noto Naskh Arabic, which parses
-    /// perfectly and has no CJK, so a test asserting on \u65e5 measures zero and
-    /// fails for a reason that has nothing to do with the code under test.
-    /// Asking the face is the same rule `Font.hasGlyph` exists for.
     pub fn fontWith(gpa: Allocator, io: std.Io, cps: []const u21) ?[]u8 {
         const all = systemFonts(gpa, io) orelse return null;
         var keep: ?[]u8 = null;
@@ -496,14 +406,6 @@ pub const testing_font = struct {
     }
 
     /// One named fixture face, or null to skip.
-    ///
-    /// This used to walk `font_dirs` and return the FIRST readable file, which
-    /// is whatever the filesystem happens to list first -- on a stock Linux box
-    /// that is a Noto Arabic face, which parses fine and draws nothing for
-    /// Latin. A caller that then measured a string got a plausible number for a
-    /// font it never asked for, which is how a test passes while proving
-    /// nothing. Naming one face makes the result the same everywhere, and a
-    /// missing face skips instead of silently substituting a different one.
     pub fn anySystemFont(gpa: Allocator, io: std.Io) ?[]u8 {
         const bytes = std.Io.Dir.cwd().readFileAlloc(
             io,
@@ -521,12 +423,6 @@ pub const testing_font = struct {
 const Allocator = std.mem.Allocator;
 
 /// Falloff width at a pixel, given a light direction.
-///
-/// A rounded rect's outward normal is axis aligned, so the width only needs to
-/// know which edge is nearest -- which the half-extent terms already answer. The
-/// dot product against the cast direction then says whether this edge faces the
-/// light (narrow) or away from it (wide). Guarded by a floor so a grazing light
-/// cannot collapse the ramp to nothing.
 fn lightWidth(blur: f32, px: f32, py: f32, hx: f32, hy: f32, cast: [2]f32) f32 {
     // Outside-ness per axis, positive outside the half-extent. The GOVERNING axis
     // is the one further out, and the normal points from the centre toward this
@@ -543,14 +439,8 @@ fn lightWidth(blur: f32, px: f32, py: f32, hx: f32, hy: f32, cast: [2]f32) f32 {
     return blur * f;
 }
 
-/// The one ramp, for every mode: coverage is opaque well inside the silhouette,
-/// half at the edge, gone well outside. `d` is the signed distance from that
-/// silhouette, negative inside. `mode` picks which side survives and, for an
-/// inner glow, which DIRECTION the falloff runs.
-///
-/// Shared by the distance-field path and the stencil bake on purpose. A mode that
-/// meant two things depending on which path drew it would be two features wearing
-/// one name.
+/// The one ramp, for every mode: coverage is opaque well inside the silhouette, half at the
+/// edge, gone well outside.
 fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32, core: f32) f32 {
     if (blur <= 0) return 1;
     return switch (mode) {
@@ -594,32 +484,15 @@ fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32, core: f32) f32 {
     };
 }
 
-/// How much a rim light should stop tracing the outline and hug the inscribed
-/// ellipse instead.
-///
-/// Zero for a narrow rim: it is tracing the shape, and the corners are part of
-/// what you see. A distance field inverts that as it widens -- inward offsets
-/// SHRINK the corner radius (`r - t`), so a glow at half the short side has
-/// driven the corners to zero and what it draws is a rectangle of sharp
-/// corners, not a softened button. Past that point the outline is not
-/// legible anyway: the band from each edge has met in the middle, and the only
-/// remaining question is whether the light looks like the shape or like a pool
-/// of it. This says "like a pool", from half the short side upward.
+/// How much a rim light should stop tracing the outline and hug the inscribed ellipse
+/// instead.
 fn circularity(w: f32, h: f32, blur: f32) f32 {
     const short = @min(w, h);
     if (short <= 0 or blur <= 0) return 0;
     return std.math.clamp(blur / (short * 0.5) - 0.5, 0, 1);
 }
 
-/// Nearest aspect ratio from a short ladder, used to size an inner rim's
-/// template.
-///
-/// The template has to be wider than the corner bands so its centre column is
-/// already past the x-independent boundary, but no wider than it needs to be:
-/// the pool is baked from the template's OWN dimensions, so a template squarer
-/// than its target puts the inscribed ellipse in the wrong place and dims the
-/// top and bottom boundary rows. Rounding the aspect to a rung keeps that error
-/// to a few percent while still letting one entry serve a range of widths.
+/// Nearest aspect ratio from a short ladder, used to size an inner rim's template.
 fn aspectBucket(a: f32) f32 {
     const rungs = [_]f32{ 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32 };
     if (!(a > 0)) return 1;
@@ -636,11 +509,6 @@ fn aspectBucket(a: f32) f32 {
 }
 
 /// Distance to an ellipse, to first order.
-///
-/// The normalised radius says how far out you are and its gradient says how
-/// fast that changes, so dividing one by the other converts to pixels. Exact on
-/// both axes, and within a pixel of the true distance at the 45 degree corner
-/// (14.1 vs ~12.6 on an 80x60 box) -- which is ample for a soft ramp.
 fn ellipseDistance(px: f32, py: f32, a: f32, b: f32) f32 {
     const ia = if (a > 0) 1.0 / a else 0;
     const ib = if (b > 0) 1.0 / b else 0;
@@ -653,27 +521,14 @@ fn ellipseDistance(px: f32, py: f32, a: f32, b: f32) f32 {
     return (g - 1) / grad;
 }
 
-/// How far a ramp reaches from the silhouette, in pixels, WITHOUT the extra
-/// pixel that covers the antialiased edge.
-///
-/// The shared ramp dies `blur / 2` either side of the edge; a lit one reaches
-/// `blur` on the side it is thrown toward; an inner glow dies a full `blur` in.
-/// Every walk band and every mask is sized from this, because a band narrower
-/// than the ramp silently clips its own falloff -- which is exactly what a
-/// longer inner ramp would do at the old `blur / 2`.
+/// How far a ramp reaches from the silhouette, in pixels, WITHOUT the extra pixel that
+/// covers the antialiased edge.
 fn falloffReach(mode: elmz.Halo.Mode, blur: f32, lit: bool) f32 {
     if (mode == .inner_glow) return blur;
     return blur * (if (lit) @as(f32, 1.0) else 0.5);
 }
 
-/// One separable box pass over an RGBA buffer, in place. `rad` is the half-width
-/// in pixels and sampling clamps at the edges, so a blur never pulls colour from
-/// outside the region it was handed.
-///
-/// Integer sums and a sliding window: one add and one subtract per pixel per
-/// channel rather than `2 * rad + 1` of them, which is what keeps three passes
-/// affordable on a whole card. `scratch` is `max(w, h) * 4` bytes, reused by
-/// every pass.
+/// One separable box pass over an RGBA buffer, in place.
 fn boxBlur(buf: []u8, w: usize, h: usize, rad: usize, horizontal: bool, scratch: []u8) void {
     const lines = if (horizontal) h else w;
     const len = if (horizontal) w else h;
@@ -727,27 +582,19 @@ fn boxBlur(buf: []u8, w: usize, h: usize, rad: usize, horizontal: bool, scratch:
     }
 }
 
-/// Glyph-cache storage. Owned by the CANVAS, not by the font: the cache keeps
-/// slices into these bytes, so a font that carried its own arena would be left
-/// pointing at a temporary the first time the value was returned or copied.
+/// Glyph-cache storage.
 const FontMem = struct {
     bytes: [Face.cache_bytes]u8 align(8),
-    /// Resolved codepoint -> (glyph, advance),  stored beside the mask cache for
-    /// the same reason: both must outlive the value copies a `Face` goes
-    /// through, so neither can be a field of the face itself.
+    /// Resolved codepoint -> (glyph, advance), stored beside the mask cache for the same
+    /// reason: both must outlive the value copies a `Face` goes through.
     lookup: [Face.lookup_bytes]u8 align(8),
-    /// The resolved kern lookups and the slot the face points at. Beside the
-    /// other two caches because it obeys the same lifetime rule.
+    /// The resolved kern lookups and the slot the face points at. Beside the other two
+    /// caches because it obeys the same lifetime rule.
     kern: cedar.Kern = undefined,
     kern_mem: [Face.kern_bytes]u8 align(8),
 };
 
 /// A non-primary face and the cache storage its glyphs live in.
-///
-/// Held as a pair rather than as a `Face` alone because the cache keeps slices
-/// into `mem`: the same rule as `FontMem`, one copy outward. The `Face` must be
-/// attached AFTER the storage is in its final home, which is what `setFontIndex`
-/// does when it appends one.
 const ExtraFace = struct {
     face: Face = .none,
     /// This face at its default instance. `face` is derived from it -- see
@@ -757,9 +604,7 @@ const ExtraFace = struct {
     vary_index: u32 = 0,
 };
 
-/// One edge crossing a scanline. `dir` carries the edge's direction so a
-/// nonzero fill can accumulate winding; an even-odd fill ignores it and pairs
-/// the crossings off in order.
+/// One edge crossing a scanline.
 const Cross = struct {
     x: f32,
     dir: i8,
@@ -777,140 +622,72 @@ pub const Canvas = struct {
     h: u32,
     px: []u8, // RGBA8
 
-    /// A baked halo is a stencil: coverage per pixel for one silhouette, tinted
-    /// at blit. Keyed on geometry only, so changing a halo's colour never
-    /// invalidates it -- which is the entire reason to bake rather than ramp
-    /// the distance field every frame.
+    /// A baked halo is a stencil: coverage per pixel for one silhouette, tinted at blit.
     masks: std.ArrayListUnmanaged(Mask) = .empty,
 
-    /// Flattened outline for the current path call, and the crossings for one
-    /// scanline. Reused rather than allocated per call: a path is a paint-time
-    /// shape and the paint path is not allowed to grow the heap every frame.
+    /// Flattened outline for the current path call, and the crossings for one scanline.
     poly: std.ArrayListUnmanaged([2]f32) = .empty,
-    /// Where each SUBPATH starts inside `poly`. A fill closes a subpath back to
-    /// its own first point; without these the filler joined one subpath's last
-    /// point to the next one's first, drawing an edge nobody asked for.
+    /// Where each SUBPATH starts inside `poly`.
     sub_starts: std.ArrayListUnmanaged(usize) = .empty,
     pending_break: bool = false,
     xs: std.ArrayListUnmanaged(Cross) = .empty,
 
-    /// Per-pixel coverage for one row, so overlapping spans of the same
-    /// outline accumulate into ONE blend instead of compositing over each
-    /// other. Without it a self-overlapping path is darker where it folds.
+    /// Per-pixel coverage for one row, so overlapping spans of the same outline accumulate
+    /// into ONE blend instead of compositing over each other.
     cover: []f32 = &.{},
 
     /// How many stencils have been BAKED, as opposed to found in the cache.
-    /// Nothing in the renderer reads this -- it exists so a benchmark can tell
-    /// a cache hit from a re-bake. A cache hit is not evidence about dispatch,
-    /// and neither is a timing.
     bakes: usize = 0,
 
-    /// The face this canvas measures and draws with when a primitive names no
-    /// other. `Font.none` means no glyph data: text measures at zero and draws
-    /// nothing. The caller supplies the bytes -- the library ships no typeface.
+    /// The face this canvas measures and draws with when a primitive names no other.
     font: Face = .none,
 
-    /// The PRIMARY face at its default instance. `font` is DERIVED from this
-    /// and is never varied in place: rebuilding a variation from an already
-    /// varied face compounds the deltas, and leaving `font` varied after a
-    /// weight-0 call made the default instance unreachable for the rest of the
-    /// frame. Every re-vary starts here.
+    /// The PRIMARY face at its default instance.
     font_base: Face = .none,
 
     /// Scratch for the glyph cache of the PRIMARY face.
     font_mem: ?*FontMem = null,
 
     /// Additional faces, each with its own cache, addressed by index >= 1.
-    ///
-    /// A style may name a different typeface, and switching used to mean
-    /// `setFontAt` -- which CLEARS the measure and wrap caches unconditionally,
-    /// because a different face answers every width differently. Doing that per
-    /// primitive throws away a warm glyph cache on every text run, and with two
-    /// faces interleaved it never converges: each switch evicts the other's
-    /// work.
-    ///
-    /// So a face does not replace its predecessor here, it JOINS it. Each entry
-    /// owns the cache storage its glyphs land in, and picking one is an index,
-    /// not a rebuild. Both caches already key on the face fingerprint, so
-    /// measurements for the two cannot collide -- that part was already right.
-    ///
-    /// GREW LAZILY, on first use of an index. An app that names one typeface
-    /// pays nothing for this, and the ~270 KiB a face's cache costs is only
-    /// spent on faces a theme actually asked for. Capped at `extra_faces_max`.
     extra_faces: std.ArrayListUnmanaged(ExtraFace) = .empty,
     extra_faces_max: usize = 8,
 
-    /// Which face the NEXT text call draws in. Sticky, because a run of text
-    /// primitives almost always shares one and the backend should not re-derive
-    /// it per string. 0 is the primary, which is also the default, so a build
-    /// that registers no extra face never leaves this value.
-    ///
-    /// Reset by `paintFrame` at the start of every frame rather than at the end
-    /// of drawing: an element that sets it and then throws is exactly the case
-    /// where a trailing reset would be skipped.
+    /// Which face the NEXT text call draws in.
     cur_face: u16 = 0,
-    /// `wght` for `cur_face`, or 0 for the face's default instance. Sticky
-    /// beside `cur_face` because varying a weight rebuilds the instance and
-    /// clears both caches -- doing that per text run would clear them
-    /// constantly, so it happens only when the value actually changes.
+    /// `wght` for `cur_face`, or 0 for the face's default instance.
     cur_weight: u16 = 0,
     dbg_faces: bool = true,
 
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
-    /// A 64-bit collision would hand back the width of a different string, and
-    /// a wrong width is a layout bug that presents as a rendering bug. The
-    /// price is one copy per distinct string, bounded by `measure_cap`.
-    ///
-    /// Keyed on the DEVICE size, so a density change is a MISS rather than a
-    /// stale answer -- the same reasoning as the halo stencil's key.
     measure_cache: std.HashMapUnmanaged(MeasureKey, elmz.TextMetrics, MeasureCtx, 80) = .empty,
-    /// Hit and miss counts. Nothing in the renderer reads them: they exist so a
-    /// benchmark and a test can tell a cached answer from a computed one.
+    /// Hit and miss counts. Nothing in the renderer reads them: they exist so a benchmark
+    /// and a test can tell a cached answer from a computed one.
     measure_hits: usize = 0,
     measure_misses: usize = 0,
 
     /// Line breaks for one (string, size, width), keyed and owned exactly like
-    /// `measure_cache`. What a wrap produces is a set of SLICES into the
-    /// caller's bytes, plus a pointer into the caller's `out` array, so nothing
-    /// it returns can be stored: the entry keeps break OFFSETS and rebuilds the
-    /// slices on a hit. Caching the slices would mean holding a pointer into a
-    /// frame that has since been reset.
+    /// `measure_cache`.
     wrap_cache: std.HashMapUnmanaged(WrapKey, WrapEntry, WrapCtx, 80) = .empty,
     wrap_hits: usize = 0,
     wrap_misses: usize = 0,
 
     /// Device pixels per logical unit -- the HiDPI density.
-    ///
-    /// Everything above the renderer works in LOGICAL units: layout, hit rects,
-    /// the pointer, every number an app writes. This is the SINGLE place that
-    /// converts any of it to pixels. At 1.0 every multiply is exact and the
-    /// output is bit-identical to what it was before the field existed, which
-    /// is what makes the pins the proof that density changed nothing at 1x.
-    ///
-    /// Applying it here rather than in layout is deliberate: SDL reports pointer
-    /// coordinates in logical units, so conversion at the edge would mean
-    /// converting them back, and a density change while a press is in flight
-    /// (dragging a window between monitors) would otherwise move the rects out
-    /// from under the claim.
     scale: f32 = 1.0,
 
     const Mask = struct {
-        /// Shape size this stencil was baked at. `sw == 0` marks a SLICE
-        /// TEMPLATE, which stands in for every size at its radius and blur.
+        /// Shape size this stencil was baked at. `sw == 0` marks a SLICE TEMPLATE, which
+        /// stands in for every size at its radius and blur.
         sw: i32,
         sh: i32,
         r: f32,
         blur: f32,
-        /// Which side of the silhouette this stencil carries. Part of the key,
-        /// because the same geometry bakes to three different pictures.
+        /// Which side of the silhouette this stencil carries. Part of the key, because the
+        /// same geometry bakes to three different pictures.
         mode: elmz.Halo.Mode = .glow,
         /// Template only: width of the corner band, in pixels.
         corner: u32 = 0,
-        /// Tiled entry: `sh` is a REAL height, `rw` spans only the corner band
-        /// plus one centre column, and the blit repeats that column across the
-        /// target. Used where the field stops varying along x but not along y --
-        /// an inner rim on a face shorter than its own falloff. Part of the key
-        /// via `core`, because the flat core is baked into the ramp.
+        /// Tiled entry: `sh` is a REAL height, `rw` spans only the corner band plus one
+        /// centre column, and the blit repeats that column across the target.
         tiled: bool = false,
         /// Flat-core depth this entry was baked with (inner rims only).
         core: f32 = 0,
@@ -919,20 +696,14 @@ pub const Canvas = struct {
         px: []u8 = &.{}, // coverage, one byte per pixel; set by `admit`
     };
 
-    /// Distinct strings held before the cache empties itself. A screen holds a
-    /// few hundred labels; a counter that formats a fresh string every frame
-    /// would otherwise grow it without bound. The cap is a hard reset rather
-    /// than an LRU: resetting is cheap, correct, and needs no clock.
+    /// Distinct strings held before the cache empties itself.
     const measure_cap = 8192;
 
     /// Distinct strings held before the wrap cache empties itself.
     const wrap_cap = 2048;
 
-    /// `face` is the typeface's fingerprint, and it is in the key because
-    /// `font` is a PUBLIC field: `setFont` clears both caches, but nothing
-    /// stops a caller assigning a face directly, and without the fingerprint
-    /// the old face's widths would answer for the new glyphs -- a layout bug
-    /// that presents as a rendering bug, which is the worst kind to chase.
+    /// `face` is the typeface's fingerprint, and it is in the key because `font` is a
+    /// PUBLIC field: `setFont` clears both caches.
     const MeasureKey = struct { text: []const u8, dev: f32, face: usize };
     const MeasureCtx = struct {
         pub fn hash(_: MeasureCtx, k: MeasureKey) u64 {
@@ -965,38 +736,20 @@ pub const Canvas = struct {
         }
     };
 
-    /// Point the canvas at a face. `bytes` must outlive the canvas.
-    ///
-    /// A different face answers every measurement differently, so both caches
-    /// go with it. Cleared unconditionally: emptying an empty map is free, and
-    /// the flag that used to guard it was a field doing the same work.
+    /// Point the canvas at a face. `bytes` must outlive the canvas. A different face
+    /// answers every measurement differently, so both caches go with it.
     pub fn setFont(self: *Self, bytes: []const u8) void {
         self.setFontAt(bytes, 0, &.{});
     }
 
-    /// Drop the typeface: measurements and glyphs fall back to the built-in
-    /// face. This is the revert a failed load wants -- NOT a blank face, which
-    /// renders invisible text and, because it has no instance key, defeats the
-    /// measure cache.
+    /// Drop the typeface: measurements and glyphs fall back to the built-in face.
     pub fn clearFont(self: *Self) void {
         self.clearMeasureCache();
         self.font = .none;
     }
 
-    /// Point the canvas at a VARIABLE INSTANCE of a face.
-    ///
-    /// `coords` is in axis order, in user units -- a `wght` of 700, not a
-    /// normalised value. Empty coords means the face's default instance, which
-    /// is exactly what `setFont` asks for.
-    ///
-    /// Both caches are cleared, and that is not caution: a measurement at 300
-    /// is not the measurement at 900, and the cache key carries the INSTANCE,
-    /// not the byte buffer, precisely so the two cannot collide. A caller who
-    /// varied the weight mid-run without this would lay out the previous
-    /// weight's widths.
-    ///
-    /// The instance borrows `bytes` like every other face here: the same rule
-    /// applies, `bytes` must outlive the canvas.
+    /// Point the canvas at a VARIABLE INSTANCE of a face. `coords` is in axis order, in
+    /// user units -- a `wght` of 700, not a normalised value.
     pub fn setFontAt(self: *Self, bytes: []const u8, index: u32, coords: []const f32) void {
         self.clearMeasureCache();
         self.clearWrapCache();
@@ -1014,14 +767,6 @@ pub const Canvas = struct {
     }
 
     /// Register a face at `index` (must be >= 1) and give it its own cache.
-    ///
-    /// Idempotent per index: asking twice for the same index is a no-op, so a
-    /// per-frame call is free after the first. The measure and wrap caches are
-    /// deliberately NOT cleared -- they key on the face fingerprint, so entries
-    /// for this face and every other one coexist. That is the whole point of
-    /// keeping faces side by side instead of swapping them.
-    ///
-    /// `bytes` must outlive the canvas, same rule as `setFont`.
     pub fn setFontIndex(self: *Self, index: usize, bytes: []const u8, face_index: u32) !void {
         std.debug.assert(index >= 1);
         if (index > self.extra_faces_max) return error.FaceLimit;
@@ -1055,9 +800,7 @@ pub const Canvas = struct {
         slot.vary_index = face_index;
     }
 
-    /// The face to draw with at `index`: the primary at 0, a registered extra
-    /// otherwise. An index never registered yields `Face.none`, which draws
-    /// nothing rather than silently drawing in the wrong typeface.
+    /// The face to draw with at `index`: the primary at 0, a registered extra otherwise.
     pub fn faceAt(self: *const Self, index: usize) Face {
         if (index == 0) return self.font;
         if (index >= self.extra_faces.items.len) return .none;
@@ -1065,13 +808,6 @@ pub const Canvas = struct {
     }
 
     /// The same face BY POINTER, which is what painting needs.
-    ///
-    /// `Face.drawText` takes `*const Font` and its glyph cache keeps its hit and
-    /// miss counters INSIDE the face value. Handing it a copy means every glyph
-    /// still rasterises -- the pixels look right -- but the counters land on a
-    /// temporary and the real face reports nothing, forever. Drawing through a
-    /// pointer is the difference between a warm cache and a cache that merely
-    /// looks unused.
     pub fn facePtrAt(self: *Self, index: usize) *const Face {
         if (index == 0) return &self.font;
         if (index >= self.extra_faces.items.len) return &self.font;
@@ -1085,14 +821,7 @@ pub const Canvas = struct {
         return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem };
     }
 
-    /// Re-point the pixel buffer at `w` x `h`. The masks and the font survive:
-    /// a stencil is keyed on the SHAPE it covers, not on the canvas it lands in,
-    /// so a window resize invalidates none of them.
-    ///
-    /// A zero dimension is IGNORED rather than honoured. A minimised window
-    /// reports 0x0, and allocating nothing there would mean the next present
-    /// hands the backend an empty slice -- the window keeps its last frame
-    /// instead, which is what the compositor is already showing.
+    /// Re-point the pixel buffer at `w` x `h`.
     pub fn resize(self: *Self, w: u32, h: u32) !void {
         if (w == 0 or h == 0) return;
         if (w == self.w and h == self.h) return;
@@ -1131,9 +860,7 @@ pub const Canvas = struct {
         }
     }
 
-    /// Logical rect -> device rect. Returns the input unchanged at 1.0 rather
-    /// than multiplying by one, so the common case cannot accumulate so much as
-    /// an extra rounding step.
+    /// Logical rect -> device rect.
     fn scaledRect(self: *const Self, r: elmz.Rect) elmz.Rect {
         if (self.scale == 1.0) return r;
         return .{
@@ -1179,10 +906,7 @@ pub const Canvas = struct {
         }
     }
 
-    /// One scanline in one colour. The blend coefficients are hoisted out of
-    /// the loop, which is the whole point of a row fill: the source colour is
-    /// constant along the row, so converting it to float 640 times was 640
-    /// times too many.
+    /// One scanline in one colour.
     fn fillRow(self: *Self, x0: i64, x1: i64, y: u32, color: elmz.Color) void {
         if (color.a == 0) return;
         const row = @as(usize, y) * self.w;
@@ -1213,9 +937,7 @@ pub const Canvas = struct {
 
     const Span = struct { x0: i64, y0: i64, x1: i64, y1: i64 };
 
-    /// Integer pixel span of `rect` after clipping, or null when nothing is
-    /// left. Both bounds are resolved before the loop, so the per-pixel path
-    /// is exactly what it was when nothing clips.
+    /// Integer pixel span of `rect` after clipping, or null when nothing is left.
     fn clipSpan(self: *Self, rect: elmz.Rect, clip: elmz.Rect) ?Span {
         // Non-finite geometry is refused here, BEFORE the max/min below. Those
         // follow fmax/fmin and silently DROP a NaN, so a NaN coordinate became
@@ -1464,21 +1186,14 @@ pub const Canvas = struct {
         }
     }
 
-    /// True when a gradient is the shape almost every UI gradient is: exactly
-    /// two stops, pinned at the two ends, both fully opaque. Only then is the
-    /// colour a plain affine lerp with no premultiply and no stop search.
+    /// True when a gradient is the shape almost every UI gradient is: exactly two stops,
+    /// pinned at the two ends, both fully opaque.
     fn twoOpaque(s: elmz.Stops) bool {
         return s.n == 2 and s.colors[0].a == 255 and s.colors[1].a == 255;
     }
 
-    /// One scanline of a two-opaque-stop ramp starting at `t0` and advancing by
-    /// `step` per pixel.
-    ///
-    /// Split into three runs. Below the first stop the colour is flat, above
-    /// the second it is flat, and only the middle span carries a gradient -- so
-    /// a diagonal fill no longer lerps every pixel of the box, and the flat
-    /// runs reuse the solid row writer. In the middle the three channels
-    /// advance by addition instead of being re-lerped from `t` per pixel.
+    /// One scanline of a two-opaque-stop ramp starting at `t0` and advancing by `step` per
+    /// pixel. Split into three runs.
     fn rampRow(self: *Self, sp: Span, y: i64, t0: f32, step: f32, a: elmz.Color, b: elmz.Color) void {
         const n: i64 = sp.x1 - sp.x0;
         if (n <= 0) return;
@@ -1551,28 +1266,14 @@ pub const Canvas = struct {
         self.drawTextFace(&self.font, x, y, size, fill, bytes, clip);
     }
 
-    /// Text in a SPECIFIC face, rather than whatever the canvas is pointed at.
-    ///
-    /// The face is passed, not swapped in. `setFontAt` clears both caches, so
-    /// pointing the canvas at another face per primitive would evict the warm
-    /// cache on every run -- and with two faces interleaved, each switch would
-    /// undo the other's work. Every face keeps its own storage here, so a
-    /// different typeface costs an argument, not a rebuild.
-    ///
-    /// An absent face still falls back to the built-in bitmap, the same rule as
-    /// the primary: invisible text is a worse answer than the wrong face.
+    /// Text in a SPECIFIC face, rather than whatever the canvas is pointed at. The face is
+    /// passed, not swapped in.
     pub fn drawTextFace(self: *Self, face: *const Face, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
         if (!face.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
         face.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
     }
 
     /// Text in the built-in face, for a canvas with no typeface attached.
-    ///
-    /// The alternative is not "slightly worse text", it is no text: the band
-    /// reporting a missing font is itself drawn with text, so the failure used
-    /// to leave a blank window that looked like a broken renderer. Blending
-    /// goes through `blendCoverage` like every other glyph, so a gradient fill
-    /// and a fractional alpha behave the same here as they do above.
     fn drawTextBitmap(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
         const s = elmfont.scaleFor(size);
         const cell: f32 = @floatFromInt(s);
@@ -1665,9 +1366,8 @@ pub const Canvas = struct {
         }
     }
 
-    /// Rounded rect by signed distance: the coverage of a pixel is derived
-    /// from its distance to the rounded outline, which antialiases the curve
-    /// and, with `stroke`, gives a 1px outline that follows it for free.
+    /// Rounded rect by signed distance: the coverage of a pixel is derived from its
+    /// distance to the rounded outline, which antialiases the curve and.
     pub fn roundRect(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool) void {
         self.roundRectClip(rect, radius, fill, stroke, elmz.Rect.unbounded);
     }
@@ -1677,9 +1377,7 @@ pub const Canvas = struct {
         self.pathClip(x * self.scale, y * self.scale, p, fill, self.scaledRect(clip));
     }
 
-    /// Flatten, then fill. The subdivision step is here and nowhere else: a
-    /// curve is cut to roughly one DEVICE pixel, so the tolerance is right at
-    /// every scale without the caller knowing what the scale is.
+    /// Flatten, then fill.
     pub fn pathClip(self: *Self, ox: f32, oy: f32, p: elmz.Path, fill: elmz.Fill, clip: elmz.Rect) void {
         self.poly.clearRetainingCapacity();
         self.sub_starts.clearRetainingCapacity();
@@ -1735,19 +1433,8 @@ pub const Canvas = struct {
         self.fillPolygonClip(self.poly.items, self.sub_starts.items, p.rule, fill, clip);
     }
 
-    /// A tuple allocator failure mid-outline would otherwise paint a shape with
-    /// a vertex missing -- wrong in a way that looks like a path bug. Bailing
-    /// out of the whole fill is the honest failure.
-    /// Append a point, recording where a SUBPATH begins.
-    ///
-    /// The filler closes each subpath back to its own first point, which is
-    /// both what the spec says and the only way to keep subpaths apart. With a
-    /// single flat list the edge from one subpath's end to the next one's
-    /// start was never drawn but was still filled as though it had been: with
-    /// two CLOSED subpaths the join and the modulo wrap coincide, so they
-    /// cancelled and everything looked right; with three they form a triangle
-    /// and the fill spills across the whole element (see the three-squares
-    /// test). Unclosed subpaths broke even with two.
+    /// A tuple allocator failure mid-outline would otherwise paint a shape with a vertex
+    /// missing -- wrong in a way that looks like a path bug.
     fn emit(self: *Self, pt: [2]f32) bool {
         if (self.pending_break) {
             self.sub_starts.append(self.gpa, self.poly.items.len) catch return false;
@@ -1767,10 +1454,7 @@ pub const Canvas = struct {
         return @sqrt(dx * dx + dy * dy);
     }
 
-    /// Segments for a control polygon of length `d`, at about one device pixel
-    /// per segment. Bounded at both ends: two segments for a nearly straight
-    /// curve (a quad with collinear controls still curves), and a hard ceiling
-    /// so one pathological control point cannot flatten into thousands.
+    /// Segments for a control polygon of length `d`, at about one device pixel per segment.
     fn segsFor(d: f32) usize {
         if (!(d > 0)) return 2;
         const n = std.math.clamp(@ceil(d), 2, 64);
@@ -1807,9 +1491,8 @@ pub const Canvas = struct {
         return true;
     }
 
-    /// Each pixel row is sampled four times vertically, and horizontally each
-    /// span contributes its exact overlap, so the edge is antialiased in both
-    /// axes without supersampling the interior.
+    /// Each pixel row is sampled four times vertically, and horizontally each span
+    /// contributes its exact overlap.
     pub fn fillPolygonClip(self: *Self, pts: []const [2]f32, starts: []const usize, rule: elmz.FillRule, fill: elmz.Fill, clip: elmz.Rect) void {
         if (pts.len < 3) return;
         var minx = pts[0][0];
@@ -1963,14 +1646,8 @@ pub const Canvas = struct {
         }
     }
 
-    /// A glow or shadow: the same signed distance the rounded rect is built
-    /// from, with the coverage term swapped for a falloff that straddles the
-    /// edge -- solid `blur / 2` inside it, gone `blur / 2` outside.
-    ///
-    /// Only the ring is walked. The interior is fully opaque by construction
-    /// and the element paints over it, so looping over it would be work whose
-    /// result is never seen. That keeps a glow's cost proportional to its
-    /// circumference rather than to the area it wraps.
+    /// A glow or shadow: the same signed distance the rounded rect is built from, with the
+    /// coverage term swapped for a falloff that straddles the edge.
     pub fn halo(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         if (h.color.a == 0) return;
         // Explicit beats the default. A quality setting the library can
@@ -2171,17 +1848,8 @@ pub const Canvas = struct {
         }
     }
 
-    /// Blur the destination under `rect`, in place, then blend the result back
-    /// through the rounded-rect coverage so a frosted card keeps its corners.
-    ///
-    /// Reads AND writes the canvas, which is the whole reason a frost is recorded
-    /// before the element's own fill: what it frosts is what is underneath.
-    ///
-    /// Sampling clamps at the region's own edge rather than reaching outside it.
-    /// That is what stops a frosted panel dragging black in from beyond its
-    /// bounds, and it is why the region is the element's FULL rect, not its inset
-    /// content box: the outermost row is then a little less blurred than the
-    /// middle, the same trade CSS backdrop filters make.
+    /// Blur the destination under `rect`, in place, then blend the result back through the
+    /// rounded-rect coverage so a frosted card keeps its corners.
     pub fn frost(self: *Self, rect: elmz.Rect, radius: f32, blur: f32, clip: elmz.Rect) void {
         if (blur <= 0) return;
         const region = rect.intersect(clip);
@@ -2253,8 +1921,8 @@ pub const Canvas = struct {
         }
     }
 
-    /// Replay a recorded frame onto the pixels. `Runtime.frame` only records
-    /// primitives; nothing is rasterised until this runs.
+    /// Replay a recorded frame onto the pixels. `Runtime.frame` only records primitives;
+    /// nothing is rasterised until this runs.
     pub fn paintFrame(self: *Self, prims: []const elmz.Primitive) void {
         const r = self.renderer();
         // The prim carries the face, so paint does not need sticky state across
@@ -2280,20 +1948,7 @@ pub const Canvas = struct {
         };
     }
 
-    /// Copy `src` into this canvas with its top-left at `at`, compositing by
-    /// `src`'s alpha.
-    ///
-    /// The 4-byte RGBA stride is this file's business, so callers should never
-    /// restate it -- that is how the two previous hand-written copies of this
-    /// loop ended up in example `main`s. Anything that would land outside the
-    /// destination is dropped rather than erroring: compositing a contact sheet
-    /// is the use, and a half-visible tile is more useful than a fatal error.
-    ///
-    /// This was a `@memcpy` until a transparent source was needed, which is the
-    /// one thing a straight copy cannot do: it writes the source's alpha over
-    /// the destination's instead of blending into it. A fully opaque source row
-    /// still takes the memcpy path, so the common case -- tiles, snapshots --
-    /// stays byte-identical to the canvas it came from and pays nothing.
+    /// Copy `src` into this canvas with its top-left at `at`, compositing by `src`'s alpha.
     pub fn blitFrom(self: *Self, src: *const Self, at: [2]u32) void {
         if (at[0] >= self.w or at[1] >= self.h) return;
         const copy_w: usize = @min(src.w, self.w - at[0]);
@@ -2319,10 +1974,6 @@ pub const Canvas = struct {
     }
 
     /// Baked path: same ramp, sampled from a stencil instead of computed.
-    ///
-    /// The stencil is built in the shape's own space, so `offset` moves the
-    /// blit and never the bake. A silhouette that would need an absurd mask
-    /// falls back to the distance field rather than allocating it.
     fn haloBaked(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
         const blur = @max(h.blur, 0);
         // Insets for an inner glow; see `haloSdf`.
@@ -2412,18 +2063,8 @@ pub const Canvas = struct {
         }
     }
 
-    /// The stencil for one silhouette, built on first use and kept.
-    ///
-    /// Large silhouettes get a 9-SLICE TEMPLATE instead of a full mask. The
-    /// coverage at the middle of an edge depends only on the distance from
-    /// that edge, and the interior is solid, so one small square describes
-    /// every size at a given radius and blur. `w` and `h` therefore drop out of
-    /// the key -- which is the real prize: a view full of differently-sized
-    /// glowing rows used to evict every mask every frame and bake forever.
-    /// Memory is the side effect, not the point.
-    ///
-    /// Silhouettes too small to slice still get a full bake, so the cache holds
-    /// two shapes of entry.
+    /// The stencil for one silhouette, built on first use and kept. Large silhouettes get a
+    /// 9-SLICE TEMPLATE instead of a full mask.
     fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32, mode: elmz.Halo.Mode, spread: f32) ?*Mask {
         if (sw <= 0 or sh <= 0) return null;
         const grow = falloffReach(mode, blur, false) + 1;
@@ -2530,10 +2171,8 @@ pub const Canvas = struct {
         return &self.masks.items[self.masks.items.len - 1];
     }
 
-    /// Coverage of one rounded-rect silhouette grown by `grow` on every side,
-    /// into a `rw` x `rh` buffer. The shape's own top-left lands at
-    /// (grow, grow), which is what lets a template's corner band be copied
-    /// straight out at any target size.
+    /// Coverage of one rounded-rect silhouette grown by `grow` on every side, into a `rw` x
+    /// `rh` buffer.
     fn bakeStencil(px: []u8, rw: u32, rh: u32, sw: i32, sh: i32, r: f32, blur: f32, grow: f32, mode: elmz.Halo.Mode, core: f32) void {
         // An inner rim is the one mode whose field is not local to the edge: it
         // runs a full `blur` in, and past `blur` in from every side the metric
@@ -2600,12 +2239,6 @@ pub const Canvas = struct {
     }
 
     /// Source-over one pixel, straight (non-premultiplied) alpha.
-    ///
-    /// Destination alpha is tracked rather than assumed opaque: a canvas made
-    /// by `init` starts at alpha 0, and compositing onto one of those is the
-    /// case that silently produced black before. With an opaque destination
-    /// this reduces to `blendPixel`'s arithmetic, so a composited blit and a
-    /// painted quad of the same colour land on the same byte.
     fn composite(dst: *[4]u8, src: *const [4]u8) void {
         const sa: f32 = @as(f32, @floatFromInt(src[3])) / 255.0;
         const da: f32 = @as(f32, @floatFromInt(dst[3])) / 255.0;
@@ -2626,17 +2259,13 @@ pub const Canvas = struct {
         dst[3] = toByte(out_a * 255.0);
     }
 
-    /// `@intFromFloat` traps outside the type, and a rounding error one ulp
-    /// above 255 would be a crash in the paint loop rather than a wrong pixel.
+    /// `@intFromFloat` traps outside the type, and a rounding error one ulp above 255 would
+    /// be a crash in the paint loop rather than a wrong pixel.
     fn toByte(v: f32) u8 {
         return @intFromFloat(@min(255.0, @max(0.0, v)));
     }
 
     /// Encode to PNG and write it to the working directory.
-    ///
-    /// Every example wants exactly this, and the two-line version is easy to
-    /// get subtly wrong: `encodePng` returns owned bytes that must survive
-    /// until after the write.
     pub fn writePng(self: *const Self, io: std.Io, gpa: Allocator, name: []const u8) !void {
         const png = try self.encodePng(gpa);
         defer gpa.free(png);
@@ -2702,9 +2331,7 @@ pub const Canvas = struct {
         );
     }
 
-    /// Sticky until the next call. The canvas already holds every face, so this
-    /// is a field write: no load, no parse, and emphatically not `setFontAt`,
-    /// which would clear both caches and rebuild them on every element.
+    /// Sticky until the next call.
     fn vtSetFace(ptr: *anyopaque, face: u16) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.cur_face = face;
@@ -2718,23 +2345,14 @@ pub const Canvas = struct {
     }
 
     /// Point the STICKY face at a variable instance of `weight`.
-    ///
-    /// Only `weight` is honoured: it is the one axis a theme style names, and
-    /// a general axis map would be a structure the schema does not have. A
-    /// non-variable face has no `wght`, `atCoords` returns the default
-    /// instance, and the pixels are unchanged -- so styling a static font with
-    /// a weight is a no-op rather than an error, which is the same rule a
-    /// missing font follows.
     pub fn setFaceWeight(self: *Self, weight: u16) void {
         if (weight == self.cur_weight) return;
         self.cur_weight = weight;
         self.revaryFace(self.cur_face);
     }
 
-    /// The `wght` axis of a face, or null when it has none.
-    ///
-    /// The tag is the four bytes 'w','g','h','t' packed big-endian, the same
-    /// layout `fvar` uses.
+    /// The `wght` axis of a face, or null when it has none. The tag is the four bytes
+    /// 'w','g','h','t' packed big-endian, the same layout `fvar` uses.
     const wght_tag: u32 = (@as(u32, 'w') << 24) | (@as(u32, 'g') << 16) | (@as(u32, 'h') << 8) | @as(u32, 't');
 
     fn wghtAxis(face: @import("cedar.zig").Font) ?usize {
@@ -2746,9 +2364,6 @@ pub const Canvas = struct {
     }
 
     /// Rebuild `cur_face`'s instance at `cur_weight`.
-    ///
-    /// The caches are keyed by FACE INDEX, not by instance, so a rebuild must
-    /// invalidate them or the new weight lays out the old weight's widths.
     fn revaryFace(self: *Self, index: u16) void {
         // Rebuild from the PRISTINE face, never from the current one. Applying a
         // variation to an already-varied face compounds the deltas, and the old
@@ -2816,29 +2431,19 @@ pub const Canvas = struct {
     }
 
     /// The cache identity of whatever is actually answering measurements.
-    /// A live face reports its instance key; the built-in face reports a
-    /// constant, so its numbers cache like any other face's. Non-zero on
-    /// purpose: 0 is what `instanceKey()` returns for an absent face, and
-    /// reusing it would make "no font" indistinguishable from "not computed".
     fn faceKey(self: *Self) usize {
         return self.faceKeyAt(0);
     }
 
-    /// The cache key for face `index`, which must be the face the caller is
-    /// about to draw with -- metrics and glyphs come from the same outline.
+    /// The cache key for face `index`, which must be the face the caller is about to draw
+    /// with -- metrics and glyphs come from the same outline.
     fn faceKeyAt(self: *Self, index: usize) usize {
         const f = self.facePtrAt(index);
         if (f.available()) return f.instanceKey();
         return if (self.font.available()) self.font.instanceKey() else elmfont_face_key;
     }
 
-    /// Font metrics for one string, cached. `dev` is the DEVICE size; the
-    /// divide-back for HiDPI happens at the call site, so what is stored is the
-    /// number the glyphs were actually fitted at.
-    ///
-    /// The cache OWNS its key bytes. Pointing into the frame arena would dangle
-    /// at the next frame's reset, which is the trap that makes a naive version
-    /// corrupt rather than slow.
+    /// Font metrics for one string, cached.
     fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
         return self.cachedMeasureFace(bytes, dev, 0);
     }
@@ -2884,10 +2489,8 @@ pub const Canvas = struct {
         self.wrap_cache.clearRetainingCapacity();
     }
 
-    /// Where a paragraph breaks, cached like a measurement -- because wrapping
-    /// IS measuring: it walks every glyph to find where a line can end. A
-    /// wrapped label asks the same question more than once per frame (layout,
-    /// the row fit, then paint), so the second and third ask are now free.
+    /// Where a paragraph breaks, cached like a measurement -- because wrapping IS
+    /// measuring: it walks every glyph to find where a line can end.
     fn cachedWrap(self: *Self, bytes: []const u8, dev: f32, max_w: f32, out: [][]const u8) usize {
         if (out.len == 0) return 0;
         const face = self.font.instanceKey();
@@ -2927,11 +2530,7 @@ pub const Canvas = struct {
         return n;
     }
 
-    /// Measured at the DEVICE size and divided back, never "measure logical and
-    /// hope". Advances are not exactly linear in point size -- hinting and
-    /// grid-fitting move stems by whole pixels -- so at 1.25x the width of a
-    /// string is not 1.25x the width measured at 1x, and a layout built on the
-    /// scaled-down number would disagree with the glyphs actually drawn.
+    /// Measured at the DEVICE size and divided back, never "measure logical and hope".
     fn vtMeasureFace(ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) elmz.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const m = self.cachedMeasureFace(bytes, size * self.scale, face);
@@ -2960,9 +2559,8 @@ pub const Canvas = struct {
         };
     }
 
-    /// Wrapping is decided in DEVICE space for the same reason measurement is:
-    /// a line that fits at 1x can overflow at 1.5x, and the decision has to be
-    /// made against the glyphs that will actually be rasterised.
+    /// Wrapping is decided in DEVICE space for the same reason measurement is: a line that
+    /// fits at 1x can overflow at 1.5x.
     fn vtWrap(
         ptr: *anyopaque,
         bytes: []const u8,
@@ -2975,9 +2573,8 @@ pub const Canvas = struct {
         return self.cachedWrap(bytes, size * self.scale, max_width * self.scale, out);
     }
 
-    /// Advances are font units, so this is device space for the same reason
-    /// measurement is: a caret placed from a logical-space sum drifts from the
-    /// glyphs actually rasterised.
+    /// Advances are font units, so this is device space for the same reason measurement is:
+    /// a caret placed from a logical-space sum drifts from the glyphs.
     fn vtAdvanceText(ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (!self.font.available()) return elmfont.advanceTo(bytes, size, index);
@@ -3045,8 +2642,8 @@ pub const Canvas = struct {
         try out.appendSlice(gpa, &crc_bytes);
     }
 
-    /// zlib stream using stored (uncompressed) deflate blocks — no compressor
-    /// dependency, valid PNG output.
+    /// zlib stream using stored (uncompressed) deflate blocks — no compressor dependency,
+    /// valid PNG output.
     fn zlibStored(gpa: Allocator, data: []const u8) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(gpa);
@@ -3165,13 +2762,8 @@ test "a quad covers exactly the pixels it names and nothing else" {
     try testing.expectEqual(@as(u8, 0), at(c.px, 15, 14));
 }
 
-/// Decode a PNG this library wrote -- signature, chunks, IDAT, stored deflate
-/// blocks -- and hand back the raw RGBA rows with the filter bytes stripped.
-///
-/// Deliberately not a general PNG decoder: it asserts the profile we EMIT, so a
-/// change to the encoder has to come through here. The stored-block header is
-/// checked against its own complement, which is the one part of the zlib stream
-/// a writer can get wrong without the bytes changing.
+/// Decode a PNG this library wrote -- signature, chunks, IDAT, stored deflate blocks -- and
+/// hand back the raw RGBA rows with the filter bytes stripped.
 fn decodeStoredPng(gpa: Allocator, png: []const u8) ![]u8 {
     var w: u32 = 0;
     var h: u32 = 0;
@@ -4057,9 +3649,7 @@ fn testPx(c: *Canvas, x: usize, y: usize) [4]u8 {
     return c.px[o..][0..4].*;
 }
 
-/// RGB only. A freshly `init`ed canvas starts at alpha 0 and the opaque fast path
-/// in `blendPixel` leaves destination alpha alone, which is correct for a canvas
-/// that is cleared and painted as a whole -- colour is what these tests are about.
+/// RGB only.
 fn testRgb(c: *Canvas, x: usize, y: usize) [3]u8 {
     const p = testPx(c, x, y);
     return .{ p[0], p[1], p[2] };
@@ -4567,8 +4157,8 @@ test "a paragraph is wrapped once, then answered from the cache" {
     try std.testing.expectEqual(@as(usize, 3), c.wrap_misses);
 }
 
-/// Ink in a buffer, for tests that care whether anything was painted. A draw
-/// that silently produces nothing is the failure mode this counts against.
+/// Ink in a buffer, for tests that care whether anything was painted. A draw that silently
+/// produces nothing is the failure mode this counts against.
 fn inkPixels(px: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -5015,13 +4605,8 @@ test "two weights of a variable face differ through the seam" {
     try std.testing.expectEqual(light_hash, std.hash.Wyhash.hash(0, c.px));
 }
 
-/// Non-zero pixels in a frame. Used by the variation test to compare how much
-/// of the canvas each weight covers.
-/// A coords array that sets `wght` and leaves every other axis at its default.
-///
-/// `atCoords` takes coordinates in AXIS ORDER, so a one-element array sets
-/// axis 0. On Roboto Flex axis 0 is `GRAD` and `wght` is the eleventh, which is
-/// why a bare `&.{700}` varied the wrong axis and drew the default weight.
+/// Non-zero pixels in a frame. Used by the variation test to compare how much of the canvas
+/// each weight covers.
 fn wghtCoords(face: @import("cedar.zig").Font, weight: f32, out: []f32) []const f32 {
     const n = @min(face.axisCount(), out.len);
     var i: usize = 0;

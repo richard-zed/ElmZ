@@ -1,24 +1,12 @@
-//! Where a frame's time actually goes, by primitive count.
-//!
-//! Three questions, one harness:
-//!   1. how does build (view + layout + hit list) scale with prim count,
-//!   2. how does rasterisation scale with the same,
-//!   3. what does a hovering pointer cost on top of the first,
-//!   4. what each fill VARIANT costs per pixel (paint is area-bound, so this
-//!      is the only question that can move the frame time),
-//!   5. how the distance field and the baked stencil compare, including the
-//!      cache-pressure case where every stencil re-bakes every frame.
-//!
-//! Headless on purpose: the numbers are the output. `zig build run-bench`.
-//! No PNG -- a picture of a benchmark is a bar chart, and this prints one.
+//! Where a frame's time actually goes, by primitive count. Three questions, one harness: 1.
 
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
 
 const W: u32 = 520;
-/// Tall enough that 400 rows are on-canvas. Anything the clip prunes would
-/// shrink the prim count and quietly measure a smaller frame than it claims.
+/// Tall enough that 400 rows are on-canvas. Anything the clip prunes would shrink the prim
+/// count and quietly measure a smaller frame than it claims.
 const H: u32 = 7200;
 
 pub const Msg = enum { inc };
@@ -36,9 +24,8 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 
 const Elem = elmz.Element(Msg);
 
-/// One row = 5 prims (row fill, swatch, label, button fill, button label) and
-/// one hit region, so `rows` is a dial on prim count that stays realistic
-/// rather than 2000 stacked rectangles.
+/// One row = 5 prims (row fill, swatch, label, button fill, button label) and one hit
+/// region.
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *Elem {
     var buf: [512]*Elem = undefined;
     const n = @min(m.rows, buf.len);
@@ -101,10 +88,7 @@ fn measure(
     return out;
 }
 
-/// One full-canvas fill, repeated. Paint is the expensive half of a frame and
-/// it is area-bound, so the useful unit is nanoseconds per pixel per VARIANT --
-/// a solid quad and a diagonal ramp are the same work at the prim level and
-/// nothing alike at the pixel level.
+/// One full-canvas fill, repeated.
 fn measureFill(io: std.Io, c: *software.Canvas, fill: elmz.Fill, iters: usize) u64 {
     const rect = elmz.Rect{ .x = 0, .y = 0, .w = @floatFromInt(c.w), .h = @floatFromInt(c.h) };
     c.fillRectClip(rect, fill, rect); // warm: first touch costs page faults
@@ -114,17 +98,10 @@ fn measureFill(io: std.Io, c: *software.Canvas, fill: elmz.Fill, iters: usize) u
     return @intCast(@divTrunc(t1 - t0, @as(i128, @intCast(iters))));
 }
 
-/// A halo is either a distance field evaluated per pixel or one baked stencil
-/// blitted. `cold` is the bake (cache miss, full silhouette built); `hot` is
-/// the blit. If `hot_baked` ever loses to `sdf`, the default of always baking
-/// is on the wrong side of the evidence.
+/// A halo is either a distance field evaluated per pixel or one baked stencil blitted.
 const HaloCost = struct { cold: u64, hot: u64, stencils: usize };
 
-/// One frame of `k` distinct silhouettes, repeated. Distinct radii mean
-/// distinct cache entries, and the cache holds eight: past that a cyclic
-/// redraw pattern evicts every entry before it is reused, so every halo
-/// re-bakes every frame. That is the worst case for slicing, and the only case
-/// where the distance field could still win.
+/// One frame of `k` distinct silhouettes, repeated.
 const Stress = struct { ns: i128, bakes: usize, stencils: usize };
 
 fn measureStress(io: std.Io, gpa: std.mem.Allocator, quality: elmz.Halo.Quality, k: usize, iters: usize) !Stress {

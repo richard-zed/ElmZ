@@ -1,12 +1,4 @@
-//! The counter app in a real window — and nothing else.
-//!
-//! There is no SDL in this file. It composes three pieces: the app
-//! (`counter.zig`, which `update`/`view` already live in), a rasterizer
-//! (`software`), and a platform (`platform_sdl3`), then hands the loop to
-//! `runner`. Swapping the platform for a Wayland-`wl_shm` backend later is a
-//! one-line change here and touches nothing else.
-//!
-//!   zig build run-counter-sdl3          (needs SDL3 + its headers)
+//! The counter app in a real window — and nothing else. There is no SDL in this file.
 
 const std = @import("std");
 const runner = @import("runner");

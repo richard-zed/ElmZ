@@ -1,18 +1,4 @@
 //! Widgets: the named controls, and the options structs they take.
-//!
-//! Split out of `elmz.zig` so the file that owns the tree, layout and paint
-//! stops growing every time a control is added. A builder here is an ordinary
-//! `Element` in a shape the library happens to know how to drive -- the layout
-//! engine never learns that a select exists.
-//!
-//! ONE-LINE FORWARDERS IN `Ui`. `usingnamespace` is gone, so `ui.select(...)`
-//! cannot be spliced in from this file; each builder is forwarded by a single
-//! line in the `Ui` body instead. Call sites are unchanged.
-//!
-//! WHY `anytype` FOR `ui` AND `o`: `Ui` is generic over the app's Msg (`M`), and
-//! the option structs capture `M` (`msg: M`, `[]const Choice(M)`), so this file
-//! cannot name them concretely. The forwarder is what carries the real types;
-//! the bodies only need to reach through.
 
 const std = @import("std");
 const elmz = @import("elmz.zig");
@@ -20,20 +6,20 @@ const elmz = @import("elmz.zig");
 pub fn SliderOpts(comptime M: type) type {
     return struct {
         key: u64,
-        /// Into the Model, not the arena: a drag outlives the frame that
-        /// started it, and app state is the one thing that does.
+        /// Into the Model, not the arena: a drag outlives the frame that started it, and
+        /// app state is the one thing that does.
         value: *f32,
         min: f32 = 0,
         max: f32 = 1,
-        /// null = continuous. Allowed, never enforced: a drag quantises as
-        /// it goes, and a click is a nudge of one step toward the pointer.
+        /// null = continuous. Allowed, never enforced: a drag quantises as it goes, and a
+        /// click is a nudge of one step toward the pointer.
         step: ?f32 = null,
         orientation: elmz.Orientation = .horizontal,
         msg: M,
         /// Travel along the long axis.
         length: f32 = 120,
-        /// Thickness of the TRACK. The knob is twice this, and the hit
-        /// rect is the knob's diameter.
+        /// Thickness of the TRACK. The knob is twice this, and the hit rect is the knob's
+        /// diameter.
         thickness: f32 = 6,
         margin_left: f32 = 0,
         margin_right: f32 = 0,
@@ -43,24 +29,8 @@ pub fn SliderOpts(comptime M: type) type {
     };
 }
 
-/// A value control: track, filled portion and knob, composed from rects
-/// because none of the three is a primitive worth adding.
-///
-/// The value is read at view time, so every child's geometry is known
-/// before layout. None of the children sets `on_press` or `focusable`,
-/// so none of them records a hit region and the stack's own region is
-/// the only claim on the rect -- which is why composing cannot create a
-/// z-order argument against the pointers that are meant to hit it.
-///
-/// The hit rect is the KNOB's diameter in the thin axis, not the
-/// track's thickness. A 6px track is ungrabbable otherwise, and the
-/// runtime drags whatever region it is given, so widening the region is
-/// the whole fix.
-/// A text field.
-///
-/// `key` is required and not defaulted: it is the focus identity, and a field
-/// that cannot take focus cannot be typed into. The VALUE lives in the Model
-/// behind `edit`, so the same document survives any number of rebuilds.
+/// A value control: track, filled portion and knob, composed from rects because none of the
+/// three is a primitive worth adding.
 pub fn TextInputOpts(comptime M: type) type {
     return struct {
         key: u64,
@@ -68,8 +38,8 @@ pub fn TextInputOpts(comptime M: type) type {
         size: f32 = 14,
         mask: bool = false,
         placeholder: []const u8 = "",
-        /// Emitted when the runtime moves the caret -- a click. Typing is the
-        /// app's own hook, because that is where the reducer is called.
+        /// Emitted when the runtime moves the caret -- a click. Typing is the app's own
+        /// hook, because that is where the reducer is called.
         msg: ?M = null,
         width: ?f32 = null,
         height: ?f32 = null,
@@ -202,15 +172,14 @@ pub fn SelectOpts(comptime M: type) type {
         key: u64,
         open: bool,
         selected: u16,
-        /// A pointer into the Model so hover, arrows and typeahead write one
-        /// number. Two copies would let the highlight disagree with what
-        /// Enter activates.
+        /// A pointer into the Model so hover, arrows and typeahead write one number. Two
+        /// copies would let the highlight disagree with what Enter activates.
         active: *?u16,
         options: []const elmz.Choice(M),
         /// Emitted by the closed field, to toggle.
         msg: M,
-        /// Shows when nothing is selected, and when `selected` is out of
-        /// range -- which is a state a caller can reach without meaning to.
+        /// Shows when nothing is selected, and when `selected` is out of range -- which is
+        /// a state a caller can reach without meaning to.
         placeholder: []const u8 = "",
         size: f32 = 16,
         width: ?f32 = null,
@@ -225,11 +194,8 @@ pub fn SelectOpts(comptime M: type) type {
     };
 }
 
-/// A collapsed list of options. The field is a button because that is
-/// what it is: a focusable, clickable box showing the current value.
-/// Placement, dismissal and typeahead belong to the runtime popup
-/// layer, which needs the anchor's real laid-out rect -- something
-/// `view` cannot know, because layout runs after `view` returns.
+/// A collapsed list of options. The field is a button because that is what it is: a
+/// focusable, clickable box showing the current value.
 pub fn select(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const label = if (o.selected < o.options.len)
         o.options[o.selected].label
@@ -264,9 +230,7 @@ pub fn select(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
 pub fn MenuOpts(comptime M: type) type {
     return struct {
         key: u64,
-        /// The trigger's own caption. `Widget.menu` deliberately carries no
-        /// label: a menu is commands plus the button that reveals them, and
-        /// the caption belongs to the button.
+        /// The trigger's own caption.
         label: []const u8,
         open: bool,
         active: *?u16,
@@ -285,10 +249,8 @@ pub fn MenuOpts(comptime M: type) type {
     };
 }
 
-/// The menu node IS its trigger, so its laid-out rect is the popup's
-/// anchor with no cross-node key lookup and no "anchor is not in this
-/// frame" case. Same rule as select, different geometry: a menu drops
-/// below its trigger and flips, where a select grows centred on field.
+/// The menu node IS its trigger, so its laid-out rect is the popup's anchor with no
+/// cross-node key lookup and no "anchor is not in this frame" case.
 pub fn menu(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const e = ui.button(.{
         .label = o.label,
@@ -322,17 +284,13 @@ pub fn ControlOpts(comptime M: type) type {
         key: u64,
         label: []const u8,
         kind: ControlKind = .checkbox,
-        /// Drawn from the Model, never held by the widget: a control that
-        /// remembered its own state would disagree with the value the app
-        /// fed back on the next frame.
+        /// Drawn from the Model, never held by the widget: a control that remembered its
+        /// own state would disagree with the value the app fed back on the next.
         checked: bool,
-        /// Emitted on activation. The Model flips `checked`; nothing here
-        /// does, so the same builder works for a value derived from
-        /// somewhere else entirely.
+        /// Emitted on activation. The Model flips `checked`; nothing here does, so the same
+        /// builder works for a value derived from somewhere else entirely.
         msg: M,
-        /// Set membership for a radio. Nothing reads it at paint time -- it
-        /// exists so a later roving group can find its members without
-        /// needing a container element to hang them on.
+        /// Set membership for a radio.
         group: u16 = 0,
         box: f32 = 16,
         gap: f32 = 8,
@@ -345,14 +303,8 @@ pub fn ControlOpts(comptime M: type) type {
     };
 }
 
-/// Checkbox, radio and switch: one builder because the three differ in
-/// shape and in nothing else. All three take `checked` in and emit a
-/// message out, so none of them owns state.
-///
-/// The WHOLE ROW is the hit region -- box, gap and label -- because a
-/// 16px box is a small target and the label is what the reader is
-/// actually aiming at. That is why the row carries the key and the
-/// message rather than the box.
+/// Checkbox, radio and switch: one builder because the three differ in shape and in nothing
+/// else.
 pub fn control(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const Elem = @TypeOf(ui.*).Elem;
     const th = ui.theme;
@@ -452,9 +404,7 @@ pub fn ToastOpts(comptime M: type) type {
         text: []const u8,
         severity: elmz.Severity = .info,
         ttl_ms: u32 = 4000,
-        /// Emitted on expiry and on a click. The same message both ways on
-        /// purpose: "the reader closed it" and "it timed out" are one
-        /// decision for the Model, which is to forget it.
+        /// Emitted on expiry and on a click.
         msg: M,
         size: f32 = 13,
         /// Width of the severity bar down the left edge.
@@ -467,12 +417,7 @@ pub fn ToastOpts(comptime M: type) type {
     };
 }
 
-/// The colour a severity is drawn in. Public because an app composing
-/// its own notification -- a banner, a status line -- should not have to
-/// repeat the mapping to stay in step with the toast.
-/// Names for the three shapes `control` paints. Thin on purpose: the
-/// kind is the only thing they decide, so behaviour has one home and
-/// cannot drift between a toggle and a checkbox that look different.
+/// The colour a severity is drawn in.
 pub fn checkbox(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     var c = o;
     c.kind = .checkbox;
@@ -485,22 +430,16 @@ pub fn radio(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     return ui.control(c);
 }
 
-/// A toggle is a checkbox with different paint: same key, same message,
-/// same checked-in / message-out ownership. Only the silhouette moves.
+/// A toggle is a checkbox with different paint: same key, same message, same checked-in /
+/// message-out ownership. Only the silhouette moves.
 pub fn toggle(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     var c = o;
     c.kind = .toggle;
     return ui.control(c);
 }
 
-/// A notification. The Model owns whether it exists; the runtime owns
-/// when it stops, because the clock is the one thing `view` cannot see.
-///
-/// Carries `key` and `on_press` for two separate reasons: a click is how
-/// a reader dismisses it early, and the keyed hit region is also how the
-/// runtime finds the rect it needs to pause the countdown while the
-/// pointer is over it. NOT focusable -- a notification must never take
-/// a Tab stop away from the thing underneath.
+/// A notification. The Model owns whether it exists; the runtime owns when it stops,
+/// because the clock is the one thing `view` cannot see.
 pub fn toast(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     // Height 0 on purpose. A stretched row paints every child at the
     // row's inner height regardless of what the child measured, so the
@@ -544,13 +483,9 @@ pub fn toast(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
 pub fn Tab(comptime M: type) type {
     return struct {
         label: []const u8,
-        /// Dispatched on click, and by Enter or Space when the cursor is on
-        /// this tab. A Msg carries no payload, so "which tab" is the
-        /// identity of the message rather than a number inside it.
+        /// Dispatched on click, and by Enter or Space when the cursor is on this tab.
         msg: M,
-        /// Painted only while this tab is the selected one. Empty is legal:
-        /// a strip governing content the app draws elsewhere is a normal
-        /// shape, not a degenerate one.
+        /// Painted only while this tab is the selected one.
         children: []const *elmz.Element(M) = &.{},
     };
 }
@@ -558,10 +493,7 @@ pub fn Tab(comptime M: type) type {
 pub fn TabsOpts(comptime M: type) type {
     return struct {
         key: u64,
-        /// The Model decides. Out of range paints an empty panel instead of
-        /// asserting: a rebuilt view can drop a tab the Model still names,
-        /// and a library that panics on that turns a stale index into a
-        /// crash on the frame after a content change.
+        /// The Model decides.
         selected: u16,
         tabs: []const Tab(M),
         size: f32 = 16,
@@ -577,22 +509,8 @@ pub fn TabsOpts(comptime M: type) type {
     };
 }
 
-/// A tab strip over its panels, where only the selected tab's children
-/// are in the tree at all -- the others are never built, so nothing
-/// hidden can take a focus stop or a hit region.
-///
-/// Every tab is a ROVING row, exactly as in `ui.list`: the strip is one
-/// Tab stop and arrows move between tabs, which is what makes a ten-tab
-/// window cost one press of Tab rather than ten.
-///
-/// The live tab is marked with a `.selected` fill, `.text` in place of
-/// `.text_muted`, and an `.accent` border. An UNDERLINE indicator would
-/// be the usual shape and is the one thing deliberately not done: a bar
-/// spanning the tab needs the tab's own laid-out width, and `view`
-/// cannot measure text without becoming a function of the font. The
-/// border carries the same signal -- `.selected` and `.hover` are only
-/// 1.2:1 apart, so something in the accent colour has to say which is
-/// live -- without inventing a second measurement path.
+/// A tab strip over its panels, where only the selected tab's children are in the tree at
+/// all.
 pub fn tabs(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const Elem = @TypeOf(ui.*).Elem;
     const th = ui.theme;
@@ -648,15 +566,9 @@ pub fn ListOpts(comptime M: type) type {
     return struct {
         key: u64,
         rows: []const elmz.Choice(M),
-        /// The committed row, owned by the Model. PAINTING ONLY: the
-        /// cursor is the runtime's, because "where the keyboard was last"
-        /// is not data, and restoring it into a different list after a
-        /// remount would land on an index that no longer means the same
-        /// thing.
+        /// The committed row, owned by the Model.
         selected: ?u16 = null,
-        /// Uniform on purpose. A list whose rows differ in height needs the
-        /// cursor position to be computed rather than multiplied, and
-        /// nothing has asked for that.
+        /// Uniform on purpose.
         row_h: f32 = 26,
         size: f32 = 16,
         width: ?f32 = null,
@@ -672,18 +584,6 @@ pub fn ListOpts(comptime M: type) type {
 }
 
 /// A vertical list as ONE Tab stop, with arrows moving inside it.
-///
-/// No widget payload, and that is a deliberate reading of the rules
-/// rather than an omission: a list is a STRUCTURE, not a control. Every
-/// behaviour it needs already exists -- roving is `Element.roving`,
-/// selection belongs to the Model, hover and press are ordinary fields
-/// on the row -- so a `.list` payload would carry nothing the runtime
-/// could act on.
-///
-/// Rows are `focusable` even though `focusStep` skips them, because a
-/// region has to EXIST before `rovingStep` can find it: `hitAppend`
-/// records one for a keyed focusable element, which is exactly what
-/// makes an arrow able to land on a row that carries no message.
 pub fn list(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     const Elem = @TypeOf(ui.*).Elem;
     const th = ui.theme;

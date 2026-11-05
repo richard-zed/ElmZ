@@ -1,8 +1,5 @@
-//! A counter app, driven headlessly: no window, no GPU, no event loop thread.
-//! Frames are rendered to PNG so layout can be inspected without a display.
-//! Swapping in a real backend means handing `Runtime.frame()` a different
-//! `elmz.Renderer` and feeding it events from SDL/Mach/winit instead of the
-//! script below — `update`/`view` do not change.
+//! A counter app, driven headlessly: no window, no GPU, no event loop thread. Frames are
+//! rendered to PNG so layout can be inspected without a display.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -173,8 +170,8 @@ pub fn main(init: std.process.Init) !void {
     try out.flush();
 }
 
-/// Solid colours keep printing as hex; gradients say so, because a hex would
-/// be one sample of something that is not one colour.
+/// Solid colours keep printing as hex; gradients say so, because a hex would be one sample
+/// of something that is not one colour.
 fn fillDesc(f: elmz.Fill, buf: *[24]u8) []const u8 {
     return switch (f) {
         .solid => |c| std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ c.r, c.g, c.b }) catch "#??",

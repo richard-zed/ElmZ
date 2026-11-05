@@ -1,14 +1,5 @@
-//! Filling outlines, and what the fill rule decides when two contours overlap.
-//! Headless: `zig build run-path` writes path.png.
-//!
-//! The four tiles are the same geometry twice and the rule's answer twice. The
-//! top-left and top-right tiles hold identical points; only the WINDING of the
-//! inner square differs, and that alone turns a hole into a filled square under
-//! the nonzero rule. The bottom tiles then show evenodd reaching the same hole
-//! from the same winding, and curves arriving flattened rather than as corners.
-//!
-//! This exists because the multi-subpath fill had a test and no picture. A
-//! filler that passes an area count can still draw the wrong polygon.
+//! Filling outlines, and what the fill rule decides when two contours overlap. Headless:
+//! `zig build run-path` writes path.png.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -20,12 +11,8 @@ const H = 440;
 const tile = 160;
 const gap = 40;
 
-/// Two squares, one path: outer 0..100, inner inset 30, so a hole is a 40x40
-/// square in the middle.
-///
-/// `inner_reversed` is the whole point. Outer runs clockwise; an inner contour
-/// wound the other way subtracts under nonzero, and one wound the same way adds.
-/// Same eight points either way, in the same order, with four of them swapped.
+/// Two squares, one path: outer 0..100, inner inset 30, so a hole is a 40x40 square in the
+/// middle. `inner_reversed` is the whole point.
 fn squares(comptime inner_reversed: bool) elmz.Path {
     const pts: [8][2]f32 = if (inner_reversed)
         .{ .{ 0, 0 }, .{ 100, 0 }, .{ 100, 100 }, .{ 0, 100 }, .{ 30, 30 }, .{ 30, 70 }, .{ 70, 70 }, .{ 70, 30 } }
@@ -37,18 +24,16 @@ fn squares(comptime inner_reversed: bool) elmz.Path {
     };
 }
 
-/// The same-winding squares with the rule flipped. Identical points to the
-/// top-right tile, so anything that differs on screen is the rule's doing.
+/// The same-winding squares with the rule flipped. Identical points to the top-right tile,
+/// so anything that differs on screen is the rule's doing.
 fn squaresRule(comptime rule: elmz.FillRule) elmz.Path {
     var p = squares(false);
     p.rule = rule;
     return p;
 }
 
-/// Four quads, no corners: the control points sit on the box corners so the
-/// sides bow outward into something round. Drawn to prove curves are flattened
-/// by the backend rather than being turned into the polygon their endpoints
-/// suggest.
+/// Four quads, no corners: the control points sit on the box corners so the sides bow
+/// outward into something round.
 fn blob() elmz.Path {
     return .{
         .ops = &[_]elmz.PathOp{ .move, .quad, .quad, .quad, .quad, .close },

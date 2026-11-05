@@ -1,35 +1,5 @@
-//! Glow and shadow, in every shape the library has: the three cuts of one ramp,
-//! the two renderers behind it, and the same ramp thrown as a shadow.
-//!
-//! Four things, in order of how much they cost:
-//!
-//!   1. a GRADIENT BACKGROUND, built from theme tokens rather than literals,
-//!      so a `theme.zon` recolours the room as well as the furniture;
-//!   2. TWO BUTTONS THAT ARE THE SAME BUTTON -- one asking the distance field
-//!      for its halo and one asking for a baked stencil. Same blur, same spread,
-//!      same colour: if the two renderers ever disagree, a person sees both in
-//!      one glance instead of having to remember the last one. The pixel-level
-//!      agreement claim lives in the test suite, not in the eye;
-//!   3. THREE CUTS OF ONE RAMP. `glow` straddles the edge, so half the ramp
-//!      lands ON the shape -- light wraps a face, it does not avoid it.
-//!      `outer_glow` is that ramp cut against the ELEMENT, so nothing tints the
-//!      face. `inner_glow` is the mirrored ramp cut inward: a lit rim with a
-//!      dark centre. Colour, blur and spread are identical across the three, so
-//!      the only variable on screen is the cut;
-//!   4. A SHADOW FAN. `Halo.shadow` derives the offset FROM the light, so a
-//!      shadow cannot point the wrong way for its own light -- the one
-//!      combination with no use. The angle is where the light comes FROM,
-//!      clockwise from "to the right"; the shadow falls opposite.
-//!
-//! Worth knowing while looking: a lit halo cannot be a baked stencil. The mask
-//! is keyed on the silhouette alone and a light changes the mask's CONTENTS,
-//! so lit halos take the distance-field path and `quality = .baked` does not
-//! override it. The printed stencil count is how that shows up, and it is why
-//! the shadow row costs what it costs.
-//!
-//! Everything here is tokens plus geometry. There is not a single hex literal in
-//! `view` that is not an alpha ramp, which is the whole point of a theme
-//! protocol: swap the file, get a different picture, change no code.
+//! Glow and shadow, in every shape the library has: the three cuts of one ramp, the two
+//! renderers behind it, and the same ramp thrown as a shadow.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -43,9 +13,7 @@ const software = @import("software");
 const W = 620;
 const H = 484;
 
-/// The app declaration the window composition binds to. Same shape as every
-/// other example: title, size, state, and optionally the keys a `theme.zon` may
-/// set that the library knows nothing about.
+/// The app declaration the window composition binds to.
 pub const app = .{
     .title = "elmz - glow, shadow, and the three cuts",
     .theme_path = "theme.zon",
@@ -63,9 +31,7 @@ pub const Model = struct {
 };
 pub const Msg = enum { primary };
 
-/// The app tier: keys a `theme.zon` may set that the library knows nothing
-/// about. Declaring the struct is what makes the keys checkable -- an undeclared
-/// key is a parse error, not a silently ignored line.
+/// The app tier: keys a `theme.zon` may set that the library knows nothing about.
 pub const Tokens = struct {
     title_size: f32 = 30,
 };

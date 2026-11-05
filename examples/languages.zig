@@ -1,16 +1,5 @@
-//! Six languages, one frame, everything named in `theme.defaults.zon`.
-//!
-//! The point is that NO font name appears in this file. Each label asks for a
-//! STYLE -- "arabic", "japanese" -- and the theme file decides what that means:
-//! which role its colour refers to and which typeface draws it. Edit the zon
-//! and every label moves; nothing here has to be recompiled.
-//!
-//! Three of the six share one file. Noto Sans CJK is a TrueType Collection
-//! holding ten faces, and Chinese, Japanese and Korean are three DIFFERENT
-//! indices into it -- they agree on most characters and disagree on exactly the
-//! ones a reader would notice, so picking the wrong index is a silent error.
-//!
-//!   zig build run-languages
+//! Six languages, one frame, everything named in `theme.defaults.zon`. The point is that NO
+//! font name appears in this file.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -38,8 +27,8 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
     return .{};
 }
 
-/// One row: the language's own name in its own script, plus what it is in
-/// English so a reader who cannot see the script can still tell them apart.
+/// One row: the language's own name in its own script, plus what it is in English so a
+/// reader who cannot see the script can still tell them apart.
 const Row = struct { style: []const u8, label: []const u8, said: []const u8 };
 
 const rows = [_]Row{

@@ -1,10 +1,5 @@
-//! What the debug overlay looks like, rendered headless so its layout can be
-//! inspected without a window. `zig build run-overlay` -> overlay.png.
-//!
-//! The NUMBERS here are a sample. Inside `run` they come from a real clock and
-//! a rolling window of painted frames; this file exists to show the shape of
-//! the thing -- four lines, top-left, drawn over whatever the app painted --
-//! and to keep it from silently becoming unreadable as the font changes.
+//! What the debug overlay looks like, rendered headless so its layout can be inspected
+//! without a window. `zig build run-overlay` -> overlay.png.
 
 const std = @import("std");
 const elmz = @import("elmz");

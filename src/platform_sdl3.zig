@@ -1,11 +1,4 @@
-//! SDL3 window backend: window, input, and present. It draws nothing — the
-//! pixels it is handed come from `software.zig` — and it exposes no SDL type
-//! to anything above it, only an `elmz.Window` vtable.
-//!
-//! WAYLAND ONLY, and the driver is FORCED below rather than left to SDL. An
-//! X11 window would be a second code path nothing tests, and on a Wayland-only
-//! SDL build the X11 attempt fails with "x11 not available", which reads like
-//! a missing system library rather than the decision it is.
+//! SDL3 window backend: window, input, and present.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -15,11 +8,6 @@ const c = @cImport({
 });
 
 /// The keys elmz names, resolved from SCANCODE rather than keycode.
-///
-/// A scancode is a physical POSITION, so `left` stays left on AZERTY, where
-/// the keycode reported for that position is something else. Shortcuts want
-/// the opposite -- the label -- which is why `Key` carries both and this
-/// function picks the stable one for the names.
 fn namedKey(sc: c.SDL_Scancode) ?elmz.Named {
     return switch (sc) {
         c.SDL_SCANCODE_RETURN, c.SDL_SCANCODE_KP_ENTER => .enter,
@@ -51,9 +39,7 @@ fn namedKey(sc: c.SDL_Scancode) ?elmz.Named {
     };
 }
 
-/// Widen, never narrow. `SDL_Keycode` is already Uint32 and `SDL_Scancode` is
-/// an enum with values like 0x40000050 -- the old `@truncate` to u8 turned the
-/// left arrow into 'P', which nothing noticed only because no key was bound.
+/// Widen, never narrow.
 fn keyEvent(ev: c.SDL_KeyboardEvent) elmz.Key {
     const m: u32 = @as(u32, ev.mod);
     return .{
@@ -81,20 +67,11 @@ pub const Windows = struct {
     w: u32,
     h: u32,
     quit: bool = false,
-    /// Only this backend toggles fullscreen, so it owns the flag. Querying
-    /// SDL for it instead would mean comparing against a window-flags bit,
-    /// and that constant has no compile check in a sandbox without headers.
+    /// Only this backend toggles fullscreen, so it owns the flag.
     fullscreen: bool = false,
-    /// Clipboard scratch, inbound. The clipboard text belongs to SDL and must
-    /// be freed, while the seam hands out BORROWED bytes that stay valid until
-    /// the next call -- so SDL's buffer is copied here and immediately freed
-    /// rather than returned and leaked.
+    /// Clipboard scratch, inbound.
     clip_in: [4096]u8 = undefined,
-    /// Clipboard scratch, outbound. `SDL_SetClipboardText` takes a C string and
-    /// the bytes an app passes come from the frame arena with no terminator, so
-    /// they are copied behind a NUL. Truncation is deliberate: a clipboard
-    /// write is a courtesy, and refusing the whole thing because it was long
-    /// would be the worse failure.
+    /// Clipboard scratch, outbound.
     clip_out: [4097]u8 = undefined,
 
     /// `title` must be null-terminated.
@@ -180,10 +157,8 @@ pub const Windows = struct {
         .deinit = vtDeinit,
     };
 
-    /// `ELMZ_EVENT_TRACE=1` logs the type of every event that reaches the
-    /// backend. Off by default. It exists for "the window will not close",
-    /// where the only question worth answering is which event the window
-    /// manager actually sends -- blaming it on headers is not an answer.
+    /// `ELMZ_EVENT_TRACE=1` logs the type of every event that reaches the backend. Off by
+    /// default.
     fn tracing() bool {
         const raw = std.c.getenv("ELMZ_EVENT_TRACE") orelse return false;
         const v = std.mem.span(raw);
@@ -272,10 +247,7 @@ pub const Windows = struct {
         }
     }
 
-    /// Device pixels per logical unit. SDL reports this as the window's pixel
-    /// density, which is what a scaled Wayland output or a Windows display
-    /// scale reports -- 1.0 on an unscaled display, so the unscaled path costs
-    /// one call and changes nothing.
+    /// Device pixels per logical unit.
     fn vtDensity(ptr: *anyopaque) f32 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const d = c.SDL_GetWindowPixelDensity(self.window);

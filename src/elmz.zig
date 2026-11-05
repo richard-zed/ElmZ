@@ -1,12 +1,4 @@
 //! elmz — an Elm / iced shaped GUI runtime for Zig 0.16+.
-//!
-//! The model: `view()` builds a tree of values from state, layout runs over
-//! that tree, the renderer turns it into primitives / pixels, input is hit
-//! tested against the same tree, and hits become messages fed back into
-//! `update()`. State is a plain value; widgets are data, not retained objects.
-//!
-//! No allocations survive a frame: the tree lives in a per-frame arena that is
-//! reset on the next `frame()` call.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -44,13 +36,6 @@ pub const Color = struct {
     }
 
     /// Six digits or eight, decided by the value's own magnitude.
-    ///
-    /// This exists because the alternative is worse than an error: a `.zon`
-    /// carries a bare `u32`, and `rgbHex(0x89b4fa80)` is not the colour and not
-    /// a rejection either -- it reads the LOW three bytes and returns a
-    /// perfectly plausible different colour. Silent and plausible is the one
-    /// outcome a loader must not produce, so the digits are counted instead of
-    /// the top byte being trusted.
     pub fn hex(v: u32) Color {
         return if (v > 0xFFFFFF) rgbaHex(v) else rgbHex(v);
     }
@@ -62,24 +47,14 @@ pub const Size = struct { w: f32 = 0, h: f32 = 0 };
 // paint: a solid colour is one case of a fill, not the whole type
 // ---------------------------------------------------------------------------
 
-/// Gradient stops: up to four colours held as VALUES, with each stop's position
-/// implied by how many there are.
-///
-/// The positions used to be stored per stop, which cost 8 bytes each and made
-/// `Stops` 36 bytes. A `Fill` carries one, and an `Element` carries five
-/// optional `Fill`s -- so that little array of floats was most of the reason an
-/// element was half a kilobyte. Nothing ever set a position outside the ladders
-/// below, so the positions are a function of the count now.
-///
-/// A slice would be smaller still and is the obvious shape -- but a gradient is
-/// built inside `view` and rasterised *after* `view` returns, so a slice would
-/// point at a dead stack frame. Value semantics delete the whole question.
+/// Gradient stops: up to four colours held as VALUES, with each stop's position implied by
+/// how many there are.
 pub const Stops = struct {
     colors: [4]Color = @splat(none),
     n: u8 = 0,
 
-    /// The colour of an unused slot. Named rather than written inline because
-    /// `Color` has no field defaults, so `.{}` will not do.
+    /// The colour of an unused slot. Named rather than written inline because `Color` has
+    /// no field defaults, so `.{}` will not do.
     const none: Color = .{ .r = 0, .g = 0, .b = 0 };
 
     pub fn two(a: Color, b: Color) Stops {
@@ -94,9 +69,7 @@ pub const Stops = struct {
         return .{ .n = 4, .colors = .{ a, b, c, d } };
     }
 
-    /// Where stop `i` sits along the axis, for a ramp of this many stops. The
-    /// middle positions are the constants the old constructors stored, to the
-    /// digit, so every existing ramp shades identically.
+    /// Where stop `i` sits along the axis, for a ramp of this many stops.
     fn pos(self: Stops, i: usize) f32 {
         return switch (self.n) {
             2 => if (i == 0) 0 else 1,
@@ -115,12 +88,8 @@ pub const Stops = struct {
         };
     }
 
-    /// Sample at `t`. Flat outside the end stops (every toolkit does this), so
-    /// a rect taller than its axis does not snap to an edge colour.
-    /// The two-stop ramp, without the loop or the span division that `at`
-    /// needs to stay general. Almost every gradient in a UI is exactly two
-    /// stops at 0 and 1, and this is called once per PIXEL, so the general
-    /// lookup's `while` and its divide are not affordable there.
+    /// Sample at `t`. Flat outside the end stops (every toolkit does this), so a rect
+    /// taller than its axis does not snap to an edge colour.
     pub fn atFast(self: Stops, t: f32) Color {
         if (self.n == 2) {
             return mix(self.colors[0], self.colors[1], std.math.clamp(t, 0, 1));
@@ -144,9 +113,8 @@ pub const Stops = struct {
         return self.colors[n - 1];
     }
 
-    /// Interpolate in PREMULTIPLIED space. A straight rgb lerp toward a
-    /// transparent colour drags the midpoint toward black -- the classic muddy
-    /// fade. Costs one divide per sampled pixel.
+    /// Interpolate in PREMULTIPLIED space. A straight rgb lerp toward a transparent colour
+    /// drags the midpoint toward black -- the classic muddy fade.
     fn mix(a: Color, b: Color, u: f32) Color {
         const t = std.math.clamp(u, 0, 1);
         // Two opaque endpoints mix to an opaque colour, and saying so skips
@@ -190,13 +158,8 @@ pub const Stops = struct {
     }
 };
 
-/// How to paint a shape. `solid` is the common case and keeps the old fast
-/// path; the gradient prongs are geometry plus stops and nothing else.
-///
-/// `from`/`to`/`center` are NORMALISED to the painted box (0..1), never
-/// pixels: an element does not know where layout will put it, and a gradient
-/// in absolute pixels would slide when its element moved. `radius` is a
-/// fraction of the box width.
+/// How to paint a shape. `solid` is the common case and keeps the old fast path; the
+/// gradient prongs are geometry plus stops and nothing else.
 pub const Fill = union(enum) {
     solid: Color,
     linear: Linear,
@@ -224,15 +187,8 @@ pub const Fill = union(enum) {
         return .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 0 }, .stops = Stops.two(a, b) } };
     }
 
-    /// Linear ramp at `deg` degrees on a clock face: clockwise from 12 o'clock,
-    /// naming the direction the ramp TRAVELS. 0 is bottom-to-top, 90 left-to-right,
-    /// 180 top-to-bottom, 270 right-to-left, 22 whatever 22 means.
-    ///
-    /// Centred on the box and unit-length, so every angle spans the element and
-    /// turning the ramp never shrinks it. `vgrad`/`hgrad`/`diag` are the three
-    /// uncentred conveniences that predate this; they shade identically because
-    /// a ramp only cares about the projection, but they keep their old vectors
-    /// so existing renders do not move.
+    /// Linear ramp at `deg` degrees on a clock face: clockwise from 12 o'clock, naming the
+    /// direction the ramp TRAVELS.
     pub fn angled(deg: f32, a: Color, b: Color) Fill {
         // Clock degrees -> the vector this always used. 0 used to mean "to the
         // right", so subtracting 90 relabels every call site without moving a
@@ -256,8 +212,8 @@ pub const Fill = union(enum) {
         return .{ .radial = .{ .stops = Stops.two(center, edge) } };
     }
 
-    /// True for the plain-colour case, which is the only one the cheap
-    /// four-quad border path can draw correctly.
+    /// True for the plain-colour case, which is the only one the cheap four-quad border
+    /// path can draw correctly.
     pub fn isSolid(self: Fill) bool {
         return switch (self) {
             .solid => true,
@@ -266,8 +222,6 @@ pub const Fill = union(enum) {
     }
 
     /// The colour of this fill at a point, given the box it is painted into.
-    /// Pure and allocator-free, so the software rasteriser and the text shaper
-    /// share one definition of "what colour is here" instead of two.
     pub fn colorAt(self: Fill, box: Rect, px: f32, py: f32) Color {
         switch (self) {
             .solid => |c| return c,
@@ -304,10 +258,7 @@ pub const Rect = struct {
             p[1] >= self.y and p[1] <= self.y + self.h;
     }
 
-    /// Inside the rect AND inside its rounded corners. `radius` is clamped the
-    /// way the rasteriser clamps it, so the claimable area and the painted area
-    /// agree by construction: a corner the fill does not cover is a corner the
-    /// pointer cannot claim.
+    /// Inside the rect AND inside its rounded corners.
     pub fn containsRounded(self: Rect, radius: f32, p: [2]f32) bool {
         if (!self.contains(p)) return false;
         const r = @min(radius, @min(self.w, self.h) * 0.5);
@@ -319,8 +270,8 @@ pub const Rect = struct {
         return dx * dx + dy * dy <= r * r;
     }
 
-    /// Overlap of two rects. Empty when they miss entirely, which is the only
-    /// thing clipping needs to know: an empty clip draws nothing.
+    /// Overlap of two rects. Empty when they miss entirely, which is the only thing
+    /// clipping needs to know: an empty clip draws nothing.
     pub fn intersect(self: Rect, o: Rect) Rect {
         const x0 = @max(self.x, o.x);
         const y0 = @max(self.y, o.y);
@@ -333,42 +284,33 @@ pub const Rect = struct {
         return self.w <= 0 or self.h <= 0;
     }
 
-    /// Exact geometry match, for identity questions. Floats are compared
-    /// directly on purpose: both sides come from the same layout arithmetic,
-    /// so a tolerance would only hide a real disagreement.
+    /// Exact geometry match, for identity questions.
     pub fn eql(self: Rect, o: Rect) bool {
         return self.x == o.x and self.y == o.y and self.w == o.w and self.h == o.h;
     }
 
-    /// Stands in for "no clip". Finite on purpose: infinities make the
-    /// intersection arithmetic produce NaN, and NaN survives clamping.
+    /// Stands in for "no clip". Finite on purpose: infinities make the intersection
+    /// arithmetic produce NaN, and NaN survives clamping.
     pub const unbounded: Rect = .{ .x = -1e9, .y = -1e9, .w = 2e9, .h = 2e9 };
 };
 
-/// A piece of screen geometry: the rect something occupies, plus the clip that
-/// was in force there. Two elements are the same *thing* when both match
-/// exactly. Overlap is not identity -- a parent overlaps the child it
-/// contains, and a parent is not what was pressed.
+/// A piece of screen geometry: the rect something occupies, plus the clip that was in force
+/// there.
 pub const Region = struct {
     rect: Rect,
     clip: Rect,
-    /// identity carried from the hit that produced it, so the pressed visual
-    /// can follow a keyed element through a reorder. Comparison stays
-    /// geometry-only (`eql`), which is what hover resolution relies on.
+    /// identity carried from the hit that produced it, so the pressed visual can follow a
+    /// keyed element through a reorder.
     key: ?u64 = null,
-    /// The element's corner radius, carried so hover resolution and hit testing
-    /// ask the same question the fill answered: does this shape cover the point?
+    /// The element's corner radius, carried so hover resolution and hit testing ask the
+    /// same question the fill answered: does this shape cover the point?
     radius: f32 = 0,
-    /// false = present but inert: it still occludes what is behind it, and it
-    /// never becomes a hover or press candidate. A disabled control that
-    /// simply vanished from the list would let clicks through to whatever it
-    /// covers, which is the wrong meaning of "disabled".
+    /// false = present but inert: it still occludes what is behind it, and it never becomes
+    /// a hover or press candidate.
     active: bool = true,
 
-    /// Carried so the hover scan can answer both "what lights up" and "what
-    /// explains itself" from ONE traversal. Never part of identity: `eql`
-    /// stays geometry-only, or a press would drop when a label reflowed
-    /// mid-gesture.
+    /// Carried so the hover scan can answer both "what lights up" and "what explains
+    /// itself" from ONE traversal.
     tooltip: ?[]const u8 = null,
 
     pub fn eql(self: Region, rect: Rect, clip: Rect) bool {
@@ -380,94 +322,26 @@ pub const Region = struct {
     }
 };
 
-/// Renderer-agnostic draw commands. A backend either rasterises these directly
-/// (software) or feeds them to a GPU pipeline (triangles + glyph quads).
-/// A glow or a shadow: one shape, one colour, a ramp on the same signed
-/// distance the rounded rect is already computed from.
-///
-/// `mode` says which SIDE of the silhouette the ramp survives on, and there is
-/// one ramp for all three: opaque well inside, half at the edge, gone well
-/// outside.
-///
-/// `.glow` keeps both halves. An opaque element hides the inner one, so it reads
-/// as light around the shape; a translucent fill lets it tint the face, which is
-/// the only case where `.glow` and `.outer_glow` differ.
-/// `.outer_glow` keeps the outside half only.
-/// `.inner_glow` is its own curve, not the shared one mirrored: full at the edge
-/// and gone a whole `blur` inward, where the mirrored ramp would peak at half
-/// strength and fade in `blur / 2`. It is recorded AFTER the element's fill,
-/// because light inside a shape would otherwise be covered by it. Clipping `.glow` to
-/// the inside is NOT an inner glow: that washes the whole face, since the ramp is
-/// fully opaque once it is far enough inside.
-///
-/// There is no `.shadow`. A shadow is not a fourth geometry -- it is an
-/// `.outer_glow` with an offset and a dark colour, and a value of its own would
-/// have been a second name for one picture.
+/// Renderer-agnostic draw commands. A backend either rasterises these directly (software)
+/// or feeds them to a GPU pipeline (triangles + glyph quads).
 pub const Halo = struct {
     color: Color,
-    /// How far the ramp runs, in pixels, straddling the silhouette: fully
-    /// opaque `blur / 2` inside the edge, gone `blur / 2` outside. That
-    /// straddle is what stops a shadow reading as a hard outline. An
-    /// `.inner_glow` runs the longer way -- full at the edge, gone `blur`
-    /// inside -- so its `blur` reads as a radius, not a half-width.
+    /// How far the ramp runs, in pixels, straddling the silhouette: fully opaque `blur / 2`
+    /// inside the edge, gone `blur / 2` outside.
     blur: f32 = 12,
-    /// Pixels the silhouette is pushed outward before the ramp starts. Without
-    /// it a blurred shadow of a filled shape is barely visible.
+    /// Pixels the silhouette is pushed outward before the ramp starts. Without it a blurred
+    /// shadow of a filled shape is barely visible.
     spread: f32 = 0,
     offset: [2]f32 = .{ 0, 0 },
-    /// Degrees the light comes FROM, on the same clock face as a gradient's
-    /// `dir`: clockwise from 12 o'clock, so `0` is overhead, `90` to the right,
-    /// `180` directly below, `270` to the left. Null means no light source and a
-    /// symmetric ramp.
-    ///
-    /// The two agree on the clock but not on what the number names: a gradient's
-    /// `dir` is where the colour is GOING, a light is where the lamp SITS. At the
-    /// same number they point opposite ways -- `Fill.angled(0)` travels upward,
-    /// `.light = 0` is a lamp above. Both mean "the clock position of the thing
-    /// it names", which is why this reads correctly once you ask which thing.
-    ///
-    /// With a light the ramp is WIDER on the side the shadow is cast toward and
-    /// narrower on the lit side, which is what makes an offset shadow look cast
-    /// rather than copied. It is a separate axis from `offset` on purpose: offset
-    /// moves the silhouette, light shapes the falloff, and a shadow wants both.
-    ///
-    /// Costs a cache entry if it were baked, because it changes the mask's
-    /// contents rather than its position. Rather than quantise the angle into the
-    /// stencil key and spray masks whenever it animates, a lit halo takes the
-    /// distance-field path -- 0.1-0.2ms for one shadow, which is the case it is
-    /// for. `quality = .baked` does not override that.
+    /// Degrees the light comes FROM, on the same clock face as a gradient's `dir`:
+    /// clockwise from 12 o'clock, so `0` is overhead, `90` to the right.
     light: ?f32 = null,
     mode: Mode = .glow,
-    /// How the halo is computed. `baked` is the default and the fast path: a
-    /// stencil is built once and blitted, 9-sliced so its cost does not scale
-    /// with the silhouette.
-    ///
-    /// There is deliberately no `auto`. One existed to hide a size threshold --
-    /// small ramps went to the distance field on the argument that they left too
-    /// little to cache -- and the benchmark inverted that at every blur measured:
-    /// baked wins cold as well as hot, by 2.5-2.7x per call at every blur
-    /// measured, and a bake amortises within a couple of frames. The stencil
-    /// cache also plateaus -- sixteen distinct silhouettes resolve to five
-    /// entries, because the aspect bucket shares them -- so the thrash case the
-    /// old wording hedged against takes sixteen shapes redrawn every frame to
-    /// appear at all.
-    /// A value that always resolves to the default is a synonym, not a choice,
-    /// so it was deleted rather than left to imply a distinction.
-    ///
-    /// `.sdf` is the escape hatch, and it is also the fallback: when a stencil
-    /// cannot exist at all -- no allocator, or a silhouette past the mask cap --
-    /// the renderer drops to the distance field itself. The two paths must stay
-    /// within tolerance of each other, which the agreement tests pin.
+    /// How the halo is computed.
     quality: Quality = .baked,
 
-    /// A shadow as a picture, with the two axes wired consistently: the offset is
-    /// derived from the light rather than set beside it, because a shadow that
-    /// points the wrong way for its own light reads as a mistake and there is no
-    /// useful case for the combination.
-    ///
-    /// `light_deg` is where the light comes FROM on the clock -- `0` is overhead,
-    /// which is the one a UI wants almost always. `dist` is how far the silhouette
-    /// is displaced, in pixels.
+    /// A shadow as a picture, with the two axes wired consistently: the offset is derived
+    /// from the light rather than set beside it.
     pub fn shadow(color: Color, light_deg: f32, dist: f32) Halo {
         const a = light_deg * std.math.pi / 180.0;
         return .{
@@ -486,13 +360,11 @@ pub const Halo = struct {
     pub const Quality = enum { baked, sdf };
 };
 
-/// Frost a backdrop: what is already drawn under the element, blurred, before
-/// the element paints itself. Physical rather than decorative -- it says "frost
-/// this" and leaves the sampling, the passes and the falloff to the rasteriser,
-/// the same way `Halo` says "glow this" instead of "run a box blur".
+/// Frost a backdrop: what is already drawn under the element, blurred, before the element
+/// paints itself.
 pub const Frost = struct {
-    /// How far the blur reaches, in pixels. A radius, not a sigma: the passes
-    /// are sized from it, and doubling it visibly doubles the smear.
+    /// How far the blur reaches, in pixels. A radius, not a sigma: the passes are sized
+    /// from it, and doubling it visibly doubles the smear.
     blur: f32 = 12,
 };
 
@@ -500,24 +372,17 @@ pub const Primitive = union(enum) {
     quad: struct { rect: Rect, fill: Fill, clip: Rect },
     /// rounded rect: `stroke` draws a 1px outline instead of a fill
     rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect },
-    /// `face` selects a registered typeface by index, 0 being the primary.
-    ///
-    /// Behind the scenes on purpose: a `view` never writes this. A style names a
-    /// font, the runtime resolves the name, and what reaches paint is an index.
-    /// Zero is the primary, so a build that registers no extra face records
-    /// exactly what it recorded before.
+    /// `face` selects a registered typeface by index, 0 being the primary. Behind the
+    /// scenes on purpose: a `view` never writes this.
     text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0, weight: u16 = 0 },
-    /// Recorded where it has to composite: before the element's own fill for
-    /// `glow` and `shadow`, after it for `inner_glow`, whose light would
-    /// otherwise be covered by the shape it lives inside.
+    /// Recorded where it has to composite: before the element's own fill for `glow` and
+    /// `shadow`, after it for `inner_glow`.
     halo: struct { rect: Rect, corner: f32, halo: Halo, clip: Rect },
-    /// Blurs what is already on the canvas under `rect`. A backdrop effect, so
-    /// it is recorded BEFORE the element's fill and reads the destination.
+    /// Blurs what is already on the canvas under `rect`. A backdrop effect, so it is
+    /// recorded BEFORE the element's fill and reads the destination.
     frost: struct { rect: Rect, radius: f32, blur: f32, clip: Rect },
 
-    /// `clip` is repeated in each prong because a Zig union has no common
-    /// fields. It is the scissor rect resolved at record time, so a primitive
-    /// is self-contained: replaying it needs no stack and no ordering.
+    /// `clip` is repeated in each prong because a Zig union has no common fields.
     pub fn clipOf(self: Primitive) Rect {
         return switch (self) {
             .quad => |q| q.clip,
@@ -533,21 +398,11 @@ pub const Primitive = union(enum) {
 // renderer interface — a vtable, since Zig has no trait objects
 // ---------------------------------------------------------------------------
 
-/// Metrics for one line of text. `line_height` includes the font's line gap,
-/// so N lines occupy `height + (N - 1) * line_height`.
-/// Cap on wrapped lines per text element; extra lines are dropped rather
-/// than allocated for.
+/// Metrics for one line of text. `line_height` includes the font's line gap, so N lines
+/// occupy `height + (N - 1) * line_height`.
 pub const max_lines: usize = 32;
 
-/// What a measurement reports. One width is not enough to lay out a row: a
-/// parent has to know not just how wide a child WANTS to be but how far it can
-/// be squeezed before its content breaks. `w` is the width taken at the
-/// `avail_w` it was measured with; `min_w` is the floor.
-///
-/// There is deliberately no `pref` field. A preferred width is just "measure at
-/// a large avail", and making it a field would force an immediate answer to
-/// what the preferred width of wrapped text is -- which is a behaviour change
-/// this contract does not want to smuggle in.
+/// What a measurement reports.
 pub const Extent = struct {
     /// width taken at the avail_w this was measured with
     w: f32 = 0,
@@ -558,8 +413,6 @@ pub const Extent = struct {
 };
 
 /// The widest unbreakable run in `bytes`, which is the floor for wrapped text.
-/// `wrapLines` breaks on spaces and hard-breaks a word that cannot fit, so this
-/// is the point below which it would start cutting mid-word.
 fn longestWord(r: Renderer, bytes: []const u8, size: f32) f32 {
     var best: f32 = 0;
     var it = std.mem.tokenizeAny(u8, bytes, " \n\t");
@@ -570,21 +423,13 @@ fn longestWord(r: Renderer, bytes: []const u8, size: f32) f32 {
     return best;
 }
 
-/// A flat colour as a fill. Free function because `Fill.solid` is already a
-/// union member, so a method of the same name cannot exist. This is what keeps
-/// `.color = elmz.solid(c)` readable without spelling the union tag at each site.
+/// A flat colour as a fill. Free function because `Fill.solid` is already a union member,
+/// so a method of the same name cannot exist.
 pub fn solid(c: Color) Fill {
     return .{ .solid = c };
 }
 
-/// How wide a row child ends up when the row cannot give everyone what they
-/// asked for. The deficit is shared out in proportion to each child's SLACK
-/// (`w - min_w`), so a text that can wrap shrinks and a button that cannot
-/// keeps its size -- a fixed proportional split would shrink the button too and
-/// leave the text room it does not need.
-///
-/// The distribution sums to exactly `inner`, because the shares are fractions
-/// of the total slack and the total slack is exactly what is missing.
+/// How wide a row child ends up when the row cannot give everyone what they asked for.
 fn rowChildWidth(c: Extent, total_w: f32, total_min: f32, inner: f32) f32 {
     if (total_w <= inner) return c.w;
     const slack = c.w - c.min_w;
@@ -596,20 +441,6 @@ fn rowChildWidth(c: Extent, total_w: f32, total_min: f32, inner: f32) f32 {
 }
 
 /// Cross-axis placement for a row's children.
-///
-/// `stretch` is the default because it is what every existing render already
-/// does: a child that paints its own background wants the full height, and
-/// moving the default would move every pin for a cosmetic reason.
-///
-/// `start` and `center` exist for LABELS, which have no box of their own and
-/// otherwise sit on the top edge of a taller neighbour -- a caption beside a
-/// button is the case that makes the default look broken.
-///
-/// `baseline` is the one of the four that is about TYPE rather than boxes: the
-/// children keep their own heights and are moved so their first lines of text
-/// sit on a common baseline. It is what a checkbox beside its label needs, and
-/// what `center` only approximates -- centring lines up box middles, so a
-/// caption between a 16px control and a 24px heading lands slightly off both.
 pub const RowAlign = enum { stretch, start, center, baseline };
 
 pub const TextMetrics = struct {
@@ -624,9 +455,7 @@ pub const Renderer = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    /// Fill an outline. The path's curves are flattened by the backend, so a
-    /// backend that cannot do curves has to say so rather than draw a polygon
-    /// that pretends the controls were corners.
+    /// Fill an outline.
     pub fn path(self: Renderer, x: f32, y: f32, p: Path, fill: Fill, clip: Rect) void {
         self.vtable.path(self.ptr, x, y, p, fill, clip);
     }
@@ -636,32 +465,22 @@ pub const Renderer = struct {
         /// draws a rounded rect, or its 1px outline when `stroke` is set
         rrect: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void,
         text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void,
-        /// Point subsequent `text` calls at a registered face, by index. 0 is
-        /// the primary. A backend with only one face ignores it.
+        /// Point subsequent `text` calls at a registered face, by index. 0 is the primary.
+        /// A backend with only one face ignores it.
         set_face: *const fn (ptr: *anyopaque, face: u16) void,
-        /// `wght` for the face `set_face` last named, or 0 for its default
-        /// instance. Separate from `set_face` because the two are independent:
-        /// a weight survives a face change only if the caller re-asks, and
-        /// `set_face` already resets it to 0 for that reason.
+        /// `wght` for the face `set_face` last named, or 0 for its default instance.
         set_weight: *const fn (ptr: *anyopaque, weight: u16) void,
-        /// A glow or shadow behind `rect`. `corner` is the element's own radius
-        /// so the halo follows its shape rather than boxing it.
+        /// A glow or shadow behind `rect`. `corner` is the element's own radius so the halo
+        /// follows its shape rather than boxing it.
         halo: *const fn (ptr: *anyopaque, rect: Rect, corner: f32, h: Halo, clip: Rect) void,
-        /// Blurs the destination under `rect`, in place. Must be called BEFORE
-        /// the element draws, or it frosts the element too.
+        /// Blurs the destination under `rect`, in place. Must be called BEFORE the element
+        /// draws, or it frosts the element too.
         frost: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, blur: f32, clip: Rect) void,
         measure_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32) TextMetrics,
-        /// Metrics for a string measured ON `face` -- the same face its glyphs
-        /// will be drawn with. `measure_text` answers from the primary face,
-        /// which is right for a width and wrong for a box: layout sized every
-        /// CJK label with DejaVu's metrics (upem 2048, asc 1901, desc -483) and
-        /// drew it with Noto CJK's (upem 1000, asc 1160, desc -288), so the
-        /// allotted 34.92px box held a 43.44px line and cut the bottom off.
-        /// A backend with one face answers this identically to `measure_text`.
+        /// Metrics for a string measured ON `face` -- the same face its glyphs will be
+        /// drawn with.
         measure_text_face: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) TextMetrics,
         /// Splits into lines no wider than `max_width`. Returns the count.
-        /// Kept on the renderer because only the backend knows the glyph
-        /// advances, and layout must break lines exactly where paint does.
         wrap_text: *const fn (
             ptr: *anyopaque,
             bytes: []const u8,
@@ -670,23 +489,14 @@ pub const Renderer = struct {
             out: [][]const u8,
         ) usize,
         /// Width of `bytes[0..index]`: where a caret before that byte sits.
-        /// On the renderer for the same reason measure_text is -- only the
-        /// backend knows the advances, and a caret must not disagree with the
-        /// glyph it sits beside.
         advance_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32,
         /// The byte boundary nearest `x`: what a click selects.
         hit_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, x: f32) usize,
-        /// Fills a closed outline at (x, y). Curves arrive UNFLATTENED:
-        /// subdividing them belongs to the backend, because the tolerance is a
-        /// device-pixel quantity and only the backend knows its scale.
+        /// Fills a closed outline at (x, y).
         path: *const fn (ptr: *anyopaque, x: f32, y: f32, p: Path, fill: Fill, clip: Rect) void,
     };
 
-    /// `clip` is required, not defaulted: every draw call names the rect it is
-    /// confined to, so forgetting to clip is a compile error rather than a
-    /// stale-state bug. Nothing is culled here — a fully clipped primitive
-    /// still records, it just rasterises to nothing, which keeps primitive
-    /// counts (and therefore the frame hashes) stable.
+    /// `clip` is required, not defaulted: every draw call names the rect it is confined to.
     pub fn quad(self: Renderer, rect: Rect, fill: Fill, clip: Rect) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         self.vtable.quad(self.ptr, rect, fill, clip);
@@ -703,26 +513,12 @@ pub const Renderer = struct {
     }
 
     /// Point subsequent `text` calls at a registered face, by index.
-    ///
-    /// Sticky on purpose: an element emits one to a handful of runs that nearly
-    /// always share a typeface, so the index is set once per element rather than
-    /// passed on every call. Index 0 is the primary.
     pub fn setFace(self: Renderer, face: u16) void {
         self.vtable.set_face(self.ptr, face);
     }
 
-    /// Text in a registered face, by index.
-    ///
-    /// The face is STICKY rather than an argument to every draw. An element
-    /// emits one to a handful of text primitives and changes face almost never,
-    /// so passing it per run would widen the hot signature for a field that is
-    /// constant within a run. Index 0 needs no call at all: every backend starts
-    /// there and `Paint` sets it once per element.
-    ///
-    /// Backends that carry a single face may ignore `set_face`; the text then
-    /// draws in the primary, which is what 0 means anyway.
-    /// Set the weight of the face `setFace` last named. 0 restores the
-    /// default instance. A non-variable face ignores it.
+    /// Text in a registered face, by index. The face is STICKY rather than an argument to
+    /// every draw.
     pub fn setWeight(self: Renderer, weight: u16) void {
         self.vtable.set_weight(self.ptr, weight);
     }
@@ -733,18 +529,14 @@ pub const Renderer = struct {
         self.vtable.text(self.ptr, x, y, size, fill, bytes, clip);
     }
 
-    /// A glow or shadow, drawn where the caller asked for it. The backend
-    /// decides fidelity: one that cannot afford a blur is free to draw a
-    /// sharp offset instead of nothing at all.
+    /// A glow or shadow, drawn where the caller asked for it.
     pub fn halo(self: Renderer, rect: Rect, corner: f32, h: Halo, clip: Rect) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         if (h.color.a == 0) return;
         self.vtable.halo(self.ptr, rect, corner, h, clip);
     }
 
-    /// Frost the backdrop under `rect`. A backend with no read-back may ignore
-    /// it, but ignoring it is not the same as approximating it: the caller asked
-    /// for the pixels underneath, so a fallback would be a different picture.
+    /// Frost the backdrop under `rect`.
     pub fn frost(self: Renderer, rect: Rect, radius: f32, blur: f32, clip: Rect) void {
         if (rect.w <= 0 or rect.h <= 0 or blur <= 0) return;
         self.vtable.frost(self.ptr, rect, radius, blur, clip);
@@ -754,9 +546,7 @@ pub const Renderer = struct {
         return self.vtable.measure_text(self.ptr, bytes, size);
     }
 
-    /// Metrics on the face `bytes` will actually be DRAWN with. Every caller
-    /// that sizes a box around text must use this, not `measureText`, or the
-    /// box is measured by one typeface and filled by another.
+    /// Metrics on the face `bytes` will actually be DRAWN with.
     pub fn measureTextFace(self: Renderer, bytes: []const u8, size: f32, face: u16) TextMetrics {
         return self.vtable.measure_text_face(self.ptr, bytes, size, face);
     }
@@ -765,16 +555,14 @@ pub const Renderer = struct {
         return self.vtable.wrap_text(self.ptr, bytes, size, max_width, out);
     }
 
-    /// Width of the first `index` bytes. The inverse of `hitText`, and the two
-    /// are meant to round-trip: a caret placed at a boundary, then hit-tested
-    /// back, must land on the same byte.
+    /// Width of the first `index` bytes.
     pub fn advanceText(self: Renderer, bytes: []const u8, size: f32, index: usize) f32 {
         if (bytes.len == 0) return 0;
         return self.vtable.advance_text(self.ptr, bytes, size, @min(index, bytes.len));
     }
 
-    /// The byte boundary under `x`. Single line only: resolving y to a line is
-    /// the caller's, because only it knows how the text was wrapped.
+    /// The byte boundary under `x`. Single line only: resolving y to a line is the
+    /// caller's, because only it knows how the text was wrapped.
     pub fn hitText(self: Renderer, bytes: []const u8, size: f32, x: f32) usize {
         if (bytes.len == 0) return 0;
         return self.vtable.hit_text(self.ptr, bytes, size, x);
@@ -785,24 +573,7 @@ pub const Renderer = struct {
 // element tree
 // ---------------------------------------------------------------------------
 
-/// The palette a `Ui` builds with. File scope rather than nested in `Ui` so
-/// that paint can resolve a default colour for an element that never had one
-/// set, without paint having to be handed a `Ui` it has no other use for.
-/// The one palette. Catppuccin Mocha (palette v1.8.0) -- every value below is a
-/// published Mocha hex, not a hand-tuned approximation, so the theme is
-/// reproducible from https://github.com/catppuccin/palette.
-///
-///
-/// Every colour a `view` may use lives here. Nothing outside this struct should
-/// hold a colour of its own -- before this was enforced, four examples carried
-/// seven local constants between them and had drifted into three different
-/// window backgrounds (0x0a0c11, 0x12151d, 0x141821) plus two near-duplicate
-/// selection tints, one of which was two units off the theme's own `hover`.
-/// A theme you can load from a file is meaningless while that is true, because
-/// half the screen would not be listening.
-///
-/// Roles, not widgets: `panel` is "the fill of a raised area", not "a card",
-/// which is what lets one token serve panels, rows, and list items.
+/// The palette a `Ui` builds with.
 pub const Theme = struct {
     /// page/window background; the colour a backend clears to
     bg: Color = Color.rgbHex(0x1e1e2e),
@@ -832,11 +603,6 @@ pub const Theme = struct {
     fail: Color = Color.rgbHex(0xf38ba8),
 
     /// Colours the theme file defined beyond the built-ins.
-    ///
-    /// A side table, not fields: `Theme` is a comptime struct and a file is
-    /// read at runtime, so an app's own role names cannot be members. Kept
-    /// small and linear -- a palette has a handful of extras and this is only
-    /// walked on a name lookup, never per pixel.
     custom: []const CustomColor = &.{},
 
     pub const CustomColor = struct { name: []const u8, color: Color };
@@ -854,9 +620,7 @@ pub const Theme = struct {
 // theme files: a flat .zon becomes a Theme
 // ---------------------------------------------------------------------------
 
-/// The theme machinery -- spec, loader, diagnostics, palette guard -- lives in
-/// `theme.zig`. These names are re-exported so it still reads as one library
-/// from the outside: `elmz.loadTheme` stays the documented call.
+/// The theme machinery -- spec, loader, diagnostics, palette guard -- lives in `theme.zig`.
 pub const theme = @import("theme.zig");
 pub const RoleFamily = theme.RoleFamily;
 pub const ThemeSpec = theme.ThemeSpec;
@@ -879,31 +643,26 @@ test {
     std.testing.refAllDecls(theme);
 }
 
-/// The failure banner is deliberately not themed: it reports a bug, so it
-/// must not be able to blend into whatever palette the app chose.
+/// The failure banner is deliberately not themed: it reports a bug, so it must not be able
+/// to blend into whatever palette the app chose.
 const band_h: f32 = 20;
 const band_bg: Color = Color.rgbHex(0xd0342c);
 const band_fg: Color = Color.rgbHex(0xfff2f0);
 
-/// Why a frame drew its error band. The band carries the reason, because a
-/// band that only says "something went wrong" costs the same pixels as one
-/// that names the bug.
+/// Why a frame drew its error band.
 pub const FailKind = enum {
     /// an allocation inside `view` failed; the tree is structurally degraded
     layout_allocation,
     /// two hit regions declared the same `key`, so identity is ambiguous
     duplicate_key,
-    /// the typeface the app asked for could not be read; the band carries the
-    /// path, because a window of invisible text with no explanation is the
-    /// worst possible answer to a missing font file
+    /// the typeface the app asked for could not be read; the band carries the path.
     font,
-    /// the theme file could not be parsed or resolved; the detail in the band
-    /// carries the file, line and column, because "theme error" alone gives
-    /// the author nothing to aim at
+    /// the theme file could not be parsed or resolved; the detail in the band carries the
+    /// file, line and column.
     theme,
 
-    /// The fallback text, used when the failure carries no detail. Callers
-    /// that know more call `Ui.failFmt` and get the detail appended instead.
+    /// The fallback text, used when the failure carries no detail. Callers that know more
+    /// call `Ui.failFmt` and get the detail appended instead.
     pub fn message(self: FailKind) []const u8 {
         return switch (self) {
             .layout_allocation => "render failed: layout allocation",
@@ -914,37 +673,25 @@ pub const FailKind = enum {
     }
 };
 
-/// What the wheel needs from a scroll viewport: how tall the content is and
-/// how much of it is on screen. Travels with the hit region rather than being
-/// stored, because only paint knows the content height.
+/// What the wheel needs from a scroll viewport: how tall the content is and how much of it
+/// is on screen.
 pub const ScrollView = struct {
     content_h: f32,
     view_h: f32,
-    /// The other axis. A container can overflow both ways at once, and the
-    /// wheel needs both extents to know which delta to spend.
+    /// The other axis. A container can overflow both ways at once, and the wheel needs both
+    /// extents to know which delta to spend.
     content_w: f32 = 0,
     view_w: f32 = 0,
 };
 
-/// A request to move one viewport. Two forms because the two things an app
-/// actually wants are different: go to a place, or move by an amount.
+/// A request to move one viewport. Two forms because the two things an app actually wants
+/// are different: go to a place, or move by an amount.
 pub const ScrollChange = union(enum) {
     to: struct { key: u64, offset: f32 },
     by: struct { key: u64, dy: f32 },
 };
 
-/// One viewport's offset, keyed by the element's `key`. Owned by the runtime
-/// so that no message ever carries a continuous value: a drag or a wheel tick
-/// changes this, and the next frame reads it.
-/// Name -> face index, closing the seam between `Ui.font` and the runtime's
-/// registry. The registry cannot be named here without a cycle, so it arrives
-/// as one function pointer over `opaque`.
-/// A theme role by NAME, which is how a style refers to a colour.
-///
-/// The name is already known to be a role -- `loadTheme` rejects a style that
-/// names anything else -- so the fallback here is unreachable for a loaded
-/// theme. It returns `text` rather than panicking because this is cold and a
-/// wrong-colour pixel beats a crash inside a paint.
+/// One viewport's offset, keyed by the element's `key`.
 pub fn roleColor(pal: Theme, name: []const u8) Color {
     // Custom FIRST, and the order is load-bearing: a file that writes
     // `.roles = .{ .{ .name = "bg", ... } }` is retuning a built-in, and with
@@ -963,9 +710,7 @@ pub fn roleColor(pal: Theme, name: []const u8) Color {
     return pal.text;
 }
 
-/// A halo as a DOCUMENT sees it: the colour is a role name, everything else is
-/// a number. Split from `Halo` because a zon file cannot hold a `Color`, and
-/// because a role name is what makes a themed glow light up with the palette.
+/// A halo as a DOCUMENT sees it: the colour is a role name, everything else is a number.
 pub const HaloSpecEntry = struct {
     color: []const u8 = "text_muted",
     blur: f32 = 12,
@@ -977,14 +722,6 @@ pub const HaloSpecEntry = struct {
 };
 
 /// A theme style as a VIEW sees it.
-///
-/// Structurally identical to `theme.StyleEntry` but declared here, because
-/// `theme.zig` imports `elmz.zig` and not the other way round -- a cycle would
-/// have to be broken with a lazy import for one field. The two are kept in step
-/// by a test that names both types, so a new style field cannot land in one and
-/// not the other.
-///
-/// Strings only: a style is a document, and a document holds names.
 pub const StyleEntry = struct {
     name: []const u8,
     spec: struct {
@@ -992,36 +729,17 @@ pub const StyleEntry = struct {
         color: ?[]const u8 = null,
         border: ?[]const u8 = null,
         font: ?[]const u8 = null,
-        /// Point size named by the theme. Applied by `styleByName`; a call
-        /// site that passes its own `.size` still wins, because an element
-        /// that asked for a size meant it.
+        /// Point size named by the theme.
         size: ?f32 = null,
         /// Weight in the variable `wght` axis, in user units (400, 700).
         weight: ?u16 = null,
-        /// A glow or shadow, with its colour named as a theme role so it
-        /// follows `.colors` instead of freezing a hex.
-        ///
-        /// A shadow is not a separate thing: it is `.outer_glow`, offset, in a
-        /// dark role, with `light` set. Building it from the glow keeps one
-        /// emission path and one set of rules.
+        /// A glow or shadow, with its colour named as a theme role so it follows `.colors`
+        /// instead of freezing a hex.
         halo: ?HaloSpecEntry = null,
     } = .{},
 };
 
 /// The styles every Ui has before any theme file is read.
-///
-/// These are the SAME entries `theme.defaults.zon` ships -- one style per
-/// script, a heading and a card -- compiled in so a Ui with no file beside it
-/// still has them. Without this the table was `null` until a file supplied
-/// one, so a bare `Ui` could not resolve `heading`, and every scripted row fell
-/// to the primary face: tofu for Arabic and CJK, with nothing reporting why.
-///
-/// The strings are comptime literals, so this costs no allocation and needs no
-/// deinit. A file REPLACES the whole table rather than merging into it, which
-/// keeps one owner at a time -- a merge would make it impossible to look at a
-/// name and say which file defined it.
-///
-/// A test pins this to `theme.defaults.zon`, so the two cannot drift.
 pub const default_styles: []const StyleEntry = &.{
     .{ .name = "latin", .spec = .{ .color = "text", .font = "Roboto Flex" } },
     .{ .name = "arabic", .spec = .{ .color = "text", .font = "Noto Sans Arabic" } },
@@ -1046,32 +764,18 @@ pub const FaceLookup = struct {
 
 pub const ScrollSlot = struct { key: u64 = 0, offset: f32 = 0, offset_x: f32 = 0 };
 
-/// Scrollbar geometry, in logical units. The thumb has a floor or it becomes
-/// impossible to grab on a long list; the strip is thin and sits over the
-/// trailing edge, because a gutter would change the content width the moment
-/// overflow began -- which rewraps, which can remove the overflow.
+/// Scrollbar geometry, in logical units.
 pub const scrollbar_w: f32 = 6;
 pub const scrollbar_min_thumb: f32 = 24;
-/// How wide the thumb's claim on the pointer is. Deliberately wider than the
-/// strip it paints: a 6px target is not grabbable. It is the whole reason the
-/// thumb is allowed to sit in front of the content, so it must earn the space
-/// by being usable -- and it grows LEFTWARD, into the content, because the
-/// right edge is the viewport's own border.
+/// How wide the thumb's claim on the pointer is. Deliberately wider than the strip it
+/// paints: a 6px target is not grabbable.
 pub const scrollbar_grab: f32 = 14;
 
-/// The root container's scroll identity. Any constant works -- what matters is
-/// that it is stable across frames, because the scroll store outlives one.
+/// The root container's scroll identity. Any constant works -- what matters is that it is
+/// stable across frames, because the scroll store outlives one.
 pub const scroll_path_root: u64 = 0x9e3779b97f4a7c15;
 
-/// One step down the tree. FNV-1a over the parent's hash and the child index:
-/// cheap, allocator-free, and identical for the same position in the same tree,
-/// which is all a scroll slot needs. A reordered list therefore moves its
-/// offsets, which is the honest answer -- the store is positional.
-/// Read an optional field from an options struct, or fall back.
-///
-/// Options structs are `anytype` so a builder can accept `.label = anything`,
-/// which means a caller may omit any field they do not care about. Probing is
-/// compile-time: the field is either there and typed, or the default stands.
+/// One step down the tree.
 pub fn fieldOr(o: anytype, comptime name: []const u8, comptime default: anytype) FieldType(@TypeOf(o), name, @TypeOf(default)) {
     // Comptime-gated on the whole body: when the struct has the field, its
     // value is coerced to the destination type; when it does not, the default
@@ -1092,9 +796,8 @@ fn isOptional(comptime T: type) bool {
     };
 }
 
-/// The field's own type when the struct has it, so an anonymous struct literal
-/// passed as `.style = .{ ... }` still coerces. Falls back to the default's
-/// type otherwise, which is the only type there is to offer.
+/// The field's own type when the struct has it, so an anonymous struct literal passed as
+/// `.style = .{ ... }` still coerces.
 pub fn FieldType(comptime O: type, comptime name: []const u8, comptime Fallback: type) type {
     if (!@hasField(O, name)) return Fallback;
     const F = @FieldType(O, name);
@@ -1120,35 +823,21 @@ pub fn pathChild(parent: u64, index: usize) u64 {
     return h;
 }
 
-/// A thumb that has taken the pointer. Carried on the hit region instead of a
-/// message, because a drag produces a continuous value and nothing that is
-/// continuous may ride in a Msg. The key travels here rather than on
-/// `Hit.key`: keys are frame-unique identity, and a thumb is the same element
-/// as the viewport it belongs to, so reusing the key would report a collision.
+/// A thumb that has taken the pointer.
 pub const ScrollDrag = struct {
     key: u64,
     view: ScrollView,
-    /// Which offset this thumb writes. A container can carry two thumbs, and a
-    /// drag that guessed the axis from the numbers would be wrong the moment
-    /// both axes overflow.
+    /// Which offset this thumb writes.
     horizontal: bool = false,
 };
 
-/// Which way a control runs. A separate name rather than a `vertical: bool`,
-/// so the call site reads as what it is and there is somewhere for a third
-/// value to go that is not a second boolean.
+/// Which way a control runs.
 pub const Orientation = enum { horizontal, vertical };
 
-/// A slider that has taken the pointer. It carries its own geometry because the
-/// pointer-to-value mapping needs it, and the frame that produced the region is
-/// gone by the time the pointer moves. It carries NO grab offset on purpose: a
-/// slider's value is where the pointer is, so remembering how far from the knob
-/// the press landed would shift the whole range by that distance.
+/// A slider that has taken the pointer.
 pub const SliderDrag = struct {
     key: u64,
-    /// The track as laid out in the frame the press happened in. A resize
-    /// mid-drag re-maps against the old rect, which is the right failure: the
-    /// value follows the pointer it was given, not a rect that moved under it.
+    /// The track as laid out in the frame the press happened in.
     rect: Rect,
     /// Into the Model, never the arena: a drag outlives the frame that began it.
     value: *f32,
@@ -1159,18 +848,13 @@ pub const SliderDrag = struct {
     orientation: Orientation,
 };
 
-/// What has taken the pointer for continuous motion. A union rather than a
-/// second optional field beside `ScrollDrag`, so "held" has exactly one
-/// representation: two nullables would let both be set and leave every reader
-/// to work out which one wins.
+/// What has taken the pointer for continuous motion.
 pub const Drag = union(enum) {
     thumb: ScrollDrag,
     slider: SliderDrag,
 };
 
-/// Where a pointer sits across a slider's range, 0..1. Vertical is INVERTED: a
-/// fader is loudest at the top, so a control that grew upward but increased
-/// downward would be the surprising one.
+/// Where a pointer sits across a slider's range, 0..1.
 fn sliderFraction(rect: Rect, orientation: Orientation, p: [2]f32) f32 {
     const t = switch (orientation) {
         .horizontal => if (rect.w > 0) (p[0] - rect.x) / rect.w else 0,
@@ -1179,18 +863,12 @@ fn sliderFraction(rect: Rect, orientation: Orientation, p: [2]f32) f32 {
     return std.math.clamp(t, 0, 1);
 }
 
-/// The value under the pointer, quantised to the grid when there is one. The
-/// grid is computed from `min` on every call instead of being accumulated, so a
-/// long drag cannot drift off it the way `v + step` does.
+/// The value under the pointer, quantised to the grid when there is one.
 pub fn sliderValueAt(d: SliderDrag, p: [2]f32) f32 {
     return quantise(d, d.min + sliderFraction(d.rect, d.orientation, p) * (d.max - d.min));
 }
 
-/// One step TOWARD the pointer, never to it. Clicking far along a stepped track
-/// walks the value there a click at a time rather than jumping as far as you
-/// happened to click. A DRAG is the opposite and uses `sliderValueAt`: the two
-/// entry points differ on purpose, and they share `sliderFraction` so they can
-/// never disagree about where the pointer is.
+/// One step TOWARD the pointer, never to it.
 pub fn sliderStepToward(d: SliderDrag, current: f32, p: [2]f32) f32 {
     const target = sliderValueAt(d, p);
     const step = d.step orelse return target;
@@ -1206,74 +884,46 @@ fn quantise(d: SliderDrag, raw: f32) f32 {
     return std.math.clamp(d.min + @round((clamped - d.min) / step) * step, d.min, d.max);
 }
 
-/// What a toast is telling the app. Four values rather than two because the
-/// alternative -- folding warning into error -- is how a palette decision
-/// becomes something a widget can no longer express. Each one must have a
-/// role in `Theme` and a filing in `familyOf`.
+/// What a toast is telling the app.
 pub const Severity = enum { info, success, warning, @"error" };
 
-/// How a self-intersecting outline decides what is inside it. Both rules are
-/// needed: an icon's magnifier glass is a ring under either, but a hole in a
-/// gear is only a hole if you say which rule you meant.
+/// How a self-intersecting outline decides what is inside it.
 pub const FillRule = enum { nonzero, evenodd };
 
 pub const PathOp = enum { move, line, quad, cubic, close };
 
-/// An outline in the caller's own coordinates.
-///
-/// Curves stay curves. The BACKEND flattens them, in DEVICE space, because a
-/// flattening tolerance is measured in pixels -- subdivide before the scale is
-/// applied and you are guessing how much each curve will be magnified.
-///
-/// `ops` and `points` are borrowed and read only for the duration of the call.
+/// An outline in the caller's own coordinates. Curves stay curves.
 pub const Path = struct {
     ops: []const PathOp,
-    /// One point per `move`/`line`, two per `quad` (control then end), three
-    /// per `cubic` (two controls then end), none for `close`. Deliberately the
-    /// same shape as the SVG `d` grammar, so a parsed icon maps across without
-    /// a translation step in between.
+    /// One point per `move`/`line`, two per `quad` (control then end), three per `cubic`
+    /// (two controls then end), none for `close`.
     points: []const [2]f32,
     rule: FillRule = .nonzero,
 };
 
-/// Where a popup sits relative to the anchor it belongs to. Same box either
-/// way; the difference is which edge stays put.
+/// Where a popup sits relative to the anchor it belongs to. Same box either way; the
+/// difference is which edge stays put.
 pub const PopupAnchor = enum {
-    /// A control that expanded: grow evenly above and below, centred on the
-    /// field, so the field looks like it opened rather than like a list
-    /// appeared beside it. There is no above/below flip here -- centring
-    /// makes it unnecessary, which is why the flip exists only for menus.
+    /// A control that expanded: grow evenly above and below, centred on the field.
     centred,
-    /// A command that drops out of its trigger. Left edges aligned, and it
-    /// flips above when there is no room below: a menu centred on its button
-    /// would read as a rendering fault.
+    /// A command that drops out of its trigger.
     below,
 };
 
-/// Rows past this scroll inside a fixed-height box. ODD ON PURPOSE: the box is
-/// centred on its anchor, so an even count splits unevenly around the middle
-/// row, and the list would look off by half a row.
+/// Rows past this scroll inside a fixed-height box.
 pub const popup_max_rows: usize = 5;
 
-/// One row's height. A constant because the box height has to be knowable
-/// before any row is measured -- and it is what keeps the box from resizing
-/// as the active row moves.
+/// One row's height.
 pub const popup_row_h: f32 = 26;
 
 pub const PopupLayout = struct {
     rect: Rect,
-    /// Index of the first row painted. The box height does NOT change with
-    /// it: the window slides inside a fixed frame, which is what stops the
-    /// whole popup jumping on every arrow press.
+    /// Index of the first row painted.
     first: usize,
     count: usize,
 };
 
 /// The box a popup occupies, and which rows of a long list it shows.
-///
-/// Pure, and free of the frame: the arithmetic is where the mistakes live --
-/// a box that resizes per keypress, a menu that opens off-screen -- so it is
-/// worth testing without rasterising anything.
 pub fn popupLayout(
     anchor: Rect,
     widest: f32,
@@ -1318,10 +968,7 @@ pub fn popupLayout(
     return .{ .rect = .{ .x = x, .y = y, .w = w, .h = h }, .first = first, .count = count };
 }
 
-/// One row of a select, menu or list. `msg` is optional because a menu
-/// separator is an item that claims space and does nothing; `disabled` is kept
-/// because `Element.disabled` already records a region inert, so a greyed row
-/// blocks the click instead of letting it fall through.
+/// One row of a select, menu or list.
 pub fn Choice(comptime M: type) type {
     return struct {
         label: []const u8 = "",
@@ -1330,68 +977,42 @@ pub fn Choice(comptime M: type) type {
     };
 }
 
-/// What a control must tell the runtime that the app cannot.
-///
-/// This is the SIBLING of `Geometry`, not a variant of it. `Geometry` answers
-/// "how do I measure, paint, clip and descend a scroll offset" and it must
-/// never learn that widgets exist -- five switches walk it, and the file has
-/// nineteen `else => {}` arms, so a new variant there is a silent subtree-skip
-/// waiting to happen. This union answers the one different question the
-/// runtime asks AFTER layout: is this a control, and what does it need?
-///
-/// It carries messages, so it is generic over `M` exactly as `Hit` is.
-///
-/// The value is reached through a pointer into the frame arena. That pointer
-/// is valid for the frame that built it and not one moment longer: a widget
-/// payload must never be cached across frames, unlike a `*f32` into the app's
-/// own Model, which lives as long as the app does. `Frame.hit` strips it from
-/// the copy it hands out for precisely this reason.
+/// What a control must tell the runtime that the app cannot. This is the SIBLING of
+/// `Geometry`, not a variant of it.
 pub fn Widget(comptime M: type) type {
     return union(enum) {
-        /// A value control. The runtime maps the pointer to a number and
-        /// writes it through `value`, because only the runtime sees motion
-        /// between frames. A Msg says that it changed; it carries nothing,
-        /// since raw pointer data is consumed at the edge.
+        /// A value control. The runtime maps the pointer to a number and writes it through
+        /// `value`, because only the runtime sees motion between frames.
         slider: struct {
-            /// Into the Model, not the arena: a drag outlives the frame that
-            /// started it, and app state is the one thing that does.
+            /// Into the Model, not the arena: a drag outlives the frame that started it,
+            /// and app state is the one thing that does.
             value: *f32,
             min: f32 = 0,
             max: f32 = 1,
-            /// null = continuous. `step` is allowed, never enforced: a
-            /// stepped drag quantises as it goes, and the click rule is a
-            /// nudge of one step toward the pointer.
+            /// null = continuous.
             step: ?f32 = null,
             orientation: Orientation = .horizontal,
             msg: M,
         },
-        /// A collapsed list of options. Geometry, dismissal and typeahead all
-        /// belong to the runtime popup layer, which needs the anchor's real
-        /// laid-out rect -- something `view` cannot know, because layout runs
-        /// after `view` returns.
+        /// A collapsed list of options.
         select: struct {
             open: bool,
             selected: u16,
-            /// A pointer into the Model so hover, arrows and typeahead write
-            /// one number. Two copies would let the highlight disagree with
-            /// what Enter activates.
+            /// A pointer into the Model so hover, arrows and typeahead write one number.
+            /// Two copies would let the highlight disagree with what Enter activates.
             active: *?u16,
             options: []const Choice(M),
             /// Emitted by the closed field, to toggle.
             msg: M,
         },
-        /// Commands rather than a value. Same popup layer, different geometry:
-        /// a menu drops below its trigger and flips, where a select grows
-        /// centred on its field.
+        /// Commands rather than a value.
         menu: struct {
             open: bool,
             active: *?u16,
             items: []const Choice(M),
             toggle: M,
         },
-        /// A notification. The Model owns whether it exists; the runtime owns
-        /// the clock, because a toast that expires needs the poll timeout
-        /// shortened or it simply never fires.
+        /// A notification.
         toast: struct {
             severity: Severity = .info,
             ttl_ms: u32 = 4000,
@@ -1399,27 +1020,15 @@ pub fn Widget(comptime M: type) type {
             msg: M,
         },
         /// A text field.
-        ///
-        /// The VALUE, caret and selection live in the Model, not here: the
-        /// reducer rewrites all three in one step (backspace deletes a byte,
-        /// moves the caret and clears the selection atomically), so a caret
-        /// kept beside it in the widget is a second place for the same fact to
-        /// be wrong. Into the Model, then, exactly like `slider.value`.
         text_input: struct {
             edit: *reducer.TextEdit,
-            /// What is DRAWN and MEASURED. Masked fields carry the mask here,
-            /// built by the builder, so measure and paint cannot see different
-            /// bytes -- which is the only way a caret cannot drift on a
-            /// password field.
+            /// What is DRAWN and MEASURED.
             display: []const u8,
             size: f32 = 14,
             /// Masks imply single line: a wrapped password is not a thing.
             mask: bool = false,
             placeholder: []const u8 = "",
-            /// The field's inner inset. Carried in the payload, not read off
-            /// the element, because the caret's origin is needed by the
-            /// RUNTIME when a click lands: by then the element is gone and
-            /// only this record is left.
+            /// The field's inner inset.
             pad: f32 = 6,
             /// Emitted when the runtime moves the caret (a click).
             msg: ?M = null,
@@ -1428,13 +1037,6 @@ pub fn Widget(comptime M: type) type {
 }
 
 /// Draw a text field's CONTENT: the placeholder, the value, the caret.
-///
-/// This lives here rather than in `widgets.zig` because the caret sits at an
-/// ADVANCE, and advances are the renderer's answer. `view` holds no renderer,
-/// so a caret x computed there would be a guess -- which is the whole reason a
-/// text field cannot be assembled out of rects in the tree.
-///
-/// Selection is not painted yet. The caret and the value are.
 fn paintTextInput(
     r: Renderer,
     th: Theme,
@@ -1508,15 +1110,6 @@ fn paintTextInput(
 }
 
 /// Where a click at pixel `x` puts the caret, as a BYTE OFFSET INTO THE VALUE.
-///
-/// `hitText` answers in the units of the string it was given, and for a masked
-/// field that string is the mask -- one `?` per codepoint -- so its answer is a
-/// CODEPOINT count. On a plain field the display IS the value, so the answer is
-/// already a byte offset. Both have to arrive at a boundary of the VALUE,
-/// because the caret indexes the value no matter what is drawn.
-///
-/// Here rather than in the runner so this is reachable from a headless test: it
-/// takes a `Renderer` and a payload, and needs no window.
 pub fn caretAtClick(r: Renderer, ti: anytype, x: f32) usize {
     const v = ti.edit.value;
     const raw = @min(r.hitText(ti.display, ti.size, x), ti.display.len);
@@ -1537,77 +1130,48 @@ pub fn Hit(comptime M: type) type {
     return struct {
         rect: Rect,
         clip: Rect,
-        /// The message a release here dispatches, or null for a region that
-        /// only routes input -- a scroll viewport claims pointer position
-        /// without ever producing a message.
+        /// The message a release here dispatches, or null for a region that only routes
+        /// input.
         msg: ?M = null,
-        /// Set on a scroll viewport. Null on every other region, which is what
-        /// keeps wheel routing to one walk of the hit list instead of a second
-        /// traversal of the tree.
+        /// Set on a scroll viewport.
         scroll: ?ScrollView = null,
-        /// The tree-path identity of the container that scrolled, for regions
-        /// produced by IMPLICIT scrolling. Separate from `key` because it is
-        /// runtime-computed, not app-authored: the wheel and the thumb store
-        /// their offset under this, so an app never invents a viewport key and
-        /// the duplicate-key guard never sees a synthesized one.
+        /// The tree-path identity of the container that scrolled, for regions produced by
+        /// IMPLICIT scrolling.
         scroll_id: ?u64 = null,
-        /// Set on a scroll THUMB, which claims the pointer as a drag rather
-        /// than as a press. Recorded with no `key` and no `msg`: it dispatches
-        /// nothing, and its identity is the viewport's, so the duplicate-key
-        /// scan stays meaningful.
+        /// Set on a scroll THUMB, which claims the pointer as a drag rather than as a
+        /// press.
         drag: ?Drag = null,
-        /// The focus scope this region was recorded inside, or null at the
-        /// root. Assigned after the subtree paints, so an element cannot
-        /// disagree with its own container about where it lives.
+        /// The focus scope this region was recorded inside, or null at the root.
         scope: ?u64 = null,
-        /// Set on a row of a roving control: the control's key. Null on
-        /// everything else, including the control itself.
+        /// Set on a row of a roving control: the control's key. Null on everything else,
+        /// including the control itself.
         roving: ?u64 = null,
         roving_index: u16 = 0,
-        /// Identity of the element that produced this region, if it declared
-        /// one. A keyed press re-binds to the element carrying the same key
-        /// instead of to a rectangle, so it survives the content reordering
-        /// around it. Keys are unique within a frame: a second region carrying
-        /// the same key is reported through the error band rather than quietly
-        /// rebinding a press to whichever twin it met first.
+        /// Identity of the element that produced this region, if it declared one.
         key: ?u64 = null,
-        /// mirrors the element's `disabled`: recorded so a press can be
-        /// cancelled when the element it claimed turns inert mid-gesture.
+        /// mirrors the element's `disabled`: recorded so a press can be cancelled when the
+        /// element it claimed turns inert mid-gesture.
         active: bool = true,
-        /// Corner radius, so a rounded control is only claimed where it is
-        /// actually painted -- its bounding box is not its shape.
+        /// Corner radius, so a rounded control is only claimed where it is actually painted
+        /// -- its bounding box is not its shape.
         radius: f32 = 0,
-        /// Whether Tab may land here. Recorded because only the frame knows
-        /// document order -- an app that had to rebuild it would be
-        /// reimplementing layout. A `key` is required too: focus is named, so
-        /// an unkeyed element has nothing for it to hold on to.
+        /// Whether Tab may land here. Recorded because only the frame knows document order
+        /// -- an app that had to rebuild it would be reimplementing layout.
         focusable: bool = false,
-        /// The control payload, if this element is a widget. Borrowed from the
-        /// frame arena and valid only for the frame that recorded it;
-        /// `Frame.hit` strips it before the app sees a Hit so no caller can
-        /// hold one past its life, and only the runtime's own walks ever read
-        /// it.
+        /// The control payload, if this element is a widget.
         widget: ?*const Widget(M) = null,
     };
 }
 
-/// A Hit with the borrowed widget payload removed.
-///
-/// Everything an app can hold has to come through here. The payload points into
-/// the frame arena, which is reset at the START of the next frame, while a
-/// `Press` deliberately survives across frames -- so a captured Hit carrying
-/// one would be a live dangling pointer sitting in a struct. Nothing
-/// dereferences it today, which is exactly the kind of safety that is one
-/// refactor away from being gone.
+/// A Hit with the borrowed widget payload removed. Everything an app can hold has to come
+/// through here.
 fn published(comptime M: type, h: Hit(M)) Hit(M) {
     var c = h;
     c.widget = null;
     return c;
 }
 
-/// Enqueues a hit region clipped to what is actually visible. A fully clipped
-/// element is not pressable, so `Frame.hitTest` stays a plain `contains` loop
-/// with no clip logic of its own.
+/// Enqueues a hit region clipped to what is actually visible.
 fn hitAppend(
     comptime M: type,
     hits: *std.ArrayList(Hit(M)),
@@ -1625,56 +1189,31 @@ fn hitAppend(
 }
 
 /// Appearance for one element, as a single value.
-///
-/// The three hot slots carry a `?Color` plus a `?Fill` gradient override rather
-/// than one optional, because a bare `Color` does not coerce into the tagged
-/// union and `.bg = .{ .solid = c }` at every call site was worse than the pair.
-/// `bgFill`/`colorFill`/`borderFill` resolve that pair, and they are the only place
-/// the precedence lives.
-///
-/// A `Style` is a VALUE: it can be returned from a function, named once and
-/// reused, and asserted in a test without rendering anything. That is the whole
-/// point of it existing as a type rather than eight assignments to an element.
 pub const Style = struct {
-    /// Which registered typeface this element's text draws in, as an index.
-    ///
-    /// BEHIND THE SCENES: nothing in a `view` sets this. `Ui.font()` takes a
-    /// NAME and resolves it against the registry, which is the only place that
-    /// knows how names become faces. An index appears here because `Style` is a
-    /// value that lives in the tree, and a tree is not the place to hold a
-    /// string that has to survive a frame.
-    ///
-    /// Null is the primary face, so an app that registers nothing records
-    /// exactly what it recorded before.
+    /// Which registered typeface this element's text draws in, as an index. BEHIND THE
+    /// SCENES: nothing in a `view` sets this.
     face: ?u16 = null,
 
-    /// A fill is either a flat colour or a gradient, so one field covers both.
-    /// Build one with `solid`, `hgrad` or `vgrad`.
-    /// Point size, from a theme style. Null means "no opinion", which is what
-    /// lets `text()` fall back to the size the call site passed.
+    /// A fill is either a flat colour or a gradient, so one field covers both. Build one
+    /// with `solid`, `hgrad` or `vgrad`. Point size, from a theme style.
     size: ?f32 = null,
-    /// `wght` axis value, from a theme style. Null leaves the face at its
-    /// default instance.
+    /// `wght` axis value, from a theme style. Null leaves the face at its default instance.
     weight: ?u16 = null,
     bg: ?Fill = null,
     color: ?Fill = null,
     border: ?Fill = null,
-    /// `null` means the caller did not specify, which is what lets a widget
-    /// merge a caller style over its own defaults and still let someone force
-    /// a square corner with `radius = 0`.
+    /// `null` means the caller did not specify, which is what lets a widget merge a caller
+    /// style over its own defaults and still let someone force a square.
     radius: ?f32 = null,
     pad: ?f32 = null,
-    /// Appearance, not layout: an app can set a glow on any element, and a
-    /// widget that wants a shadow by default can put one here.
+    /// Appearance, not layout: an app can set a glow on any element, and a widget that
+    /// wants a shadow by default can put one here.
     halo: ?Halo = null,
-    /// Blur of what is behind this element. Nothing shows unless something is
-    /// drawn under it, so it pairs with a translucent `bg`.
+    /// Blur of what is behind this element. Nothing shows unless something is drawn under
+    /// it, so it pairs with a translucent `bg`.
     frost: ?Frost = null,
-    /// All four margins at once. A named side wins over this, and this wins
-    /// over whatever the element already carried.
-    ///
-    /// Every field optional, like the rest of `Style`: a merge cannot otherwise
-    /// tell "leave it alone" from "set it to zero", and zero is a real request.
+    /// All four margins at once. A named side wins over this, and this wins over whatever
+    /// the element already carried.
     margin: ?f32 = null,
     margin_left: ?f32 = null,
     margin_right: ?f32 = null,
@@ -1692,9 +1231,8 @@ pub const Style = struct {
     }
 };
 
-/// Merging two fills, one of which may have come from a flat `bg` and the
-/// other from a gradient: a gradient wins over a flat colour, because a caller
-/// who reached for a gradient meant it. Two flats: `new` wins.
+/// Merging two fills, one of which may have come from a flat `bg` and the other from a
+/// gradient: a gradient wins over a flat colour.
 fn mergeFill(old: ?Fill, new: ?Fill) ?Fill {
     const n = new orelse return old;
     if (n != .solid) return n;
@@ -1713,19 +1251,7 @@ pub fn Element(comptime M: type) type {
         pad: f32 = 0,
         /// gap between children, uniform by definition
         gap: f32 = 0,
-        /// Space reserved AROUND this child inside the slot its container gives
-        /// it. Four fields rather than a before/after pair because the pair
-        /// could only ever name the parent's MAIN axis -- a row read it as left,
-        /// a column as top, and neither could express "3px above this swatch"
-        /// inside a row at all.
-        ///
-        /// MAIN axis: a row spends `margin_left` then `margin_right`; a column
-        /// `margin_top` then `margin_bottom`. They replace `gap` for this one
-        /// child, which is how uneven spacing is expressed: a number on the
-        /// child, never a phantom spacer element in the child list.
-        /// CROSS axis: the margins shrink the slot the child is aligned inside,
-        /// so `.center` centres between them and `.stretch` fills what is left.
-        /// Either way a margin is space the child does not get.
+        /// Space reserved AROUND this child inside the slot its container gives it.
         margin_left: f32 = 0,
         margin_right: f32 = 0,
         margin_top: f32 = 0,
@@ -1735,31 +1261,21 @@ pub fn Element(comptime M: type) type {
         height: ?f32 = null,
         /// fills this element's rect before anything inside it is painted
         bg: ?Fill = null,
-        /// what this element draws with on top of `bg`: text colour, control
-        /// label, bar fill. Appearance lives on the element rather than inside
-        /// `Geometry`, so the geometry describes structure only — which is what lets a
-        /// widget take its colours from the theme instead of needing a variant
-        /// per look.
+        /// what this element draws with on top of `bg`: text colour, control label, bar
+        /// fill.
         color: ?Fill = null,
         /// Which registered typeface this element's text draws in. Set through
         /// `Style.face`, which is itself behind the scenes -- see `Style`.
         face: u16 = 0,
-        /// `wght` axis for that face, or 0 for its default instance. Kept
-        /// beside `face` because a weight is meaningless without one, and both
-        /// are recorded together into the text primitive.
+        /// `wght` axis for that face, or 0 for its default instance.
         weight: u16 = 0,
-        /// A glow or shadow behind this element, following its corner radius.
-        /// Appearance only: no layout cost, no hit region, no children moved.
+        /// A glow or shadow behind this element, following its corner radius. Appearance
+        /// only: no layout cost, no hit region, no children moved.
         halo: ?Halo = null,
-        /// Blur of what is already drawn behind this element, before the
-        /// element's own fill. Cost is area, not circumference, so it is for
-        /// cards and bars, not for text.
+        /// Blur of what is already drawn behind this element, before the element's own
+        /// fill.
         frost: ?Frost = null,
-        /// A halo drawn only while the pointer is over this element, merged
-        /// over `halo`. Kept separate from `halo` for the same reason
-        /// `hover_bg` is separate from `bg`: the hovered state is derived
-        /// during paint, so an app cannot compute it in `view`, and it must
-        /// not have to keep a copy of the resting look to restore later.
+        /// A halo drawn only while the pointer is over this element, merged over `halo`.
         hover_halo: ?Halo = null,
         /// 1px inset outline, drawn inside the rect so it costs no layout
         border: ?Fill = null,
@@ -1769,123 +1285,61 @@ pub fn Element(comptime M: type) type {
         radius: f32 = 0,
         /// makes any element pressable, not just buttons
         on_press: ?M = null,
-        /// What the runtime needs to ask this node after layout, if it is a
-        /// Declares that this subtree is a FOCUS SCOPE keyed by this element.
-        /// Focus does not leave it while it is open: with a dialog up, Tab
-        /// cycles the dialog instead of walking the page behind it. The regions
-        /// the subtree records are stamped with this key on the way out, so no
-        /// parameter has to be threaded through `paint`.
+        /// What the runtime needs to ask this node after layout, if it is a Declares that
+        /// this subtree is a FOCUS SCOPE keyed by this element.
         focus_scope: bool = false,
-        /// Set by a builder on rows belonging to a roving control. Such a row is
-        /// NOT a Tab stop -- the control is -- which is what collapses a
-        /// twenty-row list into one press of Tab.
+        /// Set by a builder on rows belonging to a roving control.
         roving: ?u64 = null,
         roving_index: u16 = 0,
-        /// control. Declared by a widget builder and owned by the frame arena;
-        /// an app never writes it, and the builder owns the pairing with
-        /// `geometry` so the two cannot disagree.
+        /// control.
         widget: ?*const Widget(M) = null,
         /// A short label shown once the pointer has rested here for a while.
-        ///
-        /// A FIELD rather than a wrapper builder, because the tip belongs to the
-        /// thing rather than around it -- and because a field gives a property a
-        /// wrapper cannot: hovering a child with no tip falls through to an
-        /// ancestor that has one, so a whole toolbar row can explain itself with
-        /// one string.
-        ///
-        /// Never hit-tested, never focusable, never takes the pointer: it is an
-        /// explanation, not a control. Draws for a DISABLED element too, since
-        /// "why is this greyed out" is the main reason to have one.
         tooltip: ?[]const u8 = null,
-        /// confine every descendant to this element's rect (rect clip only;
-        /// rounded corners are not cut yet). Off by default, so nothing that
-        /// does not ask for it changes.
+        /// confine every descendant to this element's rect (rect clip only; rounded corners
+        /// are not cut yet).
         clips: bool = false,
         /// Vertical scroll offset for a `scroll` geometry, in logical units.
-        /// INJECTED BY THE RUNTIME from its keyed store, between `view` and
-        /// layout -- writing it in `view` is meaningless, because the next
-        /// frame overwrites it. Ask for a change with `Action.scroll`.
         scroll_offset: f32 = 0,
-        /// Runtime-written: this container's TREE PATH, hashed by the injection
-        /// walk. Implicit scrolling needs an identity for every container the
-        /// app did not key, and the path is the only one that exists without
-        /// asking. Never set this by hand.
+        /// Runtime-written: this container's TREE PATH, hashed by the injection walk.
         scroll_key: ?u64 = null,
-        /// Every node's position in the tree, stamped before paint. Filled
-        /// for EVERY element, not just containers, so an element without an
-        /// explicit `key` still has an identity: focus, a press that outlives
-        /// a reorder, and tooltip plumbing all need one. Never set by hand.
+        /// Every node's position in the tree, stamped before paint.
         node_path: u64 = 0,
-        /// The horizontal half of `scroll_offset`: both axes scroll on every
-        /// container kind, so both offsets have to exist.
+        /// The horizontal half of `scroll_offset`: both axes scroll on every container
+        /// kind, so both offsets have to exist.
         scroll_offset_x: f32 = 0,
-        /// background while the pointer is over this element. null = no
-        /// hover feedback, so nothing that does not ask for it changes.
-        /// Still a `Fill` rather than the `Color` + `_grad` pair the three
-        /// hot slots use: no gradient hover exists yet, so splitting it would
-        /// be a pair of fields bought on speculation. Give it the same shape
-        /// when one does.
+        /// background while the pointer is over this element. null = no hover feedback, so
+        /// nothing that does not ask for it changes.
         hover_bg: ?Fill = null,
         /// background while this element owns the press.
         press_bg: ?Fill = null,
-        /// refuses input: no hit region, no hover, no press visual. Layout and
-        /// drawing are untouched, so a disabled control keeps its shape and
-        /// only loses its affordances and its contrast.
+        /// refuses input: no hit region, no hover, no press visual.
         disabled: bool = false,
-        /// Whether this element may hold focus. Focus is only meaningful for a
-        /// KEYED element: focus names an identity, and an unkeyed element has
-        /// none, so `focusable` alone draws nothing.
+        /// Whether this element may hold focus.
         focusable: bool = false,
-        /// In a ROW, take a share of the width left over after every non-grow
-        /// child and the gaps have been paid for. Equal shares, floored at the
-        /// child's own `min_w` -- overflow rather than clipping, same rule as
-        /// the squeeze. Ignored in a column; vertical fill is a separate idea
-        /// and nothing needs it yet.
+        /// In a ROW, take a share of the width left over after every non-grow child and the
+        /// gaps have been paid for.
         grow: bool = false,
         /// Cross-axis placement of this row's children. See `RowAlign`.
         row_align: RowAlign = .stretch,
-        /// identity for keyed children. When set, a press that starts here
-        /// re-binds to the element carrying the same key on later frames
-        /// rather than to a rectangle, so it survives reordering. Unique among
-        /// siblings; unset means the old rect-based behaviour.
+        /// identity for keyed children.
         key: ?u64 = null,
         /// Displacement from a stack's content origin, in logical units.
-        /// IGNORED by every other geometry: flow containers decide where children
-        /// go, a stack asks each child where it wants to be. Negative values
-        /// are legal and are how a tooltip sits above its anchor.
         offset: [2]f32 = .{ 0, 0 },
 
-        /// What this element IS structurally: how it measures, how it paints,
-        /// what it clips, and how a scroll offset descends through it.
-        ///
-        /// `Geometric` rather than "widget" on purpose. `text` and `button`
-        /// carry their bytes and label because that content is what the
-        /// geometry applies to, not an interaction model — which is why a
-        /// widget must never add a variant here. Appearance lives on the
-        /// element instead (see `color`), so a geometry cannot imply a look.
+        /// What this element IS structurally: how it measures, how it paints, what it
+        /// clips, and how a scroll offset descends through it.
         pub const Geometry = union(enum) {
             column: struct { children: []const *Self },
             row: struct { children: []const *Self },
-            /// A viewport over ONE child: the child is laid out at its full
-            /// height and painted shifted by `scroll_offset`, clipped to this
-            /// element's box. The offset is runtime state, so a viewport is
-            /// something an app declares and never animates by hand.
+            /// A viewport over ONE child: the child is laid out at its full height and
+            /// painted shifted by `scroll_offset`, clipped to this element's box.
             scroll: struct { child: *Self },
-            /// `face` is set through `Style.face`, never by a view: a style
-            /// names a typeface, `Ui` resolves it against the registry and
-            /// stores the INDEX here, because the element is a value that has
-            /// to outlive the frame that named it.
+            /// `face` is set through `Style.face`, never by a view: a style names a
+            /// typeface, `Ui` resolves it against the registry and stores the INDEX here.
             text: struct { bytes: []const u8, size: f32, face: u16 = 0, weight: u16 = 0 },
             button: struct { label: []const u8, size: f32 },
             bar: struct { value: f32 },
             /// Children share ONE origin, each displaced by its own `offset`.
-            /// The only container where siblings may overlap, and the only way
-            /// an element paints outside the box flow gave it -- which is what
-            /// a dropdown, a tooltip and a modal all are.
-            ///
-            /// Later children paint later, so they sit on top AND appear later
-            /// in the hit list, where `hit` walks from the end. Overlap and
-            /// z-order therefore agree without either one being declared.
             stack: struct { children: []const *Self },
             /// a plain sized box; the only geometry with no intrinsic size
             rect: void,
@@ -1912,15 +1366,8 @@ pub fn Element(comptime M: type) type {
             };
         }
 
-        /// The ONLY intended writer of the appearance fields, and the reason
-        /// they are grouped: one call replaces eight assignments, so the reader
-        /// sees the whole look at the point the element is made instead of
-        /// tracking statements that may follow later.
-        ///
-        /// This SETS, it does not merge -- a caller passing `.{}` gets the
-        /// defaults back, `radius` and `pad` included. Call it once, at
-        /// construction. Zig has no field privacy, so post-hoc assignment still
-        /// compiles; this is the short path, not an enforced boundary.
+        /// The ONLY intended writer of the appearance fields, and the reason they are
+        /// grouped: one call replaces eight assignments.
         pub fn applyStyle(self: *Self, s: Style) void {
             self.bg = mergeFill(self.bg, s.bg);
             self.color = mergeFill(self.color, s.color);
@@ -1943,14 +1390,8 @@ pub fn Element(comptime M: type) type {
             if (s.margin_bottom) |v| self.margin_bottom = v;
         }
 
-        /// Overlay `s` on what this element already has: only the fields the
-        /// caller actually set are written.
-        ///
-        /// This is the one widgets need. A button carries its own theme
-        /// defaults, and `applyStyle` would blank them the moment a caller
-        /// passed `.{}`. Same reason `radius`/`pad` are optional in `Style`:
-        /// "unset" and "zero" have to be different answers or a caller cannot
-        /// ask for square corners on a rounded widget.
+        /// Overlay `s` on what this element already has: only the fields the caller
+        /// actually set are written. This is the one widgets need.
         pub fn mergeStyle(self: *Self, s: Style) void {
             if (s.bg) |v| self.bg = v;
             if (s.color) |v| self.color = v;
@@ -1973,15 +1414,12 @@ pub fn Element(comptime M: type) type {
             if (s.margin_bottom) |v| self.margin_bottom = v;
         }
 
-        /// Totals a row shares out. Computed by ONE function so measure and
-        /// paint cannot drift: they disagreed once about a child's height and
-        /// the symptom was a control painted outside the box it was measured
-        /// in, which no test caught because both halves were self-consistent.
+        /// Totals a row shares out.
         const RowFit = struct {
             total_w: f32 = 0,
             total_min: f32 = 0,
-            /// Everything the grow shares cannot eat: the non-grow children
-            /// with their spacing, plus the gaps between everyone.
+            /// Everything the grow shares cannot eat: the non-grow children with their
+            /// spacing, plus the gaps between everyone.
             fixed_w: f32 = 0,
             n_grow: usize = 0,
             inner: f32 = 0,
@@ -2007,10 +1445,7 @@ pub fn Element(comptime M: type) type {
             return fit;
         }
 
-        /// Final width for one row child. A grow child is paid out of the
-        /// leftover at the width it was measured at, so a row that cannot pay
-        /// falls back to the ordinary squeeze -- which already floors everyone
-        /// at `min_w`.
+        /// Final width for one row child.
         fn rowWidth(cs: Extent, ch: *const Self, fit: RowFit) f32 {
             if (ch.grow and fit.n_grow > 0 and fit.total_w <= fit.inner) {
                 const n: f32 = @floatFromInt(fit.n_grow);
@@ -2019,18 +1454,8 @@ pub fn Element(comptime M: type) type {
             return rowChildWidth(cs, fit.total_w, fit.total_min, fit.inner);
         }
 
-        /// Distance from this element's TOP edge down to the baseline of the
-        /// first line of text it will draw, or null when it draws none.
-        ///
-        /// `w` and `h` are the box it will ACTUALLY paint in, not what it asked
-        /// for. A button centres its label in whatever height it is handed, so
-        /// its baseline moves when a row stretches it and cannot be answered
-        /// from the geometry alone.
-        ///
-        /// A container borrows the first baseline it contains -- its first line
-        /// box, the same rule CSS uses. A nested row would strictly want the
-        /// deepest child, but a label column and a stacked label+detail are the
-        /// cases that actually occur, and both are answered by the first.
+        /// Distance from this element's TOP edge down to the baseline of the first line of
+        /// text it will draw, or null when it draws none.
         fn textBaseline(self: *const Self, r: Renderer, w: f32, h: f32) ?f32 {
             switch (self.geometry) {
                 .text => |t| return self.pad + r.measureTextFace(t.bytes, t.size, t.face).ascent,
@@ -2063,14 +1488,8 @@ pub fn Element(comptime M: type) type {
             }
         }
 
-        /// Height (and resolved width) at `avail_w` — the width the parent is
-        /// about to give this element.
-        ///
-        /// `avail_w` exists so wrapping does not have to be told its width by
-        /// the call site, where the number is a guess that layout has not
-        /// computed yet. It is the same number paint lays the element out
-        /// with, which is what keeps measure and paint breaking lines in the
-        /// same place.
+        /// Height (and resolved width) at `avail_w` — the width the parent is about to give
+        /// this element.
         pub fn measure(self: *const Self, r: Renderer, avail_w: f32) Extent {
             var s: Extent = switch (self.geometry) {
                 .text => |t| blk: {
@@ -2239,8 +1658,8 @@ pub fn Element(comptime M: type) type {
             return s;
         }
 
-        /// A column's content extent: the sum down its main axis, and the widest
-        /// child across it. Both are needed now that either axis can overflow.
+        /// A column's content extent: the sum down its main axis, and the widest child
+        /// across it. Both are needed now that either axis can overflow.
         fn columnContent(r: Renderer, kids: []const *Self, gap: f32, inner_w: f32) struct { w: f32, h: f32 } {
             var h: f32 = 0;
             var w: f32 = 0;
@@ -2253,8 +1672,8 @@ pub fn Element(comptime M: type) type {
             return .{ .w = w, .h = h };
         }
 
-        /// A row's cross-axis extent: the tallest child, floored at the box so a
-        /// row that fits reports nothing to scroll.
+        /// A row's cross-axis extent: the tallest child, floored at the box so a row that
+        /// fits reports nothing to scroll.
         fn rowContentHeight(r: Renderer, kids: []const *Self, avail_w: f32, inner_h: f32) f32 {
             var h: f32 = inner_h;
             for (kids) |ch| {
@@ -2275,11 +1694,8 @@ pub fn Element(comptime M: type) type {
             }
         };
 
-        /// THE RULE, in one place: compare content extent against the box the
-        /// parent painted, per axis. No declaration, no height, no key. The box
-        /// comes from the parent, so whichever container the content actually
-        /// overflows is the one that scrolls -- the window is just the outermost
-        /// case of it.
+        /// THE RULE, in one place: compare content extent against the box the parent
+        /// painted, per axis. No declaration, no height, no key.
         fn scrollFit(self: *const Self, inner: Rect, clip: Rect, cw: f32, ch: f32) ScrollFit {
             if (inner.w <= 0 or inner.h <= 0) return .{ .vp = clip };
             const max_x = @max(0, cw - inner.w);
@@ -2297,10 +1713,8 @@ pub fn Element(comptime M: type) type {
             };
         }
 
-        /// Everything a scrolling container owes the runtime: the region the
-        /// wheel targets, and whichever thumbs apply. One function for every
-        /// kind, so a column and a stack cannot disagree about what "scrolled"
-        /// means.
+        /// Everything a scrolling container owes the runtime: the region the wheel targets,
+        /// and whichever thumbs apply.
         fn scrollChrome(
             self: *const Self,
             r: Renderer,
@@ -2340,8 +1754,8 @@ pub fn Element(comptime M: type) type {
             paintScrollbarH(r, th, inner, f.vp, cw, f.off_x, f.max_x);
         }
 
-        /// The vertical scrollbar, painted last so content cannot cover it, and
-        /// only when there is something to scroll.
+        /// The vertical scrollbar, painted last so content cannot cover it, and only when
+        /// there is something to scroll.
         fn paintScrollbar(r: Renderer, th: Theme, inner: Rect, vp: Rect, content_h: f32, off: f32, max_off: f32) void {
             if (max_off <= 0 or inner.w <= 2 * scrollbar_w or content_h <= 0) return;
             const track = inner.h;
@@ -2354,9 +1768,8 @@ pub fn Element(comptime M: type) type {
             );
         }
 
-        /// The thumb's grab region: wider than the 6px it draws, because a strip
-        /// that can only be hit on the pixel it paints is not draggable in
-        /// practice.
+        /// The thumb's grab region: wider than the 6px it draws, because a strip that can
+        /// only be hit on the pixel it paints is not draggable in practice.
         fn thumbHit(inner: Rect, vp: Rect, content_h: f32, off: f32, max_off: f32, key: u64, active: bool) ?Hit(M) {
             if (max_off <= 0 or inner.w <= 2 * scrollbar_w or content_h <= 0) return null;
             const track = inner.h;
@@ -2962,19 +2375,11 @@ pub fn Element(comptime M: type) type {
 
 const widgets = @import("widgets.zig");
 
-/// The text-editing state machine. Imported rather than duplicated so there is
-/// one reducer: an app holds `elmz.TextEdit` in its Model and never names a
-/// file to get it.
+/// The text-editing state machine.
 const reducer = @import("reducer.zig");
 pub const TextEdit = reducer.TextEdit;
 
 /// Storage for the `.vars` tier, in bytes.
-///
-/// The tier is typed by the app (`theme_tokens = Tokens`), and `Ui` only knows
-/// its message type, so the value cannot be a normal field. The runner writes
-/// the struct's bytes here and `Ui.vars` reinterprets them. A fixed buffer
-/// rather than an allocation: the tier is a handful of tokens, and this has to
-/// survive a failed reload without leaking.
 pub const VarSlot = struct {
     bytes: [256]u8 align(16) = undefined,
     len: u16 = 0,
@@ -2987,87 +2392,47 @@ pub fn Ui(comptime M: type) type {
 
         arena: std.heap.ArenaAllocator,
         theme: Theme = .{},
-        /// Per-role gradient overrides from the theme file. Empty means every
-        /// role paints its flat colour, which is the default look.
+        /// Per-role gradient overrides from the theme file. Empty means every role paints
+        /// its flat colour, which is the default look.
         gradients: Gradients = .{},
-        /// The `.vars` tier, in BYTES.
-        ///
-        /// `Ui` is generic over the message type, but the tier's type is the
-        /// APP's, so it cannot be a field here. The runner writes the struct's
-        /// bytes and `vars(T)` reads them back typed. A fixed buffer, not an
-        /// allocation: a reload replaces the value in place, so there is
-        /// nothing to free and no way to leak a tier.
+        /// The `.vars` tier, in BYTES. `Ui` is generic over the message type, but the
+        /// tier's type is the APP's, so it cannot be a field here.
         vars_bytes: [256]u8 align(16) = undefined,
         vars_len: u16 = 0,
-        /// Where the `.vars` tier lands. `Ui` cannot hold the value itself --
-        /// it is generic over `M`, and the tier's type is the APP's -- so the
-        /// runner writes the bytes here and `vars(T)` reads them back typed.
-        /// Empty until the chain resolves, so `vars` answers defaults first.
+        /// Where the `.vars` tier lands.
         vars_slot: VarSlot = .{},
         /// Which key holds focus, mirrored from the runtime before `view` runs.
-        /// The READ half of `Action.focus`: a widget can ask whether the caret
-        /// belongs to it, and the app does not have to keep a second copy of
-        /// the answer in its Model. Null means nothing holds focus.
         focus: ?u64 = null,
         /// Seconds since the runtime started, mirrored before `view` runs.
-        ///
-        /// The READ half of the frame clock, and the reason `view` needs none
-        /// of its own: a caret that blinks, a tooltip held long enough to
-        /// appear, a toast that expires and a typeahead buffer that lapses ask
-        /// the same question, and the runtime is the one thing that always
-        /// knows the answer.
-        ///
-        /// A number rather than a callback, so the tree stays a value and a
-        /// headless test can hand `view` whatever time it likes.
         elapsed: f32 = 0,
-        /// Seconds since the last key or text event. Read here so "do not
-        /// blink while typing" costs the app nothing, and so four widgets
-        /// cannot disagree about when typing stopped.
+        /// Seconds since the last key or text event.
         since_input: f32 = 0,
-        /// How long the pointer has rested on the current region, reset when
-        /// it moves to a different one. The tooltip delay and nothing else:
-        /// `elapsed` says how long the app has run, not how long you have been
-        /// looking at that particular thing.
+        /// How long the pointer has rested on the current region, reset when it moves to a
+        /// different one.
         hover_since: f32 = 0,
-        /// The READ side of the scroll store: whatever the runtime is holding
-        /// for each keyed viewport. Read-only here because the offset is not
-        /// the app's to write -- the wheel and the thumb own it.
+        /// The READ side of the scroll store: whatever the runtime is holding for each
+        /// keyed viewport.
         scrolls: []const ScrollSlot = &.{},
-        /// set when an allocation failed. The frame is then structurally
-        /// degraded rather than aborted, which is what lets `view` be
-        /// infallible. The runner reports it.
+        /// set when an allocation failed. The frame is then structurally degraded rather
+        /// than aborted, which is what lets `view` be infallible.
         failed: bool = false,
-        /// The face the next recorded text prim draws in. Sticky, set by `paint`
-        /// once per element, because a wrapped label emits several runs that all
-        /// share one typeface. Reset per element, not per frame, so a styled
-        /// label cannot leak its font into the next element drawn.
+        /// The face the next recorded text prim draws in.
         cur_face: u16 = 0,
-        /// Turns a font NAME into the face index paint wants, or null when the
-        /// name cannot be produced. Set by the runtime each frame from its
-        /// registry; a `view` never sees the index, and a headless test that
-        /// registers no fonts gets null and the primary face.
-        ///
-        /// A function rather than a slice of names because resolution LOADS the
-        /// file on first sight, and that needs the allocator and io the runtime
-        /// owns. `Ui` deliberately holds neither.
+        /// Turns a font NAME into the face index paint wants, or null when the name cannot
+        /// be produced.
         face_lookup: ?*const FaceLookup = null,
-        /// The theme files' named styles, for `style`. Points into the chain,
-        /// which outlives the frame; null when the app loaded no theme.
-        /// Starts as the compiled table so a Ui with no file still resolves
-        /// `heading`, `card` and every script. A file REPLACES it wholesale.
+        /// The theme files' named styles, for `style`. Points into the chain, which
+        /// outlives the frame; null when the app loaded no theme.
         styles: ?[]const StyleEntry = default_styles,
 
         /// which failure `failed` refers to; only meaningful when failed
         fail_kind: FailKind = .layout_allocation,
-        /// Detail for the band, formatted in place. A fixed buffer rather
-        /// than a slice: the text must not depend on an allocation, because
-        /// the band exists to report failures, and a slice into the per-frame
-        /// arena would dangle the moment that arena is reset.
+        /// Detail for the band, formatted in place.
         fail_buf: [192]u8 = undefined,
         fail_len: usize = 0,
 
-        /// A failure raised from outside a build; see `failExternal`. Zero
-        /// length means none, and that is the whole state.
+        /// A failure raised from outside a build; see `failExternal`. Zero length means
+        /// none, and that is the whole state.
         ext_kind: FailKind = .theme,
         ext_buf: [192]u8 = undefined,
         ext_len: usize = 0,
@@ -3075,39 +2440,13 @@ pub fn Ui(comptime M: type) type {
         dead: Elem,
 
         /// Resolves a font name to the index `Style.face` wants.
-        ///
-        /// This is the ONLY surface a view has for choosing a typeface, and the
-        /// index it returns is an opaque handle -- correct to pass to `face`,
-        /// meaningless to read. A name that cannot be resolved yields null,
-        /// which is the primary face: a missing font must never silently become
-        /// a different font, and it must never fail the frame either.
         pub fn font(self: *const Self, name: []const u8) ?u16 {
             const l = self.face_lookup orelse return null;
             return l.resolve(l.ptr, name);
         }
 
-        /// Resolve a named style from the theme files into the values an
-        /// element wants, or null when the theme names no such style.
-        ///
-        /// A name, for the same reason `font` takes one: which style exists is
-        /// the theme author's decision, and a view that hardcoded colours would
-        /// be unaffected by an edit to `theme.zon`. An unknown name is not an
-        /// error -- the caller keeps its own default, which is what lets an app
-        /// ship with no theme file at all.
-        /// One role as a FILL: its theme gradient when the file gave it one,
-        /// else the flat colour.
-        ///
-        /// This is the seam that makes a gradient on `accent` reach a style
-        /// that names `accent`, rather than only the fills an app hand-built.
-        /// A style names a ROLE, and a role is a look -- so text set in a
-        /// gradiented role is gradiented text, which is the whole reason
-        /// `Renderer.text` takes a `Fill` and not a `Color`.
-        /// The `.vars` tier, typed by whoever declared `theme_tokens`.
-        ///
-        /// Defaults until a file supplies some, so a widget can read a token on
-        /// the first frame, before any watch has polled. The type must be the
-        /// one the app declared, or this returns defaults rather than
-        /// reinterpreting unrelated bytes.
+        /// Resolve a named style from the theme files into the values an element wants, or
+        /// null when the theme names no such style.
         pub fn vars(self: *const Self, comptime T: type) T {
             // Oversize is a compile error here too, for the same reason as
             // `setVars`: the buffer can never hold this type, so returning
@@ -3126,9 +2465,7 @@ pub fn Ui(comptime M: type) type {
             return out;
         }
 
-        /// Write the tier. Called from BOTH the startup and reload paths so
-        /// the two cannot disagree, which is the same reason `resolveChain`
-        /// exists for the palette.
+        /// Write the tier.
         pub fn setVars(self: *Self, comptime T: type, value: T) void {
             // A type too large for the buffer is a COMPILE error, not a quiet
             // no-op. Returning early here was silent in the worst way: the write
@@ -3182,10 +2519,6 @@ pub fn Ui(comptime M: type) type {
         }
 
         /// Current offset for a keyed viewport, or 0 if it has never moved.
-        ///
-        /// Read from `scrolls`, the slice this frame gave `view`, so it is the
-        /// answer to use INSIDE `view`. Outside a frame, `scrollOffset` reads
-        /// the runtime's own store instead.
         pub fn scrollAt(self: *const Self, key: ?u64) f32 {
             const k = key orelse return 0;
             for (self.scrolls) |s| {
@@ -3217,10 +2550,7 @@ pub fn Ui(comptime M: type) type {
             self.fail_len = 0;
         }
 
-        /// Records a failure and formats the explanation into the band's own
-        /// buffer. `noinline` is not needed -- this is cold -- but it is
-        /// deliberately allocation-free, so a failing frame can always report
-        /// itself even when the allocator is what failed.
+        /// Records a failure and formats the explanation into the band's own buffer.
         pub fn failFmt(self: *Self, kind: FailKind, comptime f: []const u8, args: anytype) void {
             self.failed = true;
             self.fail_kind = kind;
@@ -3231,53 +2561,31 @@ pub fn Ui(comptime M: type) type {
         }
 
         /// Raise a failure that OUTLIVES the next frame reset.
-        ///
-        /// `frame()` zeroes per-build state on entry, which is right for an
-        /// allocation that failed inside `view` -- it describes that build and
-        /// nothing else. A theme file that will not parse is not a property of
-        /// a build: the runner discovers it between frames, and the band has to
-        /// still be saying so on the frame after. Same band, two lifetimes.
         pub fn failExternal(self: *Self, kind: FailKind, comptime f: []const u8, args: anytype) void {
             self.ext_kind = kind;
             const written = std.fmt.bufPrint(&self.ext_buf, f, args) catch self.ext_buf[0..];
             self.ext_len = written.len;
         }
 
-        /// The outside world recovered. Nothing else clears this, because
-        /// nothing outside the caller knows the condition is gone.
+        /// The outside world recovered. Nothing else clears this, because nothing outside
+        /// the caller knows the condition is gone.
         pub fn clearExternal(self: *Self) void {
             self.ext_len = 0;
         }
 
-        /// What the band paints: the formatted detail when there is one, the
-        /// kind's own text otherwise.
+        /// What the band paints: the formatted detail when there is one, the kind's own
+        /// text otherwise.
         pub fn failMessage(self: *const Self) []const u8 {
             if (self.fail_len == 0) return self.fail_kind.message();
             return self.fail_buf[0..self.fail_len];
         }
 
         /// The frame arena, for `widgets.zig`.
-        ///
-        /// Public only because a decl used from another FILE has to be: `tabs`
-        /// and `list` allocate their child slices, and their bodies now live in
-        /// `widgets.zig`. An app has no reason to call this -- the builders
-        /// allocate on its behalf.
         pub fn alloc(self: *Self) Allocator {
             return self.arena.allocator();
         }
 
         /// Put a widget payload in the FRAME ARENA and hand back a pointer.
-        ///
-        /// The arena is exactly the right lifetime for this: `view` builds it,
-        /// the runtime reads it after layout, the frame ends. Anything that has
-        /// to outlive a frame points at the Model instead -- which is why
-        /// `slider.value`, `select.active` and `menu.active` are pointers and
-        /// not values here.
-        ///
-        /// Optional rather than a failure pointer: the caller has an element in
-        /// hand and can return it without the payload, which is a widget that
-        /// paints but does not respond. Silently returning a dangling or shared
-        /// pointer would be far worse.
         pub fn payload(self: *Self, w: Widget(M)) ?*const Widget(M) {
             const p = self.alloc().create(Widget(M)) catch {
                 self.failWith(.layout_allocation);
@@ -3303,16 +2611,11 @@ pub fn Ui(comptime M: type) type {
             };
         }
 
-        /// Which of the two text roles a label uses. A field rather than a
-        /// second builder: `ui.muted` was within two calls of `ui.text`, so two
-        /// near-identical functions were being carried for one word at the
-        /// call site.
+        /// Which of the two text roles a label uses.
         pub const Tone = enum { normal, muted };
 
-        /// What every builder accepts, repeated in each opts struct rather than
-        /// shared through a nested field. Duplication on purpose: nesting it
-        /// would push every call site down a level (`.common.style = ...`) to
-        /// save a library-internal repetition the caller never sees.
+        /// What every builder accepts, repeated in each opts struct rather than shared
+        /// through a nested field.
         fn finish(self: *Self, e: *Elem, o: anytype) *Elem {
             _ = self;
             // Every margin an options struct happens to offer is applied.
@@ -3357,28 +2660,18 @@ pub fn Ui(comptime M: type) type {
 
         pub const TextOpts = struct {
             label: []const u8,
-            /// Optional so a STYLE can supply it: a non-optional default of 14
-            /// meant every call site silently asked for 14, and a theme's
-            /// `.size` could never win. Null here means "the style's, or 14".
+            /// Optional so a STYLE can supply it: a non-optional default of 14 meant every
+            /// call site silently asked for 14, and a theme's `.size` could never win.
             size: ?f32 = null,
-            /// The typeface to draw this label in, BY NAME, resolved through
-            /// the runtime's registry. A name, not an index: the index is a
-            /// load-order artefact and would silently mean a different
-            /// typeface the moment an app registers one more font.
-            ///
-            /// Unresolvable is not an error -- the label draws in the primary
-            /// face, the same rule the theme follows. A missing font must never
-            /// fail the frame, and must never become a different font quietly.
+            /// The typeface to draw this label in, BY NAME, resolved through the runtime's
+            /// registry.
             font: ?[]const u8 = null,
             tone: Tone = .normal,
             wrap: bool = false,
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
-            /// halo drawn INSTEAD of `style.halo` while the pointer is over
-            /// the element. Its own field rather than a colour on `halo`
-            /// because a glow and a shadow are the same type with different
-            /// geometry: hover usually swaps the geometry, not just the tint.
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
@@ -3398,10 +2691,7 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
-            /// halo drawn INSTEAD of `style.halo` while the pointer is over
-            /// the element. Its own field rather than a colour on `halo`
-            /// because a glow and a shadow are the same type with different
-            /// geometry: hover usually swaps the geometry, not just the tint.
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
@@ -3415,8 +2705,8 @@ pub fn Ui(comptime M: type) type {
             clips: bool = false,
         };
 
-        /// A row is a column with the axis swapped: identical options, and
-        /// keeping them one declaration means a new field lands in both.
+        /// A row is a column with the axis swapped: identical options, and keeping them one
+        /// declaration means a new field lands in both.
         pub const RowOpts = ColumnOpts;
 
         pub const ButtonOpts = struct {
@@ -3426,10 +2716,7 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
-            /// halo drawn INSTEAD of `style.halo` while the pointer is over
-            /// the element. Its own field rather than a colour on `halo`
-            /// because a glow and a shadow are the same type with different
-            /// geometry: hover usually swaps the geometry, not just the tint.
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
@@ -3448,10 +2735,7 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
-            /// halo drawn INSTEAD of `style.halo` while the pointer is over
-            /// the element. Its own field rather than a colour on `halo`
-            /// because a glow and a shadow are the same type with different
-            /// geometry: hover usually swaps the geometry, not just the tint.
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
@@ -3471,10 +2755,7 @@ pub fn Ui(comptime M: type) type {
             on_press: ?M = null,
             hover_bg: ?Fill = null,
             press_bg: ?Fill = null,
-            /// halo drawn INSTEAD of `style.halo` while the pointer is over
-            /// the element. Its own field rather than a colour on `halo`
-            /// because a glow and a shadow are the same type with different
-            /// geometry: hover usually swaps the geometry, not just the tint.
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             style: Style = .{},
             margin_left: f32 = 0,
@@ -3502,9 +2783,8 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
-        /// Same options as a column; `gap` is meaningless and ignored, because
-        /// no two stack children are adjacent. One declaration keeps a new
-        /// option landing in every container at once.
+        /// Same options as a column; `gap` is meaningless and ignored, because no two stack
+        /// children are adjacent.
         pub const StackOpts = ColumnOpts;
 
         /// Children share an origin and may overlap. See `Geometry.stack`.
@@ -3522,26 +2802,22 @@ pub fn Ui(comptime M: type) type {
             press_bg: ?Fill = null,
             hover_halo: ?Halo = null,
             width: ?f32 = null,
-            /// The viewport's height. Without one a viewport is as tall as its
-            /// content and can never overflow, so this is the field that makes
-            /// scrolling possible at all.
+            /// The viewport's height.
             height: ?f32 = null,
             style: Style = .{},
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
             margin_bottom: f32 = 0,
-            /// Required for a scrollable viewport: the offset is stored under
-            /// this key, so an unkeyed viewport sits at zero forever.
+            /// Required for a scrollable viewport: the offset is stored under this key, so
+            /// an unkeyed viewport sits at zero forever.
             key: ?u64 = null,
             disabled: bool = false,
             /// accepted and redundant: a viewport always clips.
             clips: bool = false,
         };
 
-        /// A viewport over one child. Clipped by construction -- that is what
-        /// makes it a viewport -- and never given an offset by the app: the
-        /// wheel and the thumb move it, and the runtime holds the number.
+        /// A viewport over one child.
         pub fn scroll(self: *Self, o: ScrollOpts) *Elem {
             const e = self.mk(.{ .scroll = .{ .child = o.child } });
             if (o.width) |v| e.width = v;
@@ -3550,8 +2826,8 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
-        /// Text. `color` is only set for `tone = .muted`: leaving it unset is the
-        /// paint default, so the common case writes one fewer field.
+        /// Text. `color` is only set for `tone = .muted`: leaving it unset is the paint
+        /// default, so the common case writes one fewer field.
         pub fn text(self: *Self, o: TextOpts) *Elem {
             // Precedence, one place: an explicit call-site size wins, then the
             // style the element carries, then the widget default. The style is
@@ -3574,12 +2850,6 @@ pub fn Ui(comptime M: type) type {
         }
 
         /// Format into the frame arena and hand back the slice.
-        ///
-        /// This is what makes a formatted label a first-class citizen: it lives
-        /// as long as the frame (a stack buffer would dangle, since the tree
-        /// outlives `view`), and the caller can then use a full opts struct --
-        /// including `tone` -- instead of being stuck with a positional
-        /// builder that has no appearance surface.
         pub fn fmt(self: *Self, comptime f: []const u8, args: anytype) []const u8 {
             return std.fmt.allocPrint(self.alloc(), f, args) catch {
                 self.failWith(.layout_allocation);
@@ -3610,17 +2880,12 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
-        /// A rule between things: decoration, so no key, no message and no
-        /// focus. Anything clickable is a control, not this.
-        ///
-        /// Orientation is EXPLICIT, not inferred from the parent. A builder
-        /// cannot see the container it will land in, and inferring it would mean
-        /// answering at paint time a question the call site already knows.
-        /// `.vertical = true` is the row case.
+        /// A rule between things: decoration, so no key, no message and no focus. Anything
+        /// clickable is a control, not this.
         pub const SeparatorOpts = struct {
             vertical: bool = false,
-            /// Whole pixels: at 1.5 density a 1px rule is already the thinnest
-            /// line that draws without going soft.
+            /// Whole pixels: at 1.5 density a 1px rule is already the thinnest line that
+            /// draws without going soft.
             thickness: f32 = 1,
             margin_left: f32 = 0,
             margin_right: f32 = 0,
@@ -3642,11 +2907,11 @@ pub fn Ui(comptime M: type) type {
             return e;
         }
 
-        /// Determinate only. An indeterminate bar is an animation, and this
-        /// widget would then need the frame clock to mean anything at all.
+        /// Determinate only. An indeterminate bar is an animation, and this widget would
+        /// then need the frame clock to mean anything at all.
         pub const ProgressOpts = struct {
-            /// 0 to 1. Clamped, not asserted: a progress value is usually
-            /// derived from data the app does not fully control.
+            /// 0 to 1. Clamped, not asserted: a progress value is usually derived from data
+            /// the app does not fully control.
             value: f32,
             width: ?f32 = null,
             height: f32 = 6,
@@ -3723,13 +2988,6 @@ pub fn Ui(comptime M: type) type {
         }
 
         /// A row's key, derived from its control's key and its index.
-        ///
-        /// `roving` collapses N rows into one Tab stop, and the runtime cursor
-        /// holds a KEY rather than an index -- `rovingStep` skips a row with no
-        /// key at all, so an unkeyed row can be passed over but never landed
-        /// on, and the mechanism silently does nothing. Derived here rather
-        /// than declared by the caller so nobody hand-writes twenty keys that
-        /// then have to stay in step with the row list.
         pub fn rovingKey(owner: u64, index: u16) u64 {
             return owner *% 0x100000001b3 +% (@as(u64, index) +% 1);
         }
@@ -3761,25 +3019,7 @@ pub fn Frame(comptime M: type) type {
             self.arena.deinit();
         }
 
-        /// Topmost interactive region under a point, with the geometry that
-        /// claimed it. Same precedence as `hitTest`; capture needs the region,
-        /// not just the message it would produce.
-        /// Next focusable element in DOCUMENT order, for Tab traversal.
-        ///
-        /// The hit list is appended while the tree is walked, so ascending
-        /// index IS document order. `hit()` walks it backwards because the
-        /// topmost region has to win -- traversal must not reuse that order,
-        /// or Tab would start at the last thing painted and run backwards.
-        ///
-        /// Candidates are focusable, active and keyed. Disabled elements are
-        /// SKIPPED rather than focused-and-inert: landing Tab on a dead button
-        /// is a dead end, and every desktop toolkit skips.
-        ///
-        /// A `from` that is no longer in the list -- the normal consequence of
-        /// a rebuild changing what exists -- starts at the first (forward) or
-        /// last (backward) candidate instead of dead-ending. Wrapping is
-        /// deliberate, and a single candidate returns itself so the caller can
-        /// compare and skip the repaint.
+        /// Topmost interactive region under a point, with the geometry that claimed it.
         pub fn focusStep(self: *const Self, from: ?u64, forward: bool) ?u64 {
             var n: usize = 0;
             var at: ?usize = null;
@@ -3826,9 +3066,8 @@ pub fn Frame(comptime M: type) type {
             return null;
         }
 
-        /// The control payload recorded for a keyed region, valid until this
-        /// frame ends. The runtime's own door: an app gets `Hit`, which never
-        /// carries one. Copied out at the start of a gesture, never cached.
+        /// The control payload recorded for a keyed region, valid until this frame ends.
+        /// The runtime's own door: an app gets `Hit`, which never carries one.
         pub fn widgetAt(self: *const Self, key: u64) ?*const Widget(M) {
             for (self.hits) |h| {
                 if (h.key) |k| {
@@ -3838,8 +3077,8 @@ pub fn Frame(comptime M: type) type {
             return null;
         }
 
-        /// The scope a keyed region lives in: the innermost element that
-        /// declared `focus_scope`, or null at the root.
+        /// The scope a keyed region lives in: the innermost element that declared
+        /// `focus_scope`, or null at the root.
         pub fn scopeOf(self: *const Self, key: ?u64) ?u64 {
             const k = key orelse return null;
             for (self.hits) |h| {
@@ -3850,14 +3089,12 @@ pub fn Frame(comptime M: type) type {
             return null;
         }
 
-        /// One row of a roving control, as the runtime needs it: where it is
-        /// in the set, and what to focus or scroll to.
+        /// One row of a roving control, as the runtime needs it: where it is in the set,
+        /// and what to focus or scroll to.
         pub const Roamer = struct { index: u16, key: u64, rect: Rect };
 
-        /// The row `delta` places from `from_index` inside the control `owner`,
-        /// clamped rather than wrapped: running off the end of a list should
-        /// stop, not teleport to the other end. Rows are laid down in document
-        /// order, so their `roving_index` is already ascending.
+        /// The row `delta` places from `from_index` inside the control `owner`, clamped
+        /// rather than wrapped: running off the end of a list should stop.
         pub fn rovingStep(self: *const Self, owner: u64, from_index: u16, delta: i32) ?Roamer {
             var lo: ?Roamer = null;
             var hi: ?Roamer = null;
@@ -3880,13 +3117,8 @@ pub fn Frame(comptime M: type) type {
             return hi orelse lo;
         }
 
-        /// Where an arrow key moves a roving control, given the key that
-        /// currently has focus. Null when the focused element is not a row of
-        /// one -- which is what lets the caller fall through to the app rather
-        /// than swallowing every arrow press in the window.
-        ///
-        /// The caller never needs to know the owner or the row index: it has a
-        /// focused key and a direction, and both live here.
+        /// Where an arrow key moves a roving control, given the key that currently has
+        /// focus.
         pub fn rovingMove(self: *const Self, from_key: ?u64, delta: i32) ?Roamer {
             const k = from_key orelse return null;
             for (self.hits) |h| {
@@ -3903,8 +3135,8 @@ pub fn Frame(comptime M: type) type {
             return null;
         }
 
-        /// The first row (for a downward step) or the last one (for an upward
-        /// step) of the roving control `owner`.
+        /// The first row (for a downward step) or the last one (for an upward step) of the
+        /// roving control `owner`.
         fn rovingEdge(self: *const Self, owner: u64, delta: i32) ?Roamer {
             var first: ?Roamer = null;
             var last: ?Roamer = null;
@@ -3919,12 +3151,8 @@ pub fn Frame(comptime M: type) type {
             return if (delta > 0) first else last;
         }
 
-        /// The open popup that should take the keyboard, preferring one
-        /// anchored on the focused element.
-        ///
-        /// Every popup is closed in the ordinary case, so this must be cheap:
-        /// one pass over the hit list and a tag check. Null is the answer that
-        /// makes the caller fall through to activation and then to the app.
+        /// The open popup that should take the keyboard, preferring one anchored on the
+        /// focused element.
         pub fn openPopup(self: *const Self, prefer_key: ?u64) ?*const Widget(M) {
             var any: ?*const Widget(M) = null;
             for (self.hits) |h| {
@@ -3941,8 +3169,8 @@ pub fn Frame(comptime M: type) type {
             return any;
         }
 
-        /// The highlight of a popup, and the items it highlights. Split out
-        /// because both arms have to agree about which list `active` indexes.
+        /// The highlight of a popup, and the items it highlights. Split out because both
+        /// arms have to agree about which list `active` indexes.
         pub const PopupRows = struct {
             items: []const Choice(M),
             active: *?u16,
@@ -3957,14 +3185,6 @@ pub fn Frame(comptime M: type) type {
         }
 
         /// Activated by the focused control, if it has one.
-        ///
-        /// DERIVED, not declared: a region activates exactly when it can also
-        /// be clicked and named -- a message, `focusable`, and a key. That is
-        /// why a text field needs no special case to refuse Enter: it carries
-        /// no message, so it is not activatable, and the key falls through to
-        /// the app's `on_key`, which is the only code that knows what Enter
-        /// means inside a text value. Adding a field for this would make it
-        /// possible to declare a control that activates yet cannot be clicked.
         pub fn activate(self: *const Self, key: ?u64) ?M {
             const k = key orelse return null;
             for (self.hits) |h| {
@@ -3988,32 +3208,22 @@ pub fn Frame(comptime M: type) type {
     };
 }
 
-/// Pointer capture: one press owns the click from the moment the button goes
-/// down until it comes back up, so the element that was pressed is the one
-/// that receives the message.
-///
-/// The claimed region is copied out of the frame -- `Hit` is three plain
-/// fields, no pointers -- rather than borrowed from it. That matters twice:
-/// a frame's arena is freed on the next repaint, and the claim has to survive
-/// a repaint that reflows the content. The pressed element keeps the click
-/// even if it has moved in the meantime.
+/// Pointer capture: one press owns the click from the moment the button goes down until it
+/// comes back up.
 pub fn Press(comptime M: type) type {
     return struct {
         const Self = @This();
 
         captured: ?Hit(M) = null,
 
-        /// Claims the topmost region under the press, if any. Pressing empty
-        /// space claims nothing, so releasing over a button later does not
-        /// click it.
+        /// Claims the topmost region under the press, if any. Pressing empty space claims
+        /// nothing, so releasing over a button later does not click it.
         pub fn down(self: *Self, f: *const Frame(M), p: [2]f32) void {
             self.captured = f.hit(p);
         }
 
-        /// Releases the claim and yields the message, but only if the pointer
-        /// comes up inside the region that was pressed. The release point on
-        /// its own decides nothing: that is what makes pressing A and
-        /// releasing over B dispatch nothing instead of B.
+        /// Releases the claim and yields the message, but only if the pointer comes up
+        /// inside the region that was pressed.
         pub fn up(self: *Self, p: [2]f32) ?M {
             const h = self.captured orelse return null;
             self.captured = null;
@@ -4021,18 +3231,13 @@ pub fn Press(comptime M: type) type {
             return h.msg;
         }
 
-        /// Drops the claim without producing a message, for the paths that
-        /// never see a release (window lost the pointer, app is quitting).
-        /// `up` clears the claim itself.
+        /// Drops the claim without producing a message, for the paths that never see a
+        /// release (window lost the pointer, app is quitting).
         pub fn cancel(self: *Self) void {
             self.captured = null;
         }
 
-        /// Re-binds a keyed claim to the element carrying the same key in a
-        /// newer frame. A press that is unkeyed keeps its geometry and is
-        /// untouched, so nothing that does not declare keys changes. If the
-        /// keyed element is gone, the claim is dropped: releasing over
-        /// whatever replaced it must not fire its message.
+        /// Re-binds a keyed claim to the element carrying the same key in a newer frame.
         pub fn rebind(self: *Self, hits: []const Hit(M)) void {
             const h = self.captured orelse return;
             if (h.key) |k| {
@@ -4076,23 +3281,11 @@ pub fn Collector(comptime M: type) type {
         const Self = @This();
         gpa: Allocator,
         prims: std.ArrayList(Primitive) = .empty,
-        /// Set when a primitive could not be recorded because the list could
-        /// not grow. A dropped primitive is a hole in the frame -- the picture
-        /// stops matching the tree that asked for it -- so `frame` reports it
-        /// through the same band as a failed allocation, instead of drawing a
-        /// screen that is merely missing something with no complaint.
+        /// Set when a primitive could not be recorded because the list could not grow.
         failed: bool = false,
-        /// Where layout gets its glyph metrics. This is the renderer that will
-        /// draw the frame: if it is anything else, text is measured at one
-        /// width and painted at another.
+        /// Where layout gets its glyph metrics.
         metrics: Renderer,
-        /// The face the next recorded text prim draws in. Sticky, because a
-        /// wrapped label emits several runs that all share one typeface, so the
-        /// index is set once per element rather than passed on every call.
-        ///
-        /// Reset per ELEMENT by `paint`, not per frame: only text elements set
-        /// it, so without that a styled label would leak its font into whatever
-        /// is drawn next.
+        /// The face the next recorded text prim draws in.
         cur_face: u16 = 0,
         cur_weight: u16 = 0,
 
@@ -4135,9 +3328,8 @@ pub fn Collector(comptime M: type) type {
             };
         }
 
-        /// A path has no layout consequence, so the collector records nothing:
-        /// it exists to account for the boxes layout produced, and a filled
-        /// outline produces none. Pixel tests go through the software backend.
+        /// A path has no layout consequence, so the collector records nothing: it exists to
+        /// account for the boxes layout produced.
         fn vtPath(_: *anyopaque, _: f32, _: f32, _: Path, _: Fill, _: Rect) void {}
 
         fn vtQuad(ptr: *anyopaque, rect: Rect, fill: Fill, clip: Rect) void {
@@ -4179,9 +3371,7 @@ pub fn Collector(comptime M: type) type {
                 self.failed = true;
             };
         }
-        /// Sticky for the primitives after it. `Paint` sets this once per
-        /// element before emitting its runs, so the index rides the recorded
-        /// prim rather than being threaded through every text call.
+        /// Sticky for the primitives after it.
         fn vtSetFace(ptr: *anyopaque, face: u16) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             self.cur_face = face;
@@ -4224,9 +3414,8 @@ pub fn Collector(comptime M: type) type {
             return self.metrics.wrapText(bytes, size, max_width, out);
         }
 
-        /// Delegate, do not reimplement: the collector records primitives but
-        /// has no glyphs, and a caret placed from anything but the renderer
-        /// that measures the frame would sit beside the wrong byte.
+        /// Delegate, do not reimplement: the collector records primitives but has no
+        /// glyphs.
         fn vtAdvanceText(ptr: *anyopaque, bytes: []const u8, size: f32, index: usize) f32 {
             const self: *Self = @ptrCast(@alignCast(ptr));
             return self.metrics.advanceText(bytes, size, index);
@@ -4239,9 +3428,7 @@ pub fn Collector(comptime M: type) type {
     };
 }
 
-/// What a trimmed label ends with. Written as bytes rather than a literal so
-/// the source needs no particular encoding, and because a byte count is what
-/// the trimmer reasons about anyway. U+2026 HORIZONTAL ELLIPSIS.
+/// What a trimmed label ends with.
 const ellipsis: []const u8 = "\xe2\x80\xa6";
 
 const Fitted = struct {
@@ -4250,11 +3437,8 @@ const Fitted = struct {
     ellipsis: bool,
 };
 
-/// The longest whole-codepoint prefix of `bytes` that fits `max_w`, keeping room
-/// for the ellipsis whenever anything has to be dropped. Trimming walks back one
-/// codepoint at a time so a multi-byte sequence is never cut in half -- a broken
-/// UTF-8 tail paints a replacement glyph exactly where the ellipsis belongs.
-/// Trailing spaces go first: "word ..." reads as a mistake.
+/// The longest whole-codepoint prefix of `bytes` that fits `max_w`, keeping room for the
+/// ellipsis whenever anything has to be dropped.
 fn fitText(r: Renderer, bytes: []const u8, size: f32, max_w: f32) Fitted {
     const full = r.measureText(bytes, size);
     if (full.width <= max_w) return .{ .bytes = bytes, .width = full.width, .ellipsis = false };
@@ -4270,8 +3454,8 @@ fn fitText(r: Renderer, bytes: []const u8, size: f32, max_w: f32) Fitted {
     return .{ .bytes = bytes[0..0], .width = 0, .ellipsis = true };
 }
 
-/// Start of the codepoint ending at `end`. Continuation bytes are 0b10xxxxxx,
-/// so walking back over them lands on a lead byte.
+/// Start of the codepoint ending at `end`. Continuation bytes are 0b10xxxxxx, so walking
+/// back over them lands on a lead byte.
 fn prevCodepointStart(bytes: []const u8, end: usize) usize {
     if (end == 0) return 0;
     var i = end - 1;
@@ -4280,8 +3464,6 @@ fn prevCodepointStart(bytes: []const u8, end: usize) usize {
 }
 
 /// Rough metrics for tools and tests: 0.58em per glyph, no glyph data needed.
-/// Never mix these with a frame that a real backend will draw — that is the
-/// measure/paint divergence this module now makes impossible.
 pub fn nominalTextMetrics(bytes: []const u8, size: f32) TextMetrics {
     const h = size;
     return .{
@@ -4372,11 +3554,8 @@ fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
 // messages / runtime
 // ---------------------------------------------------------------------------
 
-/// What `update` asks the runtime to do after a message.
-/// A change the app asks the runtime to make to focus. Three-state, like every
-/// "unset means leave it alone" field in the library: `null` in `Action.focus`
-/// keeps whatever focus there was, `.set` names a keyed element, `.clear` gives
-/// focus up.
+/// What `update` asks the runtime to do after a message. A change the app asks the runtime
+/// to make to focus.
 pub const FocusChange = union(enum) {
     set: u64,
     clear,
@@ -4388,43 +3567,13 @@ pub fn Action(comptime M: type) type {
         quit: bool = false,
         /// work to run off the UI thread; its result comes back as a message
         cmd: ?Cmd(M) = null,
-        /// Whether the frame clock keeps ticking. Tri-state on purpose: null
-        /// leaves it as it was, so an unrelated message cannot silently stop a
-        /// running animation, and `update` only has to say `true` while
-        /// something is moving and `false` when it settles.
-        ///
-        /// This is the ONLY route by which time reaches the app. There is no
-        /// clock to read in `view` -- making the tree a function of when it
-        /// happened to be built would be worse than useless -- and `update`
-        /// knows nothing else about the wall clock.
+        /// Whether the frame clock keeps ticking.
         animate: ?bool = null,
-        /// Move focus, or give it up. Focus is RUNTIME state because the
-        /// runtime is what reflects it into paint, and the app is what decides
-        /// it -- so an effect is the only bridge between the two. Same shape as
-        /// `quit`: something the runtime does on the app's behalf, not a
-        /// message the app receives.
-        ///
-        /// This is what makes focus reachable from `runApp` at all. A hook gets
-        /// `*Model` and `update` returns an Action; neither ever sees the
-        /// runtime, so without this field the app could declare a focusable
-        /// element and never focus it.
+        /// Move focus, or give it up.
         focus: ?FocusChange = null,
-        /// Move a viewport's offset. Same reasoning as `focus`: the offset is
-        /// runtime state, so the app can ask for a change but cannot write the
-        /// number in `view` -- the runtime injects it between `view` and
-        /// layout, so an app that set it there would be overwritten every
-        /// frame. This is the channel for "show me the top" and "reveal the
-        /// row I just added"; the wheel and the thumb do not come through here.
+        /// Move a viewport's offset.
         scroll: ?ScrollChange = null,
-        /// Put these bytes on the clipboard. An EFFECT, like `focus` and
-        /// `scroll`, because the app can ask but cannot do it: `view` has no
-        /// platform, and `Cmd` runs off-thread and returns a ?M rather than a
-        /// side effect. There is no `cut` variant -- a cut is a copy plus the
-        /// app deleting from its own Model, which only it can do anyway, and a
-        /// field that changed nothing would be a lie in the type.
-        ///
-        /// The bytes are arena-lived: valid until the frame ends. A caller that
-        /// keeps them past `update` must own them.
+        /// Put these bytes on the clipboard.
         clipboard: ?[]const u8 = null,
 
         pub fn then(c: Cmd(M)) @This() {
@@ -4433,9 +3582,8 @@ pub fn Action(comptime M: type) type {
     };
 }
 
-/// A job that runs on a worker thread and produces at most one message.
-///
-/// `ctx` must outlive the job (the runtime joins its workers on deinit).
+/// A job that runs on a worker thread and produces at most one message. `ctx` must outlive
+/// the job (the runtime joins its workers on deinit).
 pub fn Cmd(comptime M: type) type {
     return struct {
         ctx: *const anyopaque,
@@ -4443,9 +3591,7 @@ pub fn Cmd(comptime M: type) type {
     };
 }
 
-/// Zig 0.16 moved the blocking mutex to `std.Io.Mutex`, which needs an `Io` to
-/// lock. The executor's critical sections are two or three instructions, so a
-/// spinlock avoids threading an `Io` through the runtime for no benefit.
+/// Zig 0.16 moved the blocking mutex to `std.Io.Mutex`, which needs an `Io` to lock.
 const Spin = struct {
     flag: std.atomic.Value(bool) = .init(false),
 
@@ -4459,7 +3605,6 @@ const Spin = struct {
 };
 
 /// Runs `Cmd`s on worker threads and hands their messages back to the runtime.
-/// Messages are queued under a mutex; the UI thread drains them and dispatches.
 pub fn Executor(comptime M: type) type {
     return struct {
         const Self = @This();
@@ -4467,27 +3612,19 @@ pub fn Executor(comptime M: type) type {
         gpa: Allocator,
         mutex: Spin = .{},
         done: std.ArrayList(M) = .empty,
-        /// One entry per command whose worker may still be running. The
-        /// completion flag is per-command, so `reap` can tell which handles are
-        /// joinable WITHOUT waiting for the whole executor to go idle. Waiting
-        /// on `outstanding == 0` bounded the list between bursts but not during
-        /// one: an app that always had a command in flight never reaped at all.
+        /// One entry per command whose worker may still be running.
         handles: std.ArrayList(Handle) = .empty,
         outstanding: usize = 0, // guarded by mutex
         lost: usize = 0, // guarded by mutex
-        /// How many commands may hold a thread at once. A screen that fires a
-        /// command per row would otherwise be a thread per row. There is no
-        /// idle pool because a worker waiting for work needs a BLOCKING wait,
-        /// and 0.16 keeps those on `std.Io`, which this type deliberately has
-        /// none of -- so a worker that finds the queue empty exits instead.
+        /// How many commands may hold a thread at once. A screen that fires a command per
+        /// row would otherwise be a thread per row.
         max_running: usize = 8,
         running: usize = 0, // guarded by mutex
         /// Commands over the cap, waiting for a worker to take one.
         pending: std.ArrayList(Cmd(M)) = .empty, // guarded by mutex
 
-        /// Per-command completion, heap-owned so its address is stable: the
-        /// handle list can reallocate while a worker is still writing to this,
-        /// which is why the flag does not live inside `Handle`.
+        /// Per-command completion, heap-owned so its address is stable: the handle list can
+        /// reallocate while a worker is still writing to this.
         const Job = struct {
             finished: std.atomic.Value(bool) = .init(false),
         };
@@ -4540,8 +3677,8 @@ pub fn Executor(comptime M: type) type {
             };
         }
 
-        /// Give back a slot that never became a thread. It is not in flight, so
-        /// it must not keep `busy()` true, and the app will never hear from it.
+        /// Give back a slot that never became a thread. It is not in flight, so it must not
+        /// keep `busy()` true, and the app will never hear from it.
         fn failStart(self: *Self) void {
             self.mutex.lock();
             self.running -= 1;
@@ -4551,11 +3688,6 @@ pub fn Executor(comptime M: type) type {
         }
 
         /// Queue a completed message. The CALLER holds the mutex.
-        ///
-        /// A result that cannot be queued is the same outcome as a command that
-        /// never started: the app waits for a message that will not arrive, and
-        /// cannot tell that from slow work. It is counted in `lost` for exactly
-        /// that reason rather than dropped.
         fn queueLocked(self: *Self, m: M) void {
             self.done.append(self.gpa, m) catch {
                 self.lost += 1;
@@ -4591,19 +3723,15 @@ pub fn Executor(comptime M: type) type {
             }
         }
 
-        /// Commands that could not be started. A command that never runs is a
-        /// message that never arrives, so the app waits for a result it cannot
-        /// distinguish from slow work -- this count is the only way to see it.
+        /// Commands that could not be started.
         pub fn lostCommands(self: *Self) usize {
             self.mutex.lock();
             defer self.mutex.unlock();
             return self.lost;
         }
 
-        /// Join workers that have finished, so `handles` stays bounded by the
-        /// commands IN FLIGHT rather than growing for the life of the app.
-        /// Per-command flags mean this does not wait for the executor to go
-        /// idle: a burst of fast commands is reaped while a slow one runs on.
+        /// Join workers that have finished, so `handles` stays bounded by the commands IN
+        /// FLIGHT rather than growing for the life of the app.
         pub fn reap(self: *Self) void {
             var i: usize = 0;
             while (i < self.handles.items.len) {
@@ -4618,8 +3746,8 @@ pub fn Executor(comptime M: type) type {
             }
         }
 
-        /// True while workers are still running (cheap hint for the loop: it
-        /// should poll with a short timeout instead of blocking forever).
+        /// True while workers are still running (cheap hint for the loop: it should poll
+        /// with a short timeout instead of blocking forever).
         pub fn busy(self: *Self) bool {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -4669,8 +3797,8 @@ pub fn Executor(comptime M: type) type {
 
 pub const keys = @import("keys.zig");
 
-/// Re-exported so no call site changes: `elmz.Key` is the name everything
-/// already uses, and the definitions simply live in `keys.zig` now.
+/// Re-exported so no call site changes: `elmz.Key` is the name everything already uses, and
+/// the definitions simply live in `keys.zig` now.
 pub const Mods = keys.Mods;
 pub const Named = keys.Named;
 pub const Key = keys.Key;
@@ -4681,16 +3809,7 @@ pub const isBareShortcut = keys.isBareShortcut;
 pub const shortcutFor = keys.shortcutFor;
 pub const checkShortcuts = keys.checkShortcuts;
 
-/// Scroll wheel movement, in the platform's own units.
-///
-/// The deltas are NOT normalised. A notched wheel reports whole steps, a
-/// trackpad reports fractions per event, and the backend has already applied
-/// the user's scroll-speed setting. Dividing by a magic number so the two
-/// "compare" is how a library ends up scrolling at a different speed than
-/// every native app on the same machine.
-///
-/// `x`/`y` are the pointer at the time of the event: scroll has a target even
-/// though it is not a click, and the target is whatever is under the cursor.
+/// Scroll wheel movement, in the platform's own units. The deltas are NOT normalised.
 pub const Wheel = struct {
     dx: f32 = 0,
     dy: f32 = 0,
@@ -4701,84 +3820,53 @@ pub const Wheel = struct {
 pub const Event = union(enum) {
     /// window wants to close; the runner stops.
     quit,
-    /// The window's size changed, so the next frame must be built for a
-    /// different box. Deliberately carries NO payload: the backend has already
-    /// adopted the new size, so `Window.size()` is the answer and a number
-    /// carried here could only be a stale copy of it -- two sizes that disagree
-    /// is exactly the bug that made resizing draw one layout while the pointer
-    /// was tested against another.
+    /// The window's size changed, so the next frame must be built for a different box.
     resize,
     pointer_down: [2]f32,
     pointer_up: [2]f32,
     pointer_move: [2]f32,
-    /// The gesture ended without a release we will ever see: focus taken away,
-    /// or the pointer left the window mid-drag. Without this the press claim
-    /// outlives the gesture and the pressed element stays lit forever.
+    /// The gesture ended without a release we will ever see: focus taken away, or the
+    /// pointer left the window mid-drag.
     pointer_cancel,
     key: Key,
     /// The release matching one `key`. Never repeats.
     key_up: Key,
     /// Text the user actually typed, as UTF-8 bytes.
-    ///
-    /// This is NOT derivable from `Key`, which is why it is its own event: a
-    /// dead key, a compose sequence or an IME commit produces text with no
-    /// single key to blame, and a Ctrl chord produces none at all. Reading
-    /// `Key.code` and calling it a character is how a text field ends up
-    /// wrong on every layout but QWERTY.
-    ///
-    /// The bytes are BORROWED from the backend and are only valid until the
-    /// dispatch that carries them returns. Copy anything kept past `update`.
     text: []const u8,
-    /// Wheel movement. Deliberately its own event rather than a field on
-    /// `pointer_move`: a wheel event that reports no movement is normal, and
-    /// folding it into motion would make every scroll look like the pointer
-    /// jumped.
+    /// Wheel movement.
     wheel: Wheel,
 };
 
-/// Which half of a keystroke an `on_key` hook is being told about. `repeat`
-/// lives on `Key`, not here: a repeat is still a press.
+/// Which half of a keystroke an `on_key` hook is being told about. `repeat` lives on `Key`,
+/// not here: a repeat is still a press.
 pub const Phase = enum { down, up };
 
-/// What the platform has told us about the pointer. Nothing here says who
-/// owns a press: that lives in `Press`, and giving it a second home is how
-/// the two copies start disagreeing.
+/// What the platform has told us about the pointer.
 pub const Pointer = struct {
     /// last known position, if the backend has ever reported one
     pos: ?[2]f32 = null,
 };
 
-/// What paint needs: the position, and the rect that owns the press in
-/// flight. Derived in `Runtime.frame()` from `Runtime.press`, never stored
-/// beside it. A press in flight suppresses hover everywhere, so dragging off
-/// a button leaves that button pressed and does not light up the one under
-/// the cursor.
+/// What paint needs: the position, and the rect that owns the press in flight. Derived in
+/// `Runtime.frame()` from `Runtime.press`, never stored beside it.
 pub const PointerView = struct {
     pos: ?[2]f32 = null,
     /// geometry of the region that owns the press, compared by identity
     held: ?Region = null,
 };
 
-/// What a paint pass knows about hover. Pass one fills `out` with every region
-/// that could show hover feedback; pass two is handed the one region that was
-/// resolved from it, so the innermost element is the only one that lights up.
+/// What a paint pass knows about hover.
 const Hover = struct {
     out: ?*std.ArrayList(Region) = null,
     target: ?Region = null,
-    /// Which key the runtime considers focused. Focus is DERIVED in paint, the
-    /// same way hover is: the runtime says which identity holds focus, and each
-    /// element decides whether that is it. Nothing is written back.
+    /// Which key the runtime considers focused.
     focus: ?u64 = null,
-    /// The frame clock, for anything that blinks. Mirrored into paint for the
-    /// same reason `focus` is: a caret's phase is a property of the ELEMENT
-    /// being drawn, so the element has to be able to ask what time it is.
+    /// The frame clock, for anything that blinks.
     elapsed: f32 = 0,
     since_input: f32 = 0,
 };
 
-/// The platform layer, expressed in elmz terms only. A backend (SDL3, Wayland
-/// shm, X11, a test harness) implements this; nothing above this line knows
-/// which one is in use, and no backend may leak its own types upward.
+/// The platform layer, expressed in elmz terms only.
 pub const Window = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -4786,30 +3874,18 @@ pub const Window = struct {
     pub const VTable = struct {
         /// Next event, blocking up to `timeout_ms` (-1 = forever). null = timeout.
         poll: *const fn (ptr: *anyopaque, timeout_ms: i32) ?Event,
-        /// Hand a finished RGBA frame to the screen. `pixel_size` is the size of
-        /// that buffer in DEVICE pixels -- not the logical window size, which is
-        /// what a texture allocated at logical size would be the wrong size for.
+        /// Hand a finished RGBA frame to the screen.
         present: *const fn (ptr: *anyopaque, pixels: []const u8, pixel_size: Size) void,
         /// Logical window size, in the same units events are reported in.
         size: *const fn (ptr: *anyopaque) Size,
         /// Device pixels per logical unit; 1.0 is unscaled.
-        ///
-        /// This is the only quantity above the renderer that is not logical, and
-        /// it exists for exactly one reason: the canvas has to be allocated in
-        /// device pixels. Nothing else above the renderer should read it.
         density: *const fn (ptr: *anyopaque) f32,
         deinit: *const fn (ptr: *anyopaque) void,
-        /// Clipboard text, for PASTE. Borrowed, valid until the next call, so
-        /// a caller that keeps it must copy it -- the same contract as
-        /// `Event.text`. Optional because a headless backend has no clipboard
-        /// and null is the honest answer.
-        ///
-        /// This cannot arrive as `Event.text`: a Ctrl chord produces no text
-        /// event, and no platform synthesises a paste. So the runtime reads the
-        /// clipboard itself, at the one point it sees the key first.
+        /// Clipboard text, for PASTE. Borrowed, valid until the next call, so a caller that
+        /// keeps it must copy it -- the same contract as `Event.text`.
         clipboard_text: ?*const fn (ptr: *anyopaque) ?[]const u8 = null,
-        /// Put text on the clipboard: the outbound half of the same seam.
-        /// Optional for the same reason.
+        /// Put text on the clipboard: the outbound half of the same seam. Optional for the
+        /// same reason.
         set_clipboard: ?*const fn (ptr: *anyopaque, text: []const u8) void = null,
     };
 
@@ -4855,11 +3931,6 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         gpa: Allocator,
         state: S,
         /// Name -> face index, supplied by whoever owns the font registry.
-        ///
-        /// Injected rather than owned, because the registry lives in the runner
-        /// and importing it here would be a cycle -- and because `Ui` must stay
-        /// free of allocation so a headless test can build a tree with no io at
-        /// all. Null means no fonts: every `font` call yields the primary face.
         face_lookup: ?*const FaceLookup = null,
         updateFn: *const fn (*S, M) Action(M),
         viewFn: *const fn (*S, *UiT) *Elem,
@@ -4867,85 +3938,40 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         exec: ?Executor(M) = null,
         /// last position the platform reported
         pointer: Pointer = .{},
-        /// The press in flight, if any. This is the only owner of "who owns
-        /// the click": the hover suppression and the pressed colour are both
-        /// derived from it when a frame is built, never stored beside it. The
-        /// press belongs to the region it started on, not to wherever the
-        /// pointer happens to be when the button comes back up.
+        /// The press in flight, if any.
         press: Press(M) = .{},
-        /// Which keyed element currently holds focus, or null for none. The app
-        /// DECIDES this (it sets the field from its own Msg handlers); the
-        /// runtime only reflects it into the paint pass. Deliberately a bare
-        /// `?u64` rather than a focus ring with a destination, so the tree stays
-        /// a value and no widget needs a closure to ask "am I focused".
+        /// Which keyed element currently holds focus, or null for none.
         focus: ?u64 = null,
-        /// Seconds since the runtime started, accumulated from the RAW clock
-        /// delta rather than the clamped `dt` given to `on_tick`: the clamp
-        /// exists so a stall cannot teleport an animation, and freezing a blink
-        /// for the same stall would be the worse of the two failures.
+        /// Seconds since the runtime started, accumulated from the RAW clock delta rather
+        /// than the clamped `dt` given to `on_tick`: the clamp exists so a stall.
         elapsed: f32 = 0,
-        /// Seconds since the last key or text event. The runner resets it and
-        /// mirrors it into `Ui`; nothing else writes it.
+        /// Seconds since the last key or text event. The runner resets it and mirrors it
+        /// into `Ui`; nothing else writes it.
         since_input: f32 = 0,
-        /// How long the pointer has rested on the current region, reset when
-        /// it moves to a different one. The tooltip delay and nothing else:
-        /// `elapsed` says how long the app has run, not how long you have been
-        /// looking at that particular thing.
+        /// How long the pointer has rested on the current region, reset when it moves to a
+        /// different one.
         hover_since: f32 = 0,
-        /// Whether a text-input widget holds focus, which is what suppresses
-        /// bare-key shortcuts -- an unmodified `s` must type an `s`, not fire
-        /// a command. Nothing sets it yet: there is no text input. The field
-        /// exists so that widget has somewhere to say so, rather than the rule
-        /// arriving later as a second mechanism.
+        /// Whether a text-input widget holds focus, which is what suppresses bare-key
+        /// shortcuts -- an unmodified `s` must type an `s`, not fire a command.
         text_editing: bool = false,
-        /// The window, when there is one. Held ONLY for outbound effects the
-        /// runtime applies on the app's behalf -- today that is the clipboard
-        /// -- because `dispatch` is the single funnel for those and it has no
-        /// other route to the platform. Null in tests, which is what keeps a
-        /// clipboard write headlessly observable.
+        /// The window, when there is one.
         window: ?Window = null,
         /// Optional keystroke hooks, wired by `runApp` from the app declaration.
-        ///
-        /// The app owns FOCUS -- which element a keystroke belongs to -- because
-        /// focus is widget state, and widget state lives in the Model until it
-        /// hurts. The runtime has no focus ring to consult, so it cannot pick a
-        /// destination, and inventing one would mean putting a closure on
-        /// `Element`, which the tree deliberately does not carry: a button
-        /// carries a Msg so the whole tree stays a value.
-        ///
-        /// Returning null means "not mine": no message and NO repaint. That is
-        /// what keeps a keystroke nobody wants from forcing a frame.
         on_key: ?*const fn (*S, Key, Phase) ?M = null,
-        /// Same contract for typed text; see `Event.text` for why it is not
-        /// derivable from keys and why the slice is borrowed.
+        /// Same contract for typed text; see `Event.text` for why it is not derivable from
+        /// keys and why the slice is borrowed.
         on_text: ?*const fn (*S, []const u8) ?M = null,
-        /// Scroll wheel, delivered raw and unclassified. Which container the
-        /// deltas apply to is the APP's business until there is a scroll
-        /// container: the offset has to live in the Model, because `view` must
-        /// read it to clip and translate, and the runtime cannot hold state
-        /// `view` needs privately the way it does with hover.
+        /// Scroll wheel, delivered raw and unclassified.
         on_wheel: ?*const fn (*S, Wheel) ?M = null,
-        /// A press that landed on NO region at all: no control, no thumb, no
-        /// viewport. It is the one press nothing can claim, so without this a
-        /// popup has no way to hear the click that should dismiss it. The
-        /// position is handed over because it is already in hand.
-        ///
-        /// It is deliberately NOT "the user clicked outside my panel": a click
-        /// on another control claims that control and never reaches here. For
-        /// that case an overlay with a full-size child is the mechanism -- it
-        /// claims everything, and its children paint (and hit) above it.
+        /// A press that landed on NO region at all: no control, no thumb, no viewport.
         on_outside: ?*const fn (*S, [2]f32) ?M = null,
-        /// Frame clock: seconds since the previous tick, called at the top of
-        /// every loop iteration while the app is animating. Clamped by the
-        /// runner so a window that sat idle for a minute does not arrive as
-        /// one enormous step.
+        /// Frame clock: seconds since the previous tick, called at the top of every loop
+        /// iteration while the app is animating.
         on_tick: ?*const fn (*S, f32) ?M = null,
-        /// True while the app wants frames without input. Lives here because
-        /// the loop consults it BEFORE it decides how long to block in poll.
+        /// True while the app wants frames without input. Lives here because the loop
+        /// consults it BEFORE it decides how long to block in poll.
         animate: bool = false,
-        /// Offsets for keyed scroll viewports. Fixed capacity, drop-oldest:
-        /// an allocator for this would be state that can fail mid-frame, and a
-        /// viewport that left the tree is not worth remembering anyway.
+        /// Offsets for keyed scroll viewports.
         scroll_slots: [64]ScrollSlot = @splat(.{}),
         scroll_n: usize = 0,
 
@@ -4994,8 +4020,8 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             return action;
         }
 
-        /// Messages produced by commands since the last call. Dispatch them
-        /// from the UI thread; they are ordinary messages.
+        /// Messages produced by commands since the last call. Dispatch them from the UI
+        /// thread; they are ordinary messages.
         pub fn takeAsync(self: *Self, list: *std.ArrayList(M)) !void {
             if (self.exec) |*e| {
                 try e.drainInto(list);
@@ -5013,10 +4039,6 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         }
 
         /// view -> measure -> paint. Returns primitives plus hit regions.
-        ///
-        /// Offset from the runtime's own store, which exists whether or not a
-        /// frame is being built. `scrollAt` answers the same question from the
-        /// copy the current frame handed to `view`.
         fn scrollAtKey(self: *const Self, key: ?u64) f32 {
             const k = key orelse return 0;
             for (self.scroll_slots[0..self.scroll_n]) |s| {
@@ -5053,10 +4075,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             self.scroll_slots[self.scroll_n - 1].offset_x = off;
         }
 
-        /// Set a viewport's offset outright. The wheel clamps before calling
-        /// this, because the content extent is only known to the frame it just
-        /// came from; paint clamps again on read, which is what makes a stored
-        /// value that is one frame stale harmless.
+        /// Set a viewport's offset outright.
         pub fn scrollTo(self: *Self, key: u64, off: f32) void {
             for (self.scroll_slots[0..self.scroll_n]) |*s| {
                 if (s.key == key) {
@@ -5076,9 +4095,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             self.scroll_n += 1;
         }
 
-        /// Move a viewport. Clamping to the content extent happens at paint,
-        /// where the content height is known, so an offset past the end here
-        /// is the store being one frame ahead -- not a bug to fix twice.
+        /// Move a viewport.
         pub fn scrollBy(self: *Self, key: u64, dy: f32) void {
             for (self.scroll_slots[0..self.scroll_n]) |*s| {
                 if (s.key == key) {
@@ -5098,9 +4115,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
             self.scroll_n += 1;
         }
 
-        /// Push the store into the tree. The offset is runtime state, so it
-        /// cannot be written in `view` -- an app that set it there would be
-        /// overwritten every frame. Same shape as `disabled` inheritance.
+        /// Push the store into the tree.
         fn injectScrollOffsets(self: *Self, e: *Elem, path: u64) void {
             // EVERY container is a candidate viewport now: whether it overflows
             // is decided by the box its parent paints it into, which is only
@@ -5136,12 +4151,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         }
 
         /// `metrics` is the renderer that will draw this frame, normally
-        /// `canvas.renderer()`. It is not optional on purpose: layout and
-        /// rasterisation must agree on glyph widths, and the only way to
-        /// guarantee that is to measure with the thing that paints.
-        ///
-        /// The returned frame owns its data (including text bytes) and stays
-        /// valid until `deinit()`, even across later `frame()` calls.
+        /// `canvas.renderer()`.
         pub fn frame(self: *Self, size: Size, metrics: Renderer) !FrameT {
             self.ui.reset();
             // `failed` describes THIS build, so it cannot outlive a reset: an
@@ -5719,15 +4729,8 @@ test "a press survives a repaint that reflows the frame" {
 
 const BandM = enum { noop };
 
-/// Fails exactly ONE allocation, then behaves normally.
-///
-/// std.testing.FailingAllocator is permanent: once it trips, every later
-/// allocation fails too. That makes the error band impossible to observe --
-/// with the allocator dead, the collector cannot record the very prims the
-/// band is made of, so `failed` can be true in a frame that renders nothing.
-/// Real out-of-memory is rarely total; a single oversized request failing
-/// while the rest succeed is exactly the case the band exists for, and this
-/// reproduces it.
+/// Fails exactly ONE allocation, then behaves normally. std.testing.FailingAllocator is
+/// permanent: once it trips, every later allocation fails too.
 const OneShot = struct {
     child: Allocator,
     fail_at: usize,
@@ -6409,8 +5412,8 @@ fn focusUpdate(m: *FocusState, msg: FocusMsg) Action(FocusMsg) {
     return .{};
 }
 
-/// One button, optionally keyed. `focusable` without a key is the case that
-/// matters: focus names an identity, so an anonymous element cannot hold it.
+/// One button, optionally keyed. `focusable` without a key is the case that matters: focus
+/// names an identity, so an anonymous element cannot hold it.
 fn focusView(m: *FocusState, ui: *Ui(FocusMsg)) *Element(FocusMsg) {
     _ = m;
     const b = ui.button(.{ .label = "ok", .msg = .nop });
@@ -6584,10 +5587,7 @@ test "activation is derived from the message, so a value control falls through" 
     try std.testing.expect(f.activate(9999) == null);
 }
 
-/// How many prims are filled with exactly `c`. A colour reaching paint is the
-/// only proof a mapping is not crossed: a builder can name the right role and
-/// still hand back the neighbouring one, and a severity that paints in the
-/// warning colour is a defect no payload assertion would notice.
+/// How many prims are filled with exactly `c`.
 fn countSolidPrims(prims: anytype, c: Color) usize {
     var n: usize = 0;
     for (prims) |p| switch (p) {
@@ -6734,8 +5734,8 @@ fn vpUpdate(_: *VPState, _: VPMsg) Action(VPMsg) {
     return .{};
 }
 
-/// Ten 20px rows in a 100px viewport: 200 of content, 100 of view, so the
-/// maximum offset is exactly 100 and every row is 20 below the one before it.
+/// Ten 20px rows in a 100px viewport: 200 of content, 100 of view, so the maximum offset is
+/// exactly 100 and every row is 20 below the one before it.
 fn vpView(_: *VPState, ui: *Ui(VPMsg)) *Element(VPMsg) {
     var kids: [10]*Element(VPMsg) = undefined;
     for (&kids, 0..) |*k, i| {
@@ -6747,15 +5747,14 @@ fn vpView(_: *VPState, ui: *Ui(VPMsg)) *Element(VPMsg) {
     return ui.column(.{ .children = &.{col} });
 }
 
-/// The viewport's scroll identity: the column the view builds sits at child 0
-/// of the root, so its identity is one step down the root path. NOTHING in the
-/// app supplies this -- that is the whole point of implicit scrolling.
+/// The viewport's scroll identity: the column the view builds sits at child 0 of the root,
+/// so its identity is one step down the root path.
 fn vpKey() u64 {
     return pathChild(scroll_path_root, 0);
 }
 
-/// The stack-wrapped view adds one level: stack -> column -> column.
-/// Identity is a tree path, so deeper nesting means a deeper key.
+/// The stack-wrapped view adds one level: stack -> column -> column. Identity is a tree
+/// path, so deeper nesting means a deeper key.
 fn vpKeyInStack() u64 {
     return pathChild(pathChild(scroll_path_root, 0), 0);
 }
@@ -6809,13 +5808,8 @@ test "a viewport records its content height and translates its content" {
     }
 }
 
-/// The same viewport, nested inside a stack.
-///
-/// A container geometry added after the scroll work has to be walked by
-/// `injectScrollOffsets` too. The switch ends in an else-branch, so a geometry
-/// nobody listed is not an error -- it is a subtree that silently never
-/// receives its offset, and a viewport that renders with a thumb that is
-/// there, correctly sized, and inert.
+/// The same viewport, nested inside a stack. A container geometry added after the scroll
+/// work has to be walked by `injectScrollOffsets` too.
 fn vpStackView(s: *VPState, ui: *Ui(VPMsg)) *Element(VPMsg) {
     const page = vpView(s, ui);
     return ui.stack(.{ .children = &.{page} });
@@ -6883,8 +5877,8 @@ fn tabUpdate(m: *TabState, msg: TabMsg) Action(TabMsg) {
     return .{};
 }
 
-/// Document order 1, 2, 3, with 2 optionally disabled, bracketed by one
-/// focusable element that has no key and one that is not focusable at all.
+/// Document order 1, 2, 3, with 2 optionally disabled, bracketed by one focusable element
+/// that has no key and one that is not focusable at all.
 fn tabView(s: *TabState, ui: *Ui(TabMsg)) *Element(TabMsg) {
     if (s.no_focus) {
         const plain = ui.button(.{ .label = "plain", .msg = .a, .key = 9 });
@@ -7072,8 +6066,8 @@ test "a stack costs no flow space, so a popup can hang outside its trigger" {
     try std.testing.expect(neg.w >= 0 and neg.h >= 0);
 }
 
-/// The y of the first text prim carrying exactly `bytes`. Text has no rect of
-/// its own, so a baseline test has to read the glyph origin itself.
+/// The y of the first text prim carrying exactly `bytes`. Text has no rect of its own, so a
+/// baseline test has to read the glyph origin itself.
 fn textYOf(f: anytype, bytes: []const u8) f32 {
     for (f.prims) |p| switch (p) {
         .text => |t| if (std.mem.eql(u8, t.bytes, bytes)) return t.y,
@@ -7659,9 +6653,8 @@ var dis_opts = [_]Choice(DisMsg){
     .{ .label = "b", .msg = .toggled },
 };
 
-/// A disabled slider and a disabled select: both must stay inert, which for a
-/// widget means "cannot be dragged and cannot be opened" -- not merely "has no
-/// message", since a slider dispatches on a DRAG and a select on the popup.
+/// A disabled slider and a disabled select: both must stay inert, which for a widget means
+/// "cannot be dragged and cannot be opened".
 fn disView(s: *DisState, ui: *Ui(DisMsg)) *Element(DisMsg) {
     const track = ui.rect(.{ .width = 100, .height = 20 });
     track.key = 70;
@@ -7723,8 +6716,8 @@ test "a disabled widget is inert, not merely quiet" {
 const RoveMsg = enum { pick };
 const RoveState = struct {};
 
-/// A roving control (key 30) with three rows (40, 41, 42), then a control that
-/// follows it (50).
+/// A roving control (key 30) with three rows (40, 41, 42), then a control that follows it
+/// (50).
 fn roveView(_: *RoveState, ui: *Ui(RoveMsg)) *Element(RoveMsg) {
     const owner = ui.button(.{ .label = "list", .msg = .pick, .key = 30 });
     owner.focusable = true;

@@ -1,10 +1,4 @@
 //! The composition layer.
-//!
-//! It owns the loop — poll an event, hit-test it against the frame that is on
-//! screen, dispatch the message, repaint if the runtime asks — and it knows
-//! exactly three things: an `elmz.Runtime`, a `software.Canvas`, and an
-//! `elmz.Window`. No platform types appear here, so swapping SDL3 for a
-//! Wayland `wl_shm` backend (or a test harness) changes nothing above it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,13 +6,11 @@ const elmz = @import("elmz");
 const theme_mod = elmz.theme;
 const software = @import("software");
 
-/// Whether the overlay is compiled in by default. Debug builds get it, release
-/// builds do not: `zig build -Doptimize=ReleaseFast` is the difference between
-/// measuring and shipping, and this is the one thing that should follow it.
+/// Whether the overlay is compiled in by default.
 pub const default_overlay = builtin.mode == .Debug;
 
-/// What the overlay has to say. Flat on purpose -- this is the diagnostic
-/// struct, not a model, and it is written and read in one place.
+/// What the overlay has to say. Flat on purpose -- this is the diagnostic struct, not a
+/// model, and it is written and read in one place.
 pub const OverlayStats = struct {
     frame_ns: u64 = 0,
     build_ns: u64 = 0,
@@ -29,11 +21,6 @@ pub const OverlayStats = struct {
 };
 
 /// Rolling window of PAINTED frame durations.
-///
-/// Per repaint, not per loop pass: an idle window is not drawing 1000 frames a
-/// second, and averaging the idle poll in would report a rate nobody sees. The
-/// number this produces is "how long a frame takes when one is drawn", which
-/// is the number that decides whether the app feels smooth.
 pub const FrameRing = struct {
     pub const capacity = 60;
     ns: [capacity]u64 = @splat(0),
@@ -63,16 +50,6 @@ pub const FrameRing = struct {
 };
 
 /// Four lines wedged into the top-left corner, on nothing at all.
-///
-/// No panel and no backing: the text is composited straight over whatever the
-/// app painted, so the readout cannot hide the pixels it is there to explain.
-/// That makes legibility a function of the frame underneath -- which is why it
-/// is drawn in the light theme text colour with the emphasised first line, and
-/// why the corner it sits in is the one least likely to hold a control.
-///
-/// Drawn with the renderer's own primitives rather than through a Ui tree: it
-/// runs after the frame is painted and must not be able to perturb layout,
-/// raise a failure band, or add hit regions a click could land on.
 pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
     const pad: f32 = 3;
     const line_h: f32 = 13;
@@ -103,93 +80,39 @@ pub fn drawOverlay(canvas: *software.Canvas, s: OverlayStats) void {
 
 pub const Options = struct {
     /// The user's home directory, for the font search's `~` entries.
-    ///
-    /// Resolved from `$HOME` off `process.Init.environ_map` in `runApp`, so an
-    /// app that says nothing still gets user fonts. That is the library's job:
-    /// the font chain needs a home directory, and making every app set a field
-    /// to switch on a baseline feature is how a feature goes missing silently.
-    ///
-    /// Leave `null` to inherit. Set it to override (a test harness pinning the
-    /// search to a fixture tree), or to `""` for "no user fonts" -- a headless
-    /// run must not start depending on whatever the machine has installed.
     home: ?[]const u8 = null,
-    /// Serves `Ui.font(name)`. Built from this runner's own font registry, so
-    /// an app that writes `.font = "Noto Sans Thai"` gets the face without a
-    /// second configuration surface and without ever naming an index.
-    ///
-    /// Null when no allocator or io was supplied: resolution LOADS the file,
-    /// and a headless run with no io has nothing to load from. Every `font`
-    /// call then yields the primary face.
+    /// Serves `Ui.font(name)`.
     face_lookup: ?*const elmz.FaceLookup = null,
     /// Stop after this many events. null = run until the window says quit.
     max_events: ?u32 = null,
     /// Block this long in poll() before looping again. -1 = block forever.
     poll_timeout_ms: i32 = -1,
     /// Upper bound on one poll while a theme file is being watched.
-    ///
-    /// The stat happens at the top of the loop, so an unbounded wait means an
-    /// edit is only noticed when the pointer enters the window -- the theme
-    /// looks inert until you touch it. Watching therefore costs a wakeup four
-    /// times a second, which is cheaper than dragging a filesystem watcher
-    /// into the composition layer.
     theme_poll_ms: i32 = 250,
-    /// Monotonic NANOSECONDS for the frame clock, injected. A headless run has
-    /// no io and a windowed one has no reason to be reproducible, but an
-    /// animation whose dt cannot be chosen cannot be tested at all -- so the
-    /// source is a parameter, not a global.
+    /// Monotonic NANOSECONDS for the frame clock, injected.
     now_ns: ?*const fn () u64 = null,
-    /// Longest one poll may block while the app is animating. The loop
-    /// measures real elapsed time, so this bounds how stale a frame can get;
-    /// it is not a frame rate.
+    /// Longest one poll may block while the app is animating.
     anim_poll_ms: i32 = 8,
 
-    /// How long the loop may block while a toast is on screen. Same trap as the
-    /// animation clock and the theme watcher: `poll_timeout_ms` defaults to -1,
-    /// so without this a toast would sit there until the pointer moved.
+    /// How long the loop may block while a toast is on screen.
     toast_poll_ms: i32 = 100,
-    /// How often to wake while a text field holds focus. Enough for a caret to
-    /// blink evenly; not enough to be a spin, since each wake repaints.
+    /// How often to wake while a text field holds focus. Enough for a caret to blink
+    /// evenly; not enough to be a spin, since each wake repaints.
     caret_poll_ms: i32 = 32,
-    /// Draw the frame readout over the painted frame. OFF by default here and
-    /// turned on by `runApp` when the binary is built in Debug, because the
-    /// overlay costs a timestamp pair per repaint and a text render -- fine
-    /// while measuring, not something a shipped build should pay for.
-    ///
-    /// It needs `io` for the clock, so it silently does nothing without one.
+    /// Draw the frame readout over the painted frame.
     overlay: bool = false,
-    /// Ambient io handle: mtime-polling a theme file, and (later) a frame
-    /// clock for animation. null means no io was supplied -- headless carving
-    /// and tests stay filesystem-free, which is a property worth keeping.
-    ///
-    /// Read by `ThemeWatch`. null means a theme file cannot be loaded at all,
-    /// which is why an app that sets `theme_path` must supply both this and
-    /// `gpa`.
+    /// Ambient io handle: mtime-polling a theme file, and (later) a frame clock for
+    /// animation.
     io: ?std.Io = null,
-    /// Path to a theme file, relative to the *executable's directory* (an
-    /// absolute path is taken as given). Loaded before the first frame and
-    /// re-read when it changes on disk. See `themePathBesideExe`.
-    ///
-    /// `theme.defaults.zon` is watched too, whether or not this is set: it sits
-    /// underneath the override, so an edit to it has to re-apply the override.
+    /// Path to a theme file, relative to the *executable's directory* (an absolute path is
+    /// taken as given).
     theme_path: ?[]const u8 = null,
     /// Allocator for re-reading the theme file. Only needed with `theme_path`.
     gpa: ?std.mem.Allocator = null,
 };
 
-/// The theme chain, as the loop sees it: `theme.zon` (end user) over
-/// `theme.defaults.zon` (developer) over the palette compiled into the library.
-///
-/// Hot reload is a stat per loop iteration, not an inotify watch: the loop
-/// already blocks in poll, iterations are not hot, and a watcher would drag a
-/// platform dependency into the composition layer.
-///
-/// The app never learns that a theme changed. It is not app state -- the next
-/// frame is simply built out of different colours, which is why this can live
-/// in the runner instead of in anyone's Model.
-/// Watches the theme files, and resolves them through the same call startup
-/// uses. Generic over the app tier for the same reason `ChainOf` is: a reload
-/// that guessed `struct {}` would reject a file whose `.vars` section the app
-/// legitimately declared, and it would only do so *after* the first edit.
+/// The theme chain, as the loop sees it: `theme.zon` (end user) over `theme.defaults.zon`
+/// (developer) over the palette compiled into the library.
 pub fn ThemeWatchOf(comptime App: type) type {
     return struct {
         const Self = @This();
@@ -206,16 +129,11 @@ pub fn ThemeWatchOf(comptime App: type) type {
         user_seen: bool = false,
         font_buf: [elmz.font_name_max]u8 = undefined,
         font_len: usize = 0,
-        /// Named styles from the files, OWNED: they hold strings and cannot
-        /// ride in a fixed buffer the way the font name does. Free with
-        /// `deinit`. Empty is the common case and means the files named none.
-        ///
-        /// Carried by the chain because a style is part of the palette's
-        /// meaning, not app data: a view asks for `style("body")` and gets
-        /// whatever the theme said that means, on every reload.
+        /// Named styles from the files, OWNED: they hold strings and cannot ride in a fixed
+        /// buffer the way the font name does. Free with `deinit`.
         styles: []elmz.StyleEntry = &.{},
-        /// The loader's own table, which owns the strings `styles` points at.
-        /// Kept beside it rather than duplicated: `styles` is a VIEW of this.
+        /// The loader's own table, which owns the strings `styles` points at. Kept beside
+        /// it rather than duplicated: `styles` is a VIEW of this.
         owned_styles: theme_mod.StylesSpec = &.{},
 
         pub const Stamp = struct { mtime: i128 = 0, size: u64 = 0 };
@@ -234,12 +152,6 @@ pub fn ThemeWatchOf(comptime App: type) type {
         }
 
         /// Whether a stat result earns a reload.
-        ///
-        /// A file that disappears is left alone on purpose: editors save by
-        /// unlinking and renaming, so a transient absence is ordinary, and dropping
-        /// the palette mid-save would flash the fallback colours at exactly the
-        /// moment someone is watching them. Only a file that is there and different
-        /// earns a reload.
         fn shouldReload(seen: bool, prev: ?Stamp, now: ?Stamp) bool {
             const n = now orelse return false;
             if (!seen) return true;
@@ -253,17 +165,8 @@ pub fn ThemeWatchOf(comptime App: type) type {
             return .{ .mtime = st.mtime.toNanoseconds(), .size = st.size };
         }
 
-        /// Re-resolve the whole chain if either file changed. `ui` is `*Ui(Msg)`;
-        /// generic because the composition layer must not know the app's message
-        /// type.
-        ///
-        /// Both files are re-read, not just the one that moved: an override is
-        /// resolved *against* the base, so a base edit has to re-apply the override
-        /// -- otherwise it stays resolved against a palette that no longer exists.
-        ///
-        /// A broken edit keeps the last good palette and puts the diagnostic in the
-        /// error band. Blanking the window you are trying to fix a colour in would
-        /// be the worst possible response to a typo.
+        /// Re-resolve the whole chain if either file changed. `ui` is `*Ui(Msg)`; generic
+        /// because the composition layer must not know the app's message type.
         pub fn poll(self: *Self, ui: anytype, io: std.Io, gpa: std.mem.Allocator) void {
             const base_now = stampOf(io, self.base_path);
             const user_now = stampOf(io, self.user_path);
@@ -300,26 +203,20 @@ pub fn ThemeWatchOf(comptime App: type) type {
 pub const ThemeWatch = ThemeWatchOf(struct {});
 
 /// A fully resolved chain: every file read, every overlay applied.
-///
-/// Generic over the app tier's type because `.vars` is parsed strictly, and a
-/// strict parse needs to know what it is parsing against. An app that declares
-/// tokens gets `ChainOf(Tokens)`; one that does not uses the alias below and
-/// its files may not contain an `.vars` section.
 pub fn ChainOf(comptime App: type) type {
     return struct {
         theme: elmz.Theme,
         /// Gradient overrides that came with that palette.
         gradients: elmz.Gradients = .{},
-        /// The app tier, if the app declared one. Otherwise `.{}` -- and a file
-        /// that writes `.vars` keys is rejected rather than waved through.
+        /// The app tier, if the app declared one. Otherwise `.{}` -- and a file that writes
+        /// `.vars` keys is rejected rather than waved through.
         app: App = .{},
-        /// The typeface the chain names, COPIED: the files were read into
-        /// buffers that die before this is returned. Empty means no file named
-        /// one, which is not a fault -- it means keep whatever is attached.
+        /// The typeface the chain names, COPIED: the files were read into buffers that die
+        /// before this is returned.
         font_buf: [elmz.font_name_max]u8 = undefined,
         font_len: usize = 0,
-        /// Named styles, as a view sees them. A VIEW of `owned_styles`, which
-        /// holds the strings these point at.
+        /// Named styles, as a view sees them. A VIEW of `owned_styles`, which holds the
+        /// strings these point at.
         styles: []elmz.StyleEntry = &.{},
         /// The loader's own table: owns every string `styles` points at.
         owned_styles: theme_mod.StylesSpec = &.{},
@@ -366,8 +263,8 @@ pub fn ChainOf(comptime App: type) type {
     };
 }
 
-/// Read `path` as sentinel-terminated text. ZON parsing wants the sentinel; a
-/// file read does not hand one back.
+/// Read `path` as sentinel-terminated text. ZON parsing wants the sentinel; a file read
+/// does not hand one back.
 fn readZ(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
     const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024));
     defer gpa.free(src);
@@ -375,14 +272,6 @@ fn readZ(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
 }
 
 /// Resolve `theme.zon` over `theme.defaults.zon` over `floor`.
-///
-/// The single place a palette is decided: startup and hot reload both call this,
-/// so the two cannot drift apart.
-///
-/// This is what makes "theming happens in `.zon`" true rather than aspirational.
-/// An app author changes the house palette by editing a file next to the binary;
-/// nobody has to open a `.zig`. The compiled `floor` stays underneath, so a
-/// deleted or unparseable defaults file costs a diagnostic, not the whole look.
 pub fn resolveChain(
     comptime App: type,
     gpa: std.mem.Allocator,
@@ -482,15 +371,8 @@ pub fn resolveChain(
     return out;
 }
 
-/// Resolve an app's `theme_path` against the directory the executable lives in.
-///
-/// That is where the theme file ships, so that is where it is read from. A cwd
-/// relative path would make the app's appearance depend on where it was
-/// launched from -- double-clicked from a file manager and run from a terminal
-/// would disagree -- and the failure is silent: no file, no theme, no error.
-///
-/// Returns an owned, sentinel-terminated path, or null if the executable's own
-/// location could not be determined.
+/// Resolve an app's `theme_path` against the directory the executable lives in. That is
+/// where the theme file ships, so that is where it is read from.
 pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8) ?[:0]u8 {
     if (std.fs.path.isAbsolute(given)) return gpa.dupeZ(u8, given) catch null;
     const exe = std.process.executablePathAlloc(io, gpa) catch return null;
@@ -500,10 +382,6 @@ pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8)
 }
 
 /// How long the loop may block in poll before it gets to re-stat the theme.
-///
-/// Never unbounded while a file is being watched, and a command in flight keeps
-/// its 5ms budget -- blocking for a theme would starve the async result, which
-/// is the same bug in a different costume.
 fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, toasting: bool, editing: bool) i32 {
     if (busy) return 5;
     // An animation produces frames with no input at all, so blocking here is
@@ -522,18 +400,14 @@ fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, 
     return @min(opts.poll_timeout_ms, opts.theme_poll_ms);
 }
 
-/// A logical size as a pixel count. Ceiling rather than truncation, because a
-/// fractional box that rounds DOWN loses its last partial pixel column, and the
-/// backend rounds the same value for its texture -- if the two disagree by one
-/// the frame is resampled by a hair, which is exactly the kind of softness that
-/// gets blamed on HiDPI.
+/// A logical size as a pixel count.
 fn pixelDim(v: f32) u32 {
     if (!(v >= 1)) return 0;
     return @intFromFloat(@ceil(v));
 }
 
-/// Monotonic nanoseconds: the injected source when there is one, else the io
-/// clock, else zero (no io, no clock, no dt -- and no animation without io).
+/// Monotonic nanoseconds: the injected source when there is one, else the io clock, else
+/// zero (no io, no clock, no dt -- and no animation without io).
 fn clockNs(opts: Options, io: ?std.Io) u64 {
     if (opts.now_ns) |f| return f();
     if (io) |i| {
@@ -550,11 +424,6 @@ pub const Stats = struct {
 };
 
 /// The face the chain asked for, and the bytes it was made from.
-///
-/// Bytes have an owner and the owner is here: a swapped face free's the previous
-/// buffer rather than leaking it, and the whole slot frees on the way out. The
-/// applied NAME is kept beside them so the loop can tell "same font, new frame"
-/// from "the file changed its mind".
 pub const FontSlot = struct {
     bytes: ?[]u8 = null,
     applied: [elmz.font_name_max]u8 = undefined,
@@ -572,24 +441,6 @@ pub const FontSlot = struct {
 };
 
 /// The typefaces a chain named, loaded once and addressed by index.
-///
-/// A theme file names a font BY NAME -- `"DejaVu Sans"`, never a path -- so
-/// something has to turn that string into bytes the canvas can draw with. This
-/// does that, and it is deliberately the only place that does: a second lookup
-/// path is how one of them drifts from the other.
-///
-/// INDEX 0 IS THE PRIMARY and is never stored here. It stays the canvas's own
-/// `font`, attached through `applyChainFont`, because that face is what layout
-/// measured against and repointing it mid-run would relayout everything. What
-/// lives here is every OTHER face a style named.
-///
-/// The bytes are OWNED. A `Face` borrows them for as long as it draws, so the
-/// owner cannot be the theme file -- that buffer is freed the moment the parse
-/// finishes. They live as long as the registry, which lives as long as the
-/// window.
-/// Adapts `FontRegistry` to `elmz.FaceLookup`, which cannot name the registry
-/// without a cycle. Returns the index as `u16` because that is what
-/// `Style.face` holds; the registry caps at `max_faces`, well under 65535.
 fn registryResolve(ptr: *const anyopaque, name: []const u8) ?u16 {
     const reg: *FontRegistry = @ptrCast(@alignCast(@constCast(ptr)));
     const i = reg.indexOf(name) orelse return null;
@@ -603,13 +454,11 @@ pub const FontRegistry = struct {
     entries: std.ArrayListUnmanaged(Entry) = .empty,
 
     pub const Entry = struct {
-        /// The name as the theme wrote it, duplicated: the theme's own string
-        /// dies with the parse, and this outlives it.
+        /// The name as the theme wrote it, duplicated: the theme's own string dies with the
+        /// parse, and this outlives it.
         name: []u8,
         bytes: []u8,
-        /// Which face INSIDE `bytes`. A `.ttc` holds several -- Noto Sans CJK
-        /// carries JP, KR and SC in one file -- so dropping this would resolve
-        /// "Simplified Chinese" to face 0, which is Japanese.
+        /// Which face INSIDE `bytes`.
         face_index: u32 = 0,
     };
 
@@ -627,15 +476,8 @@ pub const FontRegistry = struct {
         self.entries.deinit(self.gpa);
     }
 
-    /// The index for `name`, loading it if this is the first time.
-    ///
-    /// `null` means the name could not be produced: absent, unreadable, or past
-    /// `max_faces`. The caller bands it and keeps the face already attached,
-    /// the same rule `applyChainFont` follows -- a font that cannot be found
-    /// must never quietly become a different font.
-    ///
-    /// Idempotent by NAME, not by index: asking twice for "Inter" costs one
-    /// lookup ever, which is what makes a per-frame call free.
+    /// The index for `name`, loading it if this is the first time. `null` means the name
+    /// could not be produced: absent, unreadable, or past `max_faces`.
     pub fn indexOf(self: *FontRegistry, name: []const u8) ?usize {
         if (name.len == 0) return null;
         for (self.entries.items, 0..) |e, i| {
@@ -660,9 +502,8 @@ pub const FontRegistry = struct {
         return self.entries.items.len;
     }
 
-    /// The index for `name` WITHOUT loading it, for a resolve that must not
-    /// touch the filesystem. Used where the answer is only compared, never
-    /// drawn with.
+    /// The index for `name` WITHOUT loading it, for a resolve that must not touch the
+    /// filesystem. Used where the answer is only compared, never drawn with.
     pub fn find(self: *const FontRegistry, name: []const u8) ?usize {
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, e.name, name)) return i + 1;
@@ -670,9 +511,8 @@ pub const FontRegistry = struct {
         return null;
     }
 
-    /// Register every loaded face with the canvas, so a primitive naming one
-    /// can draw with it. Cheap and idempotent: `setFontIndex` returns early
-    /// once an index is occupied.
+    /// Register every loaded face with the canvas, so a primitive naming one can draw with
+    /// it.
     pub fn attachAll(self: *FontRegistry, canvas: *software.Canvas) void {
         for (self.entries.items, 0..) |e, i| {
             // `e.face_index`, NOT 0: a collection's faces are not interchangeable.
@@ -683,13 +523,8 @@ pub const FontRegistry = struct {
     }
 };
 
-/// Attach the typeface the chain NAMED, if it names a different one than the
-/// face already there. Returns whether anything changed, so the loop can mark
-/// the frame dirty -- a font swap that does not repaint is a swap nobody sees.
-///
-/// Failure leaves the previous face attached and bands the name. That is the
-/// entire rule: a font that cannot be found must never quietly become a
-/// different font, because the render still looks deliberate.
+/// Attach the typeface the chain NAMED, if it names a different one than the face already
+/// there.
 pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]const u8, slot: *FontSlot, home: ?[]const u8) bool {
     const name = want orelse return false;
     if (std.mem.eql(u8, name, slot.appliedName())) return false;
@@ -707,15 +542,6 @@ pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]
 }
 
 /// Attach the app's declared typeface, or say why it is not there.
-///
-/// A path the app NAMED and the filesystem cannot produce is a fault: text
-/// measures at zero, every text prim vanishes, and the window reads as a
-/// renderer bug rather than a missing file. So it raises the band and keeps
-/// running, same rule as the theme chain. An app that declares no `font_path`
-/// never reaches here -- one font is a choice, a broken path is not.
-///
-/// The face stays attached on failure (`Font.none`), which is the honest
-/// render: invisible text, not a crash and not a substituted typeface.
 fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
     const bytes = software.loadFont(gpa, io, path) catch {
         // Both attempts are plain reads, so any failure means the app named a
@@ -742,24 +568,11 @@ fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io:
 }
 
 /// Compose a whole app onto a window backend.
-///
-/// Everything the glue files used to duplicate -- canvas size, background
-/// colour, runtime construction -- is derived from the app declaration, so
-/// those values exist once and cannot drift apart.
-///
-/// `app` is a comptime struct literal with: title, size, Model, Msg,
-/// update, view, and optionally `state` (initial model).
 pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Window) !Stats {
     return runAppEnv(app, gpa, io, null, window);
 }
 
 /// `runApp` with the process environment available to the font search.
-///
-/// The environment is a parameter, not a global lookup: it is handed in at the
-/// one place that has it (`main`'s `init.environ_map`) and threaded down, so
-/// the font chain still reaches for nothing it was not given. `null` means "no
-/// environment", i.e. no user fonts -- the right answer for a headless run or a
-/// test, which must not inherit whatever the machine happens to have installed.
 pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const std.process.Environ.Map, window: elmz.Window) !Stats {
     const S = app.Model;
     const M = app.Msg;
@@ -824,11 +637,6 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
 }
 
 /// Fill the canvas with the `bg` role.
-///
-/// A gradient on `bg` is not decoration on an element -- it IS the page, so it
-/// cannot arrive as a primitive the way a panel's gradient does. A clear can
-/// only take one colour, which is why this is a full-canvas fill: same pixels
-/// as the clear when the role is flat, and the actual ramp when it is not.
 fn clearToTheme(canvas: *software.Canvas, ui: anytype) void {
     const fill = ui.roleFill("bg");
     if (fill == .solid) {
@@ -845,28 +653,14 @@ fn clearToTheme(canvas: *software.Canvas, ui: anytype) void {
     r.quad(all, fill, all);
 }
 
-/// Build a frame sized to the canvas, clear it to `bg`, and rasterise it.
-/// The caller owns the returned frame.
-///
-/// This is the whole of "show me what this model looks like", and it was being
-/// retyped in every example -- twice over, as `paint` in one and `repaint` in
-/// another, differing only in whether the frame came back. Rasterising a frame
-/// is not any app's business, so it lives at the composition layer, which is
-/// the only place that can see both a Runtime and a Canvas.
-/// A registry the caller owns of exactly the size a headless run needs.
-///
-/// `run` builds one from `Options`; a headless caller has no event loop, so it
-/// builds this instead and attaches it. Same registry, same lookup, same
-/// resolution rules -- a PNG and a window cannot disagree about which face a
-/// name meant.
+/// Build a frame sized to the canvas, clear it to `bg`, and rasterise it. The caller owns
+/// the returned frame.
 pub const HeadlessFonts = struct {
     reg: FontRegistry,
     lookup: elmz.FaceLookup,
 
-    /// Built IN PLACE, never returned by value: `lookup.ptr` addresses `reg` by
-    /// location, and a returned struct is a temporary that the caller copies.
-    /// The copy would point at the dead original -- a dangling pointer that
-    /// fails as "the font is always missing", which looks like a bad name.
+    /// Built IN PLACE, never returned by value: `lookup.ptr` addresses `reg` by location,
+    /// and a returned struct is a temporary that the caller copies.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8) *HeadlessFonts {
         const self = gpa.create(HeadlessFonts) catch unreachable;
         self.* = .{
@@ -890,18 +684,6 @@ pub const HeadlessFonts = struct {
     }
 
     /// Wire the lookup AND register every loaded face with the canvas.
-    ///
-    /// Both halves, in one call, because they are useless apart and the split
-    /// version was silently wrong: `attach` alone gave the tree a way to NAME a
-    /// face and nothing that could DRAW it, so every styled label asked
-    /// `facePtrAt` for a slot that was never filled, got the default face back,
-    /// and rendered tofu for every script -- with no error anywhere. Loading a
-    /// font into the registry and registering it with the canvas are two steps,
-    /// and a caller that forgets the second sees boxes, not a failure.
-    ///
-    /// Call this AFTER the theme is loaded: the faces it registers are the ones
-    /// something has resolved, and a style's font is only known once the theme
-    /// that names it has been read.
     pub fn attach(self: *HeadlessFonts, comptime S: type, comptime M: type, rt: *elmz.Runtime(S, M), canvas: *software.Canvas) void {
         self.lookup.ptr = &self.reg;
         rt.face_lookup = &self.lookup;
@@ -925,11 +707,8 @@ pub fn paintInto(
     return frame;
 }
 
-/// Rasterise and drop the frame: for callers that only want the pixels.
-///
-/// Same thing `paintInto` does, minus the ownership question. Without this the
-/// call site needs a `var` plus a `defer`, which is exactly the bloat this was
-/// supposed to remove.
+/// Rasterise and drop the frame: for callers that only want the pixels. Same thing
+/// `paintInto` does, minus the ownership question.
 pub fn paintOnce(
     comptime S: type,
     comptime M: type,
@@ -940,15 +719,11 @@ pub fn paintOnce(
     defer frame.deinit();
 }
 
-/// What the runner keeps for as long as a gesture lasts. Kept here rather than
-/// on `elmz.Drag`, which says what the ELEMENT is: a thumb needs the grab
-/// offset and the offset at grab time, and a slider must never have either
-/// (its value is where the pointer is). Generic over M only because a slider
-/// has to dispatch its own message when the value moves.
+/// What the runner keeps for as long as a gesture lasts.
 fn ActiveDrag(comptime M: type) type {
     return union(enum) {
-        /// A scroll thumb: tracked by grab offset, so the content does not jump
-        /// to put the pointer in the middle of the thumb.
+        /// A scroll thumb: tracked by grab offset, so the content does not jump to put the
+        /// pointer in the middle of the thumb.
         thumb: struct {
             d: elmz.ScrollDrag,
             from_y: f32,
@@ -1695,8 +1470,8 @@ pub fn run(
     return stats;
 }
 
-/// One wheel notch, in logical units. SDL reports whole clicks, and a notch
-/// that moves less than a line reads as a trackpad that is broken.
+/// One wheel notch, in logical units. SDL reports whole clicks, and a notch that moves less
+/// than a line reads as a trackpad that is broken.
 const scroll_step: f32 = 48;
 
 fn sameRect(a: ?elmz.Rect, b: ?elmz.Rect) bool {
@@ -1736,19 +1511,13 @@ const Fake = struct {
     last_hash: u64 = 0,
     w: f32 = 200,
     h: f32 = 120,
-    /// The size the next `.resize` event adopts. A real backend has already
-    /// resized by the time it reports the event -- that is what makes the event
-    /// payload-free -- so the fake has to adopt it on the way out too, or it
-    /// would report a resize and keep answering the old size.
+    /// The size the next `.resize` event adopts.
     pending: elmz.Size = .{ .w = 200, .h = 120 },
-    /// What the last present actually handed over. The bug this guards is a
-    /// size mismatch between the canvas and the window, which nothing else in
-    /// the harness can see: a hash of the pixels says the frame was painted,
-    /// not that it was the right SIZE.
+    /// What the last present actually handed over.
     presented_len: usize = 0,
     presented_size: elmz.Size = .{ .w = 0, .h = 0 },
-    /// Device pixels per logical unit, as the platform would report it. Default
-    /// 1x: a test that says nothing about density is testing the unscaled path.
+    /// Device pixels per logical unit, as the platform would report it. Default 1x: a test
+    /// that says nothing about density is testing the unscaled path.
     density: f32 = 1.0,
     /// how many empty polls to answer before quitting, once the script runs out
     idle: usize = 0,
@@ -2328,9 +2097,7 @@ test "only the region that owns the press stays lit" {
 // identity, not overlap
 // ---------------------------------------------------------------------------
 
-/// A card that reacts to the pointer, with a button inside it. Built to catch
-/// the difference between "contains the pointer" and "is what the pointer is
-/// on": the card overlaps every pixel of its button.
+/// A card that reacts to the pointer, with a button inside it.
 fn cardView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
     const b = ui.button(.{ .label = "x", .msg = .inc, .width = 60 });
@@ -2551,9 +2318,8 @@ test "a paragraph wraps to its width and paints one prim per line" {
 // clip: containment, pruning, and presses outside the window
 // ---------------------------------------------------------------------------
 
-/// A 120x80 box that clips, holding content deliberately larger than it: two
-/// bands that are partly visible (600 wide in a 120 box) and one entirely
-/// below the bottom edge.
+/// A 120x80 box that clips, holding content deliberately larger than it: two bands that are
+/// partly visible (600 wide in a 120 box) and one entirely.
 fn clipView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     _ = s;
     const a = ui.rect(.{ .width = 600, .height = 60, .style = .{ .bg = elmz.solid(ui.theme.accent) } });
@@ -3145,8 +2911,8 @@ test "tab moves focus in document order and never reaches the app hook" {
             b.focusable = true;
             return ui.column(.{ .children = &.{ a, b } });
         }
-        /// Claims nothing, but counts: if Tab reached here the count would move,
-        /// so the count is the proof the runtime swallowed the key instead.
+        /// Claims nothing, but counts: if Tab reached here the count would move, so the
+        /// count is the proof the runtime swallowed the key instead.
         fn onKey(s: *TabS, k: elmz.Key, p: elmz.Phase) ?TabM {
             _ = k;
             _ = p;
@@ -3725,8 +3491,8 @@ test "an arrow key moves the roving cursor, not just the frame" {
     try std.testing.expectEqual(@as(?u64, 41), rt.focus);
 }
 
-/// A roving control that actually HAS an owner element (key 30), the way a
-/// builder produces one: Tab lands on the owner, never on a row.
+/// A roving control that actually HAS an owner element (key 30), the way a builder produces
+/// one: Tab lands on the owner, never on a row.
 fn roveOwnerView(_: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
     const owner = ui.button(.{ .label = "list", .msg = .inc, .key = 30 });
     owner.focusable = true;

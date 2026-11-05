@@ -1,14 +1,5 @@
-//! The font system, rendered: the library ships no typeface, the app loads one,
-//! and `Font` is a value rather than hidden global state.
-//!
-//! Writes two PNGs from the same view:
-//!   fonts.png       -- the face loaded from disk
-//!   fonts-none.png  -- no face: the built-in 5x6 diagnostic face draws the
-//!                      same view. A missing typeface has to read as obviously
-//!                      wrong legible text, never as a blank window -- a blank
-//!                      window is the one answer that could pass for a bug.
-//!
-//!   zig build run-fonts
+//! The font system, rendered: the library ships no typeface, the app loads one, and `Font`
+//! is a value rather than hidden global state.
 
 const std = @import("std");
 const elmz = @import("elmz");

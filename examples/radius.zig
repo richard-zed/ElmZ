@@ -1,5 +1,5 @@
-//! Corner radii: a grid of fills and outlines at increasing radius, plus one
-//! rounded container with text inside it. Headless — writes radius.png.
+//! Corner radii: a grid of fills and outlines at increasing radius, plus one rounded
+//! container with text inside it. Headless — writes radius.png.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -13,9 +13,7 @@ fn update(_: *Model, _: Msg) elmz.Action(Msg) {
     return .{};
 }
 
-/// The app declaration the window composition binds to. The headless `main`
-/// below builds its own Runtime from the same three functions, so the picture
-/// and the window cannot drift: one `view`, two ways to drive it.
+/// The app declaration the window composition binds to.
 pub const app = .{
     .title = "elmz - corner radii",
     .size = .{ .w = 420, .h = 320 },

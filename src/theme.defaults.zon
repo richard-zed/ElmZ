@@ -1,13 +1,6 @@
 .{
     .version = 3,
 
-    // The library's house palette. Flat by design: a default gradient is a
-    // look, and a library should not arrive with one. An app that wants
-    // gradients puts them in its own theme.zon.
-    //
-    // Colours are written BARE -- `0xRRGGBB`, not `.{ .hex = ... }` -- because
-    // a colour is one value, and the file decides its shape rather than
-    // naming a form. `.{ r, g, b }` and `.{ f, f, f }` (fractions) work too.
     .theme = .{
         .colors = .{
             .bg = 0x1e1e2e,
@@ -26,15 +19,6 @@
         },
     },
 
-    // One style per script, plus a heading and a card. `latin` carries no
-    // weight on purpose: omitted means "whatever the face says", not 400, so
-    // a replacement face is not silently forced to a weight nobody chose.
-    // A heavy default here would also make every app's body text heavy before
-    // the app asked for anything.
-    //
-    // A style's role references are ENUM LITERALS -- `.color = .text` -- so
-    // the reference and the role it names cannot drift apart, and an edit to
-    // the palette moves every style that points at it.
     .styles = .{
         .latin = .{ .color = .text, .font = "Roboto Flex" },
         .arabic = .{ .color = .text, .font = "Noto Sans Arabic" },

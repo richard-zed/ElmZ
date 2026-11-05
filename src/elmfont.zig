@@ -1,28 +1,5 @@
-//! The built-in bitmap face: five pixels wide, six tall, one bit per row.
-//!
-//! Why a library that ships no typeface ships one anyway. Every diagnostic the
-//! runtime can raise is TEXT -- an allocation that failed, a duplicate key, a
-//! theme file that will not parse, a font path that does not exist. The band
-//! that reports them needs a face, so a missing font used to turn "your font
-//! is missing" into a blank window: the report of the bug was indistinguishable
-//! from the bug. This face is the one that is always present.
-//!
-//! It is a DIAGNOSTIC CHANNEL, not a fallback typeface. `software.Canvas`
-//! reaches for it only when no real face is attached, where the alternative is
-//! no text at all. It is legible and it is obviously not the typeface the app
-//! asked for, which is exactly the signal wanted: words you can read, and a
-//! band above them saying why they look like that. Substituting a *plausible*
-//! face would be the one behaviour that could pass for working.
-//!
-//! The glyphs were drawn by hand and decoded from a single-row sheet, so this
-//! is the whole charset there is: a-z, digits, and the punctuation an error
-//! message actually uses. Uppercase is folded, because a message that says
-//! "Font" in lowercase still reads. Anything else is a `?` -- a wrong glyph is
-//! honest about being wrong; a missing one silently shifts everything after it.
-//!
-//! Multiple-of-six integer sizes only. A bitmap scaled by 1.37 looks like a
-//! bitmap scaled by 1.37, so `scaleFor` rounds to whole multiples and the
-//! glyphs stay square.
+//! The built-in bitmap face: five pixels wide, six tall, one bit per row. Why a library
+//! that ships no typeface ships one anyway.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -30,24 +7,15 @@ const cedar = @import("cedar.zig");
 
 /// Cell size in pixels, and the advance that includes the one-column gap.
 pub const glyph_w: u32 = 5;
-/// The ink box: what `scaleFor` divides a point size by, so the glyph size a
-/// caller sees does not move when the line box does.
+/// The ink box: what `scaleFor` divides a point size by, so the glyph size a caller sees
+/// does not move when the line box does.
 pub const glyph_h: u32 = 6;
-/// The LINE box: the ink box plus room for the glyphs that hang below the
-/// baseline. Eight rows is the ink box plus two, which is exactly the deepest
-/// drop in `dyOf` (`j p q`), so the lowest pixel of the tallest descender lands
-/// on the last row of the box rather than being clipped by it. It is separate
-/// from `glyph_h` on purpose: a descender needs somewhere to go, and a taller
-/// ink box would silently repoint every size at smaller glyphs.
-///
-/// This is the number to raise if a deeper drop is ever wanted -- nine rows
-/// buys three. Lower it and the descenders are drawn outside the element box and
-/// clipped away, which looks exactly like a glyph nobody moved.
+/// The LINE box: the ink box plus room for the glyphs that hang below the baseline.
 pub const line_h: u32 = 8;
 pub const advance: u32 = glyph_w + 1;
 
-/// Every glyph this face can spell, in table order. Kept as a string so a test
-/// can walk it and so the order is visible without counting array indices.
+/// Every glyph this face can spell, in table order. Kept as a string so a test can walk it
+/// and so the order is visible without counting array indices.
 pub const order = "abcdefghijklmnopqrstuvwxyz1234567890.!,'\":[]/~+?-=_ ";
 
 /// One byte per row, low five bits, bit 4 = leftmost pixel.
@@ -106,8 +74,8 @@ pub const glyphs = [_][glyph_h]u8{
     .{ 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000 }, //
 };
 
-/// Whole multiples of the cell height, never a fraction. `size` is what a
-/// caller asked for; a bitmap has no hinting to soften the lie.
+/// Whole multiples of the cell height, never a fraction. `size` is what a caller asked for;
+/// a bitmap has no hinting to soften the lie.
 pub fn scaleFor(size: f32) u32 {
     const raw = size / @as(f32, @floatFromInt(glyph_h));
     if (!(raw > 1.0)) return 1;
@@ -116,10 +84,6 @@ pub fn scaleFor(size: f32) u32 {
 }
 
 /// Table index for a codepoint, or null when this face cannot spell it.
-///
-/// Uppercase maps onto the lowercase glyph rather than being refused: the
-/// diagnostic channel exists to be read, and "Error" folding to "error" costs
-/// nothing an error message needs.
 pub fn slot(cp: u32) ?usize {
     if (cp >= 'a' and cp <= 'z') return cp - 'a';
     if (cp >= 'A' and cp <= 'Z') return cp - 'A';
@@ -153,21 +117,6 @@ pub fn glyphFor(cp: u32) [glyph_h]u8 {
 }
 
 /// Rows this glyph sits below the top of the ink box, in whole cells.
-///
-/// The sheet this face was drawn from put every glyph in the same six rows, so
-/// the letters with tails sat ON the baseline and the ones the source drew a
-/// bit high stayed high -- `e` and `g` began a row above `c` and `o`, and `j p
-/// q` had nowhere to descend to. This is the correction, and it is a number per
-/// glyph rather than a redrawn table because the shapes are right and only
-/// their placement is not.
-///
-/// It scales with `s` because it is measured in cells, not pixels: a drop of
-/// one is one pixel at size 6 and six at size 36. That keeps the whole-multiple
-/// rule `scaleFor` exists to enforce.
-///
-/// Uppercase folds to the same glyph, so it takes the same drop. Anything this
-/// face cannot spell draws as `?`, which has no drop, so an unknown codepoint
-/// resolves through the `else` like any other flat glyph.
 pub fn dyOf(cp: u32) u32 {
     return switch (cp) {
         'e', 'E', 'g', 'G', 'y', 'Y' => 1,
@@ -176,8 +125,8 @@ pub fn dyOf(cp: u32) u32 {
     };
 }
 
-/// Whether the codepoint is one this face can spell. Used by the measurement
-/// test to prove the fold and the `?` are not the same answer.
+/// Whether the codepoint is one this face can spell. Used by the measurement test to prove
+/// the fold and the `?` are not the same answer.
 pub fn spells(cp: u32) bool {
     return slot(cp) != null;
 }
@@ -208,8 +157,8 @@ pub fn measure(bytes: []const u8, size: f32) elmz.TextMetrics {
     };
 }
 
-/// Width of `bytes[0..index]`, on the same whole-cell grid `measure` uses.
-/// Uniform advances make this arithmetic, and the trailing gap is not ink.
+/// Width of `bytes[0..index]`, on the same whole-cell grid `measure` uses. Uniform advances
+/// make this arithmetic, and the trailing gap is not ink.
 pub fn advanceTo(bytes: []const u8, size: f32, index: usize) f32 {
     const s = scaleFor(size);
     var i: usize = 0;
@@ -241,10 +190,8 @@ pub fn hitText(bytes: []const u8, size: f32, x: f32) usize {
     return bytes.len;
 }
 
-/// Greedy wrap, and the advances are uniform, so "how many fit" is arithmetic
-/// rather than a walk: k glyphs are `(k * advance - 1) * scale` wide.
-/// A single glyph wider than the box still gets its own line, because a loop
-/// that refuses to emit anything is a hang.
+/// Greedy wrap, and the advances are uniform, so "how many fit" is arithmetic rather than a
+/// walk: k glyphs are `(k * advance - 1) * scale` wide.
 pub fn wrap(bytes: []const u8, size: f32, max_w: f32, out: [][]const u8) usize {
     if (out.len == 0) return 0;
     const s = scaleFor(size);

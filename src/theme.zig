@@ -1,12 +1,4 @@
-//! Themes: the palette roles, the guard that keeps them readable, and the
-//! `.zon` loader.
-//!
-//! Split out of `elmz.zig` because none of it is about layout, painting or
-//! events. `Theme` stays there -- it is a value every part of the library
-//! reads -- so the dependency runs one way: this file imports `elmz.zig`.
-//!
-//! An app copies `theme.defaults.zon`, edits it, sets `theme_path`, and the
-//! runner reloads it while the window is open.
+//! Themes: the palette roles, the guard that keeps them readable, and the `.zon` loader.
 
 const std = @import("std");
 const elmz = @import("elmz.zig");
@@ -14,36 +6,26 @@ const Theme = elmz.Theme;
 const Color = elmz.Color;
 const Allocator = std.mem.Allocator;
 
-/// Roles are grouped by what a collision costs, because a duplicate between
-/// two roles is only a bug when the two have to be told apart.
-///
-/// The old guard demanded that no two roles shared a colour, which is true
-/// only of a sharp palette like Mocha's. A hand-written theme that reuses one
-/// grey for `border` and `text_muted` is not wrong -- it is a theme author spending
-/// fewer tokens -- and the guard has no business rejecting it.
+/// Roles are grouped by what a collision costs, because a duplicate between two roles is
+/// only a bug when the two have to be told apart.
 pub const RoleFamily = enum {
-    /// Fill states that must be distinguishable from each other while a
-    /// control changes state. `selected` lighter than `control` is what makes
-    /// an active tab read as active rather than disabled, so a collision here
-    /// is the one that actually breaks a UI.
+    /// Fill states that must be distinguishable from each other while a control changes
+    /// state.
     interaction,
-    /// Text on a panel: primary and secondary must differ or nothing reads
-    /// as de-emphasised.
+    /// Text on a panel: primary and secondary must differ or nothing reads as
+    /// de-emphasised.
     text,
-    /// The two large adjacent fills. A panel in the page colour is a panel
-    /// nobody can see, so these may not coincide -- but each may reuse a
-    /// colour from any other family.
+    /// The two large adjacent fills.
     fill,
-    /// Lines. A single role, so it can alias freely: a border in the caption
-    /// colour is a theme author spending fewer tokens, not a defect.
+    /// Lines. A single role, so it can alias freely: a border in the caption colour is a
+    /// theme author spending fewer tokens, not a defect.
     line,
     /// Emphasis, checked only against itself.
     emphasis,
 };
 
-/// Every field must appear exactly once: an unfiled token is
-/// `error.UnfiledRole`, so a role added to `Theme` cannot be outgrown by the
-/// guard silently.
+/// Every field must appear exactly once: an unfiled token is `error.UnfiledRole`, so a role
+/// added to `Theme` cannot be outgrown by the guard silently.
 pub fn familyOf(name: []const u8) ?RoleFamily {
     const pairs = .{
         .{ "control", RoleFamily.interaction },
@@ -76,13 +58,8 @@ const Collision = struct {
     b: []const u8,
 };
 
-/// The first pair of same-family roles sharing a colour, or null when the
-/// palette is legal.
-///
-/// Returned rather than printed. A test that writes to stderr makes the build
-/// runner record the step as failed -- `zig build test` then prints
-/// `failed command: ... --listen=-` on an otherwise green run. The pair a test
-/// can assert on is worth more than a line of output anyway.
+/// The first pair of same-family roles sharing a colour, or null when the palette is legal.
+/// Returned rather than printed.
 pub fn firstCollision(t: Theme) ?Collision {
     const fields = @typeInfo(Theme).@"struct".fields;
     inline for (fields, 0..) |f, i| {
@@ -141,66 +118,41 @@ fn checkPalette(t: Theme) !void {
 // into a union payload (verified by compiling), so a single unified field would
 // force `.{ .solid = 0x1e1e2e }` on all thirteen roles, in every file, forever.
 
-/// The shipped listing is the library default. Embedded rather than shipped
-/// beside the binary so a missing file cannot quietly become "no theme".
+/// The shipped listing is the library default. Embedded rather than shipped beside the
+/// binary so a missing file cannot quietly become "no theme".
 pub const defaults_zon: [:0]const u8 = @embedFile("theme.defaults.zon");
 
-/// Every loader version this file understands. A file states its own so a v1
-/// file is refused in one sentence instead of half-loading and looking wrong.
+/// Every loader version this file understands. A file states its own so a v1 file is
+/// refused in one sentence instead of half-loading and looking wrong.
 pub const theme_version: u32 = 3;
 
-/// Gradient direction for the linear case: degrees on a clock face, clockwise
-/// from 12 o'clock, naming the direction the ramp TRAVELS.
-///
-///   0   ->  bottom to top
-///   45  ->  up and to the right
-///   90  ->  left to right
-///   135 ->  down and to the right
-///   180 ->  top to bottom  (the default, and what `vertical` used to mean)
-///   270 ->  right to left
-///
-/// A float rather than a three-value enum because such an enum could only ever
-/// express three directions -- every other angle was unreachable, and the way
-/// out would have been to fake it with a radial. The renderer was never the
-/// limit: `Fill.Linear` is two vectors, so any angle it is given is exact.
-///
-/// Mind the sense: this names where the colour is GOING. `Halo.light` uses the
-/// same clock but names where the lamp SITS, so at the same number the two
-/// point opposite ways.
+/// Gradient direction for the linear case: degrees on a clock face, clockwise from 12
+/// o'clock, naming the direction the ramp TRAVELS.
 pub const LinearSpec = struct {
     dir: f32 = 180,
-    /// `null` inherits the role's own colour from `.colors`. Leaving an end
-    /// out is how a gradient stays tied to the palette instead of holding a
-    /// second copy of the same hex.
+    /// `null` inherits the role's own colour from `.colors`.
     from: ?u32 = null,
     to: ?u32 = null,
 };
 
 pub const RadialSpec = struct {
-    /// The colour at the centre and the colour it falls off to. `null`
-    /// inherits the role's own colour, same as the linear ends.
+    /// The colour at the centre and the colour it falls off to. `null` inherits the role's
+    /// own colour, same as the linear ends.
     inner: ?u32 = null,
     outer: ?u32 = null,
-    /// Where the centre sits, as a fraction of the element's box. `.{0, 0}` is
-    /// the top-left corner, `.{0.5, 0.5}` the middle. Fractions rather than
-    /// pixels because an element does not know where layout will put it, so a
-    /// pixel offset would slide as soon as anything above it grew.
+    /// Where the centre sits, as a fraction of the element's box. `.{0, 0}` is the top-left
+    /// corner, `.{0.5, 0.5}` the middle.
     center: ?[2]f32 = null,
     /// Fraction of the box WIDTH, matching `Fill.Radial`.
     radius: f32 = 0.5,
 };
 
 /// A gradient as written in a file.
-///
-/// There is deliberately no `solid` variant: a flat colour belongs in
-/// `.colors`, and giving it a second spelling here would create a file where
-/// one role is stated twice with no rule about which wins.
 pub const GradientSpec = union(enum) {
     linear: LinearSpec,
     radial: RadialSpec,
 
-    /// `fallback` is the role's resolved colour, used for whichever end the
-    /// file left out.
+    /// `fallback` is the role's resolved colour, used for whichever end the file left out.
     pub fn resolve(self: GradientSpec, fallback: Color) elmz.Fill {
         return switch (self) {
             .linear => |l| blk: {
@@ -223,14 +175,6 @@ pub const GradientSpec = union(enum) {
 };
 
 /// Solid colours, as written. Every field optional, `null` meaning "inherit".
-///
-/// Fields are `u32` hex rather than `Color` because a `.zon` is literal data --
-/// no expressions, no calls -- so it cannot spell `Color.rgbHex(0x1e1e2e)`.
-///
-/// Six digits is opaque RGB and eight is `0xRRGGBBAA`, decided by the value's
-/// magnitude (`Color.hex`). Both shapes had to work: a role that wants alpha
-/// cannot express it in six, and rejecting eight would mean a caller who wrote
-/// one got a parse error naming a colour they can plainly see.
 pub const ColorsSpec = struct {
     bg: ColorSpec = .{},
     panel: ColorSpec = .{},
@@ -246,20 +190,11 @@ pub const ColorsSpec = struct {
     warning: ColorSpec = .{},
     fail: ColorSpec = .{},
 
-    /// Colours beyond the built-in roles, as a LIST because ZON cannot parse a
-    /// map -- the same reason `.styles` is a list. A name here is usable
-    /// anywhere a role name is: `.bg = "sidebar"`, a halo's `.color`, a
-    /// gradient key.
-    ///
-    /// This is why the tier exists: the thirteen built-ins describe a UI, not an
-    /// APP. A chart's series colours, a diff's added/removed, a tag's hue per
-    /// tag -- none of those are `accent`, and squeezing them into `accent` is
-    /// how a palette stops meaning anything.
+    /// Colours beyond the built-in roles, as a LIST because ZON cannot parse a map -- the
+    /// same reason `.styles` is a list.
     roles: []const CustomRole = &.{},
 
-    /// `base` supplies whatever the spec leaves null. The field names mirror
-    /// `Theme`; a test proves they stay mirrored, and this inline loop is what
-    /// makes adding a role a one-line change on this side.
+    /// `base` supplies whatever the spec leaves null.
     pub fn overlay(self: ColorsSpec, base: Theme) Theme {
         var t = base;
         inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
@@ -273,15 +208,6 @@ pub const ColorsSpec = struct {
 };
 
 /// A colour written in a file, in any free-form spelling.
-///
-/// Read from the UNTYPED tree, not a typed struct, because the shapes a person
-/// writes are not one type: `0xffeeddcc` and `.{ 200, 200, 20 }` are different
-/// node kinds, and a struct field can only accept one of them. The node shape
-/// decides how the value is read.
-///
-///   int_literal        0xffeeddff, 0x1e1e2e     -- 24-bit RGB or 32-bit RGBA
-///   array_literal      3 elems -> rgb, 4 -> rgba
-///   float arrays       all <= 1.0 normalised x255, any > 1.0 exact, mixed is an error
 pub const ColorValue = struct {
     pub const Error = error{
         NotAColour,
@@ -303,12 +229,8 @@ pub const ColorValue = struct {
         };
     }
 
-    /// `0xRRGGBB` or `0xRRGGBBAA`, by magnitude not by digit count: a value
-    /// above 24 bits carries alpha. Negative and out-of-range are refused
-    /// rather than wrapped, because a wrapped colour is a colour nobody wrote.
-    /// The payload is an ANONYMOUS union, so it cannot be named as a parameter
-    /// type; it is taken as `anytype` and switched here, the way std's own
-    /// `parseInt` does it.
+    /// `0xRRGGBB` or `0xRRGGBBAA`, by magnitude not by digit count: a value above 24 bits
+    /// carries alpha.
     fn hexFromInt(int: anytype) Error!Color {
         switch (int) {
             .small => |i| {
@@ -385,16 +307,6 @@ pub const ColorValue = struct {
 };
 
 /// A colour value as a file may write it.
-///
-/// Three optional members rather than a union, and this is not a style choice:
-/// a union requires a tagged form and ZON rejects even a bare hex for one
-/// ("expected union"), while `u32` rejects a tuple ("expected type 'u32'").
-/// Optional members accept exactly one populated member and nothing else, which
-/// is the only shape that lets a hex and a tuple live in the same field.
-///
-/// Leave exactly ONE member set. `resolve` counts them and rejects a value that
-/// sets none or several -- ZON has no way to enforce that itself, so a file
-/// writing `.hex` and `.rgb` on one colour would otherwise silently pick one.
 pub const ColorSpec = struct {
     hex: ?u32 = null,
     rgb: ?[3]u8 = null,
@@ -402,8 +314,8 @@ pub const ColorSpec = struct {
 
     pub const Error = error{ColorNotOneForm};
 
-    /// Fold to a `Color`. Six-digit hex is opaque, eight is `0xRRGGBBAA`, both
-    /// handled by `Color.hex` -- the same rule the built-in roles already use.
+    /// Fold to a `Color`. Six-digit hex is opaque, eight is `0xRRGGBBAA`, both handled by
+    /// `Color.hex` -- the same rule the built-in roles already use.
     pub fn resolve(self: ColorSpec) Error!elmz.Color {
         var seen: u2 = 0;
         var out: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0xff };
@@ -429,21 +341,14 @@ pub const ColorSpec = struct {
     }
 };
 
-/// One named colour outside the built-in set.
-///
-/// `value` takes either form: `.name = "chart1", .value = .{ .hex = 0x... }` or
-/// `.value = .{ .rgb = .{ 200, 200, 20 } }`. It cannot be written bare for the
-/// reason spelled out on `ColorSpec`.
+/// One named colour outside the built-in set. `value` takes either form: `.name = "chart1",
+/// .value = .{ .hex = 0x...
 pub const CustomRole = struct {
     name: []const u8,
     value: ColorSpec,
 };
 
 /// Gradients per role, named exactly like the colours they stand in for.
-///
-/// Same names on purpose: "a gradient for `accent`" has one obvious spelling,
-/// and a free catalogue of arbitrary names would need a lookup table and would
-/// let a gradient exist that no role ever reaches.
 pub const GradientsSpec = struct {
     bg: ?GradientSpec = null,
     panel: ?GradientSpec = null,
@@ -459,14 +364,7 @@ pub const GradientsSpec = struct {
     warning: ?GradientSpec = null,
     fail: ?GradientSpec = null,
 
-    /// Gradients for colours the file invented. A LIST because zon has no map,
-    /// and keyed by name rather than position because a gradient has to be
-    /// findable at paint time -- the same list-a-map problem `.styles` and
-    /// `.colors .roles` have, solved the same way.
-    ///
-    /// An omitted end INHERITS that role's colour, so a custom gradient needs
-    /// the role to exist in `.colors .roles`: it resolves against it exactly
-    /// as a built-in gradient resolves against a built-in role.
+    /// Gradients for colours the file invented.
     roles: []const CustomGradient = &.{},
 };
 
@@ -476,8 +374,8 @@ pub const CustomGradient = struct {
     gradient: GradientSpec,
 };
 
-/// The resolved gradients: a role with no gradient is null, which is how every
-/// consumer spells "use the solid colour".
+/// The resolved gradients: a role with no gradient is null, which is how every consumer
+/// spells "use the solid colour".
 pub const Gradients = struct {
     bg: ?elmz.Fill = null,
     panel: ?elmz.Fill = null,
@@ -493,8 +391,8 @@ pub const Gradients = struct {
     warning: ?elmz.Fill = null,
     fail: ?elmz.Fill = null,
 
-    /// Gradients for the file's own roles. A slice, not fields, for the same
-    /// reason `Theme.custom` is: names are data here, not schema.
+    /// Gradients for the file's own roles. A slice, not fields, for the same reason
+    /// `Theme.custom` is: names are data here, not schema.
     custom: []const CustomFill = &.{},
 
     pub const CustomFill = struct { name: []const u8, fill: elmz.Fill };
@@ -523,8 +421,8 @@ pub const Gradients = struct {
     }
 };
 
-/// Longest font name a theme file may carry. A name is a name, not a
-/// description: a hundred bytes means the author pasted a path.
+/// Longest font name a theme file may carry. A name is a name, not a description: a hundred
+/// bytes means the author pasted a path.
 pub const font_name_max = 96;
 
 /// One theme section as written: two nested tables, both optional.
@@ -532,22 +430,17 @@ pub const ThemeSpec = struct {
     colors: ColorsSpec = .{},
     gradients: GradientsSpec = .{},
 
-    /// The typeface, BY NAME: `.font = "DejaVu Sans"`. Never a path -- the
-    /// library resolves the name to a file, so the file can move and the theme
-    /// does not have to know where fonts live. A name that resolves to nothing
-    /// keeps the last good face and bands; substituting a different typeface
-    /// would be the one outcome nobody could see.
+    /// The typeface, BY NAME: `.font = "DejaVu Sans"`.
     font: ?[]const u8 = null,
 
-    /// Solid colours over `base`. Gradients resolve separately because they are
-    /// a different type and a different question.
+    /// Solid colours over `base`. Gradients resolve separately because they are a different
+    /// type and a different question.
     pub fn overlay(self: ThemeSpec, base: Theme) Theme {
         return self.colors.overlay(base);
     }
 
-    /// `theme` is the already-resolved palette, which is where an omitted
-    /// gradient end gets its colour. Passing it here rather than at paint time
-    /// means a gradient and the palette can never disagree.
+    /// `theme` is the already-resolved palette, which is where an omitted gradient end gets
+    /// its colour.
     pub fn resolveGradients(self: ThemeSpec, theme: Theme) Gradients {
         var out: Gradients = .{};
         inline for (@typeInfo(GradientsSpec).@"struct".fields) |f| {
@@ -561,15 +454,6 @@ pub const ThemeSpec = struct {
 };
 
 /// One named style: a bag of role REFERENCES, plus a font name.
-///
-/// In a FILE the references are enum literals -- `.bg = .panel`, `.weight =
-/// .weight` -- which the walker resolves to the names below as it reads. The
-/// struct holds the name WITHOUT the dot because that is what the resolver
-/// downstream looks up; the dot is file syntax, not data.
-///
-/// A style never holds a colour. It names a role in `.colors`, so editing the
-/// palette moves every style that refers to it, and a style cannot drift out of
-/// agreement with the palette it belongs to.
 pub const StyleSpec = struct {
     bg: ?[]const u8 = null,
     color: ?[]const u8 = null,
@@ -581,14 +465,6 @@ pub const StyleSpec = struct {
 };
 
 /// A glow or shadow in a theme file.
-///
-/// The colour is a ROLE NAME, not a hex, for the same reason every other style
-/// field is: editing `.colors` must move it. A shadow is the same machinery as
-/// a glow with `mode = "outer_glow"`, an offset and a dark role -- there is no
-/// separate shadow type, because there is no separate emission path.
-///
-/// `light` is the clock-face angle the light COMES FROM (0 = overhead, 90 =
-/// right), unlike a gradient's `dir`, which is where the colour goes.
 pub const HaloSpec = struct {
     color: []const u8 = "text_muted",
     blur: f32 = 12,
@@ -600,40 +476,26 @@ pub const HaloSpec = struct {
 };
 
 /// The named styles, as a LIST rather than a map.
-///
-/// ZON cannot parse a hash map -- `canParseType` refuses it at comptime, which
-/// is why this is a slice of entries with the name inside rather than
-/// `.styles = .{ .panel = ... }`. Verified by compiling, not read from docs.
 pub const StylesSpec = []const StyleEntry;
 
 pub const StyleEntry = struct {
     name: []const u8,
     spec: StyleSpec = .{},
-    /// How many other styles this one's `.font` names, so the loader can find
-    /// a cycle without walking a map it does not have.
+    /// How many other styles this one's `.font` names, so the loader can find a cycle
+    /// without walking a map it does not have.
     pub fn fontRef(self: StyleEntry) ?[]const u8 {
         return self.spec.font;
     }
 };
 
-/// The whole document. `.vars` is typed by whoever claims it.
-///
-/// There is no lenient mode. An app that wants tokens in the theme file
-/// declares a struct and gets them, checked; an app that declares nothing has
-/// no app tier, and a file that writes one is told so. Waving unknown keys
-/// through would need `ignore_unknown_fields`, which is FILE-WIDE (verified by
-/// compiling: a typo inside `.colors` is silently accepted once it is on), so
-/// the tier would be paid for with the typo detection that makes the error band
-/// worth having.
+/// The whole document. `.vars` is typed by whoever claims it. There is no lenient mode.
 pub fn ThemeFileType(comptime App: type) type {
     return struct {
         version: u32,
         theme: ThemeSpec = .{},
         /// Named styles, resolved against this file's own palette.
         styles: StylesSpec = &.{},
-        /// The app tier. Called `.vars` since v3 because `.app` collided with
-        /// the compile-time declared app type, and a reader had no way to tell
-        /// which one a sentence meant.
+        /// The app tier.
         vars: App = .{},
     };
 }
@@ -644,14 +506,11 @@ pub fn Loaded(comptime App: type) type {
         theme: Theme,
         gradients: Gradients = .{},
         vars: App = .{},
-        /// COPIED out of the parse result, which `loadTheme` frees before
-        /// returning: the keys and the string values come from that allocation,
-        /// so a borrowed table would dangle. Owned by `gpa`; free with
-        /// `freeStyles`. Empty means the file named no styles.
+        /// COPIED out of the parse result, which `loadTheme` frees before returning: the
+        /// keys and the string values come from that allocation.
         styles: StylesSpec = &.{},
-        /// The font name is COPIED, not borrowed: the parse result owns its
-        /// strings and is freed before this is returned, so a slice into it
-        /// would dangle. Fixed capacity keeps that free of an owner.
+        /// The font name is COPIED, not borrowed: the parse result owns its strings and is
+        /// freed before this is returned, so a slice into it would dangle.
         font_buf: [font_name_max]u8 = undefined,
         font_len: usize = 0,
 
@@ -661,8 +520,8 @@ pub fn Loaded(comptime App: type) type {
     };
 }
 
-/// One line, fixed capacity. The failure path is the last place that may
-/// assume an allocator survived, and the band is one line wide anyway.
+/// One line, fixed capacity. The failure path is the last place that may assume an
+/// allocator survived, and the band is one line wide anyway.
 pub const ThemeDiag = struct {
     buf: [192]u8 = undefined,
     len: usize = 0,
@@ -677,14 +536,12 @@ pub const ThemeDiag = struct {
     }
 };
 
-/// `Palette` is separate from `Parse` because a file can be perfectly valid
-/// ZON and still be an unusable theme: two interaction roles sharing a colour
-/// is a defect in the values, not in the syntax, and the author needs to be
-/// told which.
+/// `Palette` is separate from `Parse` because a file can be perfectly valid ZON and still
+/// be an unusable theme: two interaction roles sharing a colour.
 pub const ThemeLoadError = error{ Parse, Version, Palette, Style, OutOfMemory };
 
-/// First diagnostic, rendered as `name line:col: reason` -- the shape that
-/// tells an author where to look.
+/// First diagnostic, rendered as `name line:col: reason` -- the shape that tells an author
+/// where to look.
 fn diagFrom(diag: *ThemeDiag, name: []const u8, d: *std.zon.parse.Diagnostics, fallback: []const u8) void {
     var errors = d.iterateErrors();
     if (errors.next()) |err| {
@@ -695,15 +552,8 @@ fn diagFrom(diag: *ThemeDiag, name: []const u8, d: *std.zon.parse.Diagnostics, f
     diag.set("{s}: {s}", .{ name, fallback });
 }
 
-/// Parse `src` as a v2 theme file over `base`.
-/// Walker output -> the struct `loadTheme` reads.
-///
-/// The file may write any name it likes, so each entry is checked against the
-/// built-in roles: a match RETURNS that role, anything else becomes a custom.
-/// Names are duped because `OpenTables` is freed before the caller sees this.
-/// `GradientLit` ends are colour LITERALS; the spec wants plain hex. A colour
-/// written as an array has to pick one channel width, so anything but hex is
-/// rejected rather than silently truncated to 24 bits.
+/// Parse `src` as a v2 theme file over `base`. Walker output -> the struct `loadTheme`
+/// reads.
 fn litEnd(l: ?ColorLit) ?u32 {
     const v = l orelse return null;
     return switch (v) {
@@ -1007,15 +857,6 @@ pub fn loadTheme(
 }
 
 /// The view-side view of the style table, for `Ui.styleByName`.
-///
-/// The two entry types are NOT layout-compatible: the loader's `spec` is a
-/// named struct with defaults and the view's is anonymous. A pointer cast
-/// between them happens to work today and would break silently the moment
-/// either gained a field, so this converts explicitly instead.
-///
-/// Nothing is copied -- the strings stay owned by the loader's table, which
-/// outlives the frame. The returned slice points INTO `out`, so `out` must
-/// live at least as long as the view is used.
 pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntry), gpa: Allocator) ![]elmz.StyleEntry {
     out.clearRetainingCapacity();
     try out.ensureTotalCapacity(gpa, styles.len);
@@ -1058,9 +899,8 @@ pub fn freeStyles(gpa: std.mem.Allocator, styles: *StylesSpec) void {
     styles.* = &.{};
 }
 
-/// Free the walker's own table, which overlaps `elmz.StyleEntry` field for
-/// field but is a separate type -- so the one-entry free is written twice
-/// rather than coerced, and the two stay in step by construction.
+/// Free the walker's own table, which overlaps `elmz.StyleEntry` field for field but is a
+/// separate type.
 fn freeSpecEntry(gpa: std.mem.Allocator, entry: StyleEntry) void {
     inline for (.{ "bg", "color", "border", "font" }) |slot| {
         if (@field(entry.spec, slot)) |str| gpa.free(str);
@@ -1069,8 +909,8 @@ fn freeSpecEntry(gpa: std.mem.Allocator, entry: StyleEntry) void {
     gpa.free(entry.name);
 }
 
-/// Free what `buildFileType` allocated. Names, style strings and the custom
-/// slices are all owned; the `ColorSpec`/`GradientLit` payloads are values.
+/// Free what `buildFileType` allocated. Names, style strings and the custom slices are all
+/// owned; the `ColorSpec`/`GradientLit` payloads are values.
 fn freeFileType(comptime App: type, gpa: Allocator, f: *ThemeFileType(App)) void {
     for (f.theme.colors.roles) |r| gpa.free(r.name);
     if (f.theme.colors.roles.len > 0) gpa.free(f.theme.colors.roles);
@@ -1079,33 +919,23 @@ fn freeFileType(comptime App: type, gpa: Allocator, f: *ThemeFileType(App)) void
     if (f.styles.len > 0) freeStyles(gpa, &f.styles);
 }
 
-/// Free the custom gradient table `loadTheme` built.
-///
-/// Each entry owns a duped `name`; the slice owns the entries. Safe to call
-/// twice, and safe on a table the loader never filled.
+/// Free the custom gradient table `loadTheme` built. Each entry owns a duped `name`; the
+/// slice owns the entries.
 pub fn freeGradients(gpa: Allocator, grads: *Gradients) void {
     for (grads.custom) |c| gpa.free(c.name);
     if (grads.custom.len > 0) gpa.free(grads.custom);
     grads.custom = &.{};
 }
 
-/// Free everything `loadTheme` handed back. The vars are OWNED by the caller
-/// (transferred, not copied), so freeing the styles alone leaks one allocation
-/// per string var -- which is exactly the leak the suite reported. The custom
-/// gradient table is owned the same way and leaked the same way.
+/// Free everything `loadTheme` handed back.
 pub fn freeLoaded(comptime App: type, gpa: Allocator, loaded: *Loaded(App)) void {
     freeStyles(gpa, &loaded.styles);
     freeVars(App, gpa, &loaded.vars);
     freeGradients(gpa, &loaded.gradients);
 }
 
-/// Deep-copy the string fields of an app's vars struct into `gpa`.
-///
-/// `App` is declared by the CONSUMER, so there is no fixed shape to copy. The
-/// one guarantee that matters is that any `[]const u8` (or optional) it
-/// declares points into the ZON parse result, which dies before this function
-/// returns -- reflection is the only way to follow a struct the library has
-/// never seen.
+/// Deep-copy the string fields of an app's vars struct into `gpa`. `App` is declared by the
+/// CONSUMER, so there is no fixed shape to copy.
 fn dupeVars(comptime App: type, gpa: Allocator, vars: *App) ThemeLoadError!void {
     const info = @typeInfo(App);
     if (info != .@"struct") return;
@@ -1175,8 +1005,8 @@ fn copyStyles(gpa: std.mem.Allocator, src: []const StyleEntry) !StylesSpec {
 // reader with its unknown-key rejection intact.
 // ---------------------------------------------------------------------------
 
-/// One colour as written. Resolution is a separate step because a tuple and a
-/// hex are different literals that mean the same kind of thing.
+/// One colour as written. Resolution is a separate step because a tuple and a hex are
+/// different literals that mean the same kind of thing.
 pub const ColorLit = union(enum) {
     hex: u32,
     rgb: [3]u8,
@@ -1197,8 +1027,8 @@ pub const ColorEntry = union(enum) {
     gradient: GradientLit,
 };
 
-/// A gradient as written. Ends are `ColorLit`, so `.to = .{255,0,0}` works
-/// beside `.to = 0xff0000`.
+/// A gradient as written. Ends are `ColorLit`, so `.to = .{255,0,0}` works beside `.to =
+/// 0xff0000`.
 pub const GradientLit = union(enum) {
     linear: struct { dir: f32 = 90, from: ?ColorLit = null, to: ?ColorLit = null },
     radial: struct {
@@ -1212,9 +1042,7 @@ pub const GradientLit = union(enum) {
 /// A name from the file, with where it came from so a collision can be named.
 pub const NamedColor = struct { name: []const u8, value: ColorEntry };
 
-/// A value in `.vars`. Two shapes only: a number, or a string. Anything else is
-/// refused rather than coerced, because a var stands in for a typed field and
-/// guessing which field was meant is how a layout silently changes.
+/// A value in `.vars`. Two shapes only: a number, or a string.
 pub const VarValue = union(enum) {
     number: f64,
     text: []const u8,
@@ -1222,13 +1050,11 @@ pub const VarValue = union(enum) {
 
 pub const NamedVar = struct { name: []const u8, value: VarValue };
 
-/// A reference, as written: `.accent` or `.text`. `value()` is the name without
-/// the dot. Kept distinct from a string so `"text"` (data) never resolves as a
-/// palette lookup.
+/// A reference, as written: `.accent` or `.text`. `value()` is the name without the dot.
 pub const Ref = struct { name: []const u8 };
 
-/// A style as READ, before resolution. Colours are `.name` references; `size`
-/// and `weight` are a literal or a `.var` name, decided by the token kind.
+/// A style as READ, before resolution. Colours are `.name` references; `size` and `weight`
+/// are a literal or a `.var` name, decided by the token kind.
 pub const StyleFields = struct {
     color: ?Ref = null,
     bg: ?Ref = null,
@@ -1240,8 +1066,8 @@ pub const StyleFields = struct {
     halo: ?Ref = null,
 };
 
-/// A literal or a name, decided by the token kind rather than by guessing:
-/// a number is a number, `.name` is a reference.
+/// A literal or a name, decided by the token kind rather than by guessing: a number is a
+/// number, `.name` is a reference.
 pub const VarOr = union(enum) {
     literal: f64,
     name: []const u8,
@@ -1259,9 +1085,8 @@ pub const OpenTables = struct {
     styles: []NamedStyle = &.{},
 };
 
-/// Read `.colors` and `.gradients` from the token stream.
-///
-/// Returns names owned by `gpa`. Caller frees with `freeOpenTables`.
+/// Read `.colors` and `.gradients` from the token stream. Returns names owned by `gpa`.
+/// Caller frees with `freeOpenTables`.
 pub fn readOpenTables(gpa: Allocator, src: [:0]const u8, diag: *ThemeDiag) ThemeLoadError!OpenTables {
     var ast = std.zig.Ast.parse(gpa, src, .zon) catch return error.OutOfMemory;
     defer ast.deinit(gpa);
@@ -1440,11 +1265,8 @@ const Walker = struct {
         self.advance();
     }
 
-    /// `.vars = .{ .weight = 600, .latin_font = "Roboto Flex" }`.
-    ///
-    /// Only numbers and strings, and the shape decides which -- never a guess.
-    /// A var is a stand-in for one typed field, so a value that is neither is an
-    /// error naming the var, not a coercion.
+    /// `.vars = .{ .weight = 600, .latin_font = "Roboto Flex" }`. Only numbers and strings,
+    /// and the shape decides which -- never a guess.
     fn readVars(self: *Walker, out: *std.ArrayListUnmanaged(NamedVar)) ThemeLoadError!void {
         if (self.tok() != .period) return;
         self.advance();
@@ -1494,9 +1316,6 @@ const Walker = struct {
     }
 
     /// `.styles = .{ .latin = .{ .color = .accent, .weight = .weight } }`.
-    ///
-    /// A value that starts with a dot is a REFERENCE, resolved later; a bare
-    /// string is data (a font family); a number is a literal.
     fn readStyles(self: *Walker, out: *std.ArrayListUnmanaged(NamedStyle)) ThemeLoadError!void {
         if (self.tok() != .period) return;
         self.advance();
@@ -1642,12 +1461,8 @@ const Walker = struct {
         self.skipValue();
     }
 
-    /// `.{ .color = .accent, .blur = 8, .mode = .outer_glow, .offset = .{ 2, 4 } }`
-    ///
-    /// Every field is optional and defaults to `HaloSpec`, so a style may name
-    /// only the colour. The colour stays a ROLE NAME: the halo is resolved
-    /// against the frame's palette at paint time like every other style colour,
-    /// so editing `.colors` moves a shadow with it.
+    /// `.{ .color = .accent, .blur = 8, .mode = .outer_glow, .offset = .{ 2, 4 } }` Every
+    /// field is optional and defaults to `HaloSpec`.
     fn readHalo(self: *Walker) ThemeLoadError!?HaloSpec {
         if (self.tok() != .period or !self.nextIsBrace()) return null;
         self.advance(); // .
@@ -1717,8 +1532,8 @@ const Walker = struct {
         return out;
     }
 
-    /// A bare number. Rejects a `.var` here on purpose: every halo field is
-    /// geometry, and a var that held text would silently become 0.
+    /// A bare number. Rejects a `.var` here on purpose: every halo field is geometry, and a
+    /// var that held text would silently become 0.
     fn readNumber(self: *Walker, what: []const u8) ThemeLoadError!f32 {
         if (self.tok() != .number_literal) {
             self.diag.set("{s} must be a number", .{what});
@@ -1788,8 +1603,8 @@ const Walker = struct {
         return null;
     }
 
-    /// True when the token AFTER the current one is `{`. Used to tell `.{`
-    /// (a struct) from a bare `.name` reference without consuming anything.
+    /// True when the token AFTER the current one is `{`. Used to tell `.{` (a struct) from
+    /// a bare `.name` reference without consuming anything.
     fn nextIsBrace(self: *Walker) bool {
         const tags = self.ast.tokens.items(.tag);
         return self.i + 1 < tags.len and tags[self.i + 1] == .l_brace;
@@ -2075,10 +1890,7 @@ fn isRole(ref: []const u8, extra: []const Theme.CustomColor) bool {
     return false;
 }
 
-/// A name the file gave a `.gradients` entry. Those names are data, not schema,
-/// so a style may paint itself with one (`.color = .gradient1`) and a gradient
-/// may inherit one end from another. Without this a file that defines a gradient
-/// and then uses it is rejected whole, so nothing in it applies at all.
+/// A name the file gave a `.gradients` entry.
 fn isGradientName(
     ref: []const u8,
     grads: []const CustomGradient,
@@ -2092,8 +1904,8 @@ fn styleNamed(styles: []const StyleEntry, n: []const u8) ?StyleEntry {
     return null;
 }
 
-/// A style may name another style as its font. That is a graph, so a cycle is
-/// reachable, and a cycle would be an infinite resolve at paint time.
+/// A style may name another style as its font. That is a graph, so a cycle is reachable,
+/// and a cycle would be an infinite resolve at paint time.
 fn checkStyleCycles(diag: *ThemeDiag, name: []const u8, styles: []const StyleEntry) ThemeLoadError!void {
     for (styles) |start| {
         var cur = start;

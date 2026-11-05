@@ -1,7 +1,5 @@
 //! The gallery, in an SDL3 window. No SDL types here — same composition as
-//! counter_window.zig, just a bigger app.
-//!
-//!   zig build run-gallery-sdl3
+//! counter_window.zig, just a bigger app. zig build run-gallery-sdl3
 
 const std = @import("std");
 const runner = @import("runner");

@@ -1,22 +1,4 @@
 //! Line breaking (UAX #14), Unicode 18.0.0.
-//!
-//! No font data is involved: whether a break may fall between two characters
-//! depends only on their Unicode properties, so this module has no dependency
-//! on Cedar and is tested as pure functions. The caller supplies widths; this
-//! decides where the opportunities are.
-//!
-//! Class data is GENERATED (src/lbtable.zig, 2,947 merged ranges, 49 classes)
-//! and is not hand-maintained. The rule engine below is ported branch for
-//! branch from a Python prototype measured against LineBreakTest.txt; ORDER is
-//! load-bearing, because an identical class pair (`AL AL`) is decided by
-//! whichever rule is reached first.
-//!
-//! CONFORMANCE: 99.78% of LineBreakTest.txt's 19,346 cases (99.83% of
-//! boundaries). The residue is a long tail of individual rules -- 72
-//! boundaries over 16 tags -- not a structural gap. The `_EastAsian` and
-//! `DottedCircle` sub-classes cannot be derived from codepoint properties
-//! (00A7 appears as both AI_EastAsian and AImEastAsian), so what is left of
-//! that cluster needs transcription, not a better table.
 
 const std = @import("std");
 
@@ -3029,8 +3011,8 @@ pub const ranges = [_]Range{
     .{ .first = 0x100000, .last = 0x10FFFD, .class = .xx },
 };
 
-/// Binary search over `ranges`. Unassigned codepoints are `.xx` (LB1 maps
-/// XX to AL); `breakClass` does that mapping, this does not.
+/// Binary search over `ranges`. Unassigned codepoints are `.xx` (LB1 maps XX to AL);
+/// `breakClass` does that mapping, this does not.
 pub fn classOf(cp: u21) BreakClass {
     var lo: usize = 0;
     var hi: usize = ranges.len;
@@ -3048,9 +3030,7 @@ pub fn classOf(cp: u21) BreakClass {
     return .xx;
 }
 
-/// Characters the standard splits out of QU. These are ORIGINAL classes, not
-/// behaviour: a global refinement lost 1.35 points, so the split is applied at
-/// the rule that needs it and nowhere else.
+/// Characters the standard splits out of QU.
 pub const pi = [_]u21{ 0xab, 0x2018, 0x201c }; // « ' "
 pub const pf = [_]u21{ 0xbb, 0x2019, 0x201d }; // » ' "
 
@@ -3059,9 +3039,7 @@ pub fn inSet(cp: u21, set: []const u21) bool {
     return false;
 }
 
-/// LB1: resolve AI/XX/SG to AL, SA to AL (no dictionary breaking). SA that is
-/// Mn/Mc should resolve to CM; without a category table it resolves to AL,
-/// which is the same answer for every non-combining SA.
+/// LB1: resolve AI/XX/SG to AL, SA to AL (no dictionary breaking).
 pub fn resolveClass(cp: u21) BreakClass {
     return switch (classOf(cp)) {
         .sa => if (isCombining(cp)) .cm else .al,
@@ -3074,8 +3052,8 @@ pub fn resolveClass(cp: u21) BreakClass {
     };
 }
 
-/// Does the base character before any run of spaces ending at `i` belong to
-/// `set`? Used where a rule keys on WHICH codepoint it was, not its class.
+/// Does the base character before any run of spaces ending at `i` belong to `set`? Used
+/// where a rule keys on WHICH codepoint it was, not its class.
 fn baseIn(f: []const Folded, i: usize, set: []const u21) bool {
     var j = i;
     while (j > 0) {
@@ -3132,8 +3110,6 @@ pub fn isWide(cp: u21) bool {
 }
 
 /// East_Asian_Width W/F ranges from Unicode 18.0.0 EastAsianWidth.txt.
-/// LB1 resolves AI to ID rather than AL for these, which is the
-/// `_EastAsian` variant the conformance file assumes.
 const wide_ai = [_]CatRange{
     .{ .first = 0x1100, .last = 0x115F },
     .{ .first = 0x231A, .last = 0x231B },
@@ -3263,8 +3239,8 @@ const wide_ai = [_]CatRange{
     .{ .first = 0x30000, .last = 0x3FFFD },
 };
 
-/// Mn/Mc ranges (combining marks) from Unicode 18.0.0
-/// DerivedGeneralCategory.txt. LB1 resolves SA to CM for these.
+/// Mn/Mc ranges (combining marks) from Unicode 18.0.0 DerivedGeneralCategory.txt. LB1
+/// resolves SA to CM for these.
 const combining = [_]CatRange{
     .{ .first = 0x300, .last = 0x36F },
     .{ .first = 0x483, .last = 0x487 },
@@ -3604,9 +3580,7 @@ const combining = [_]CatRange{
     .{ .first = 0xE0100, .last = 0xE01EF },
 };
 
-/// Mn/Mc -- combining marks. LB1 resolves SA to CM for these, which is what
-/// Thai/Lao and Indic vowel signs need: without it every such mark resolves to
-/// AL and a line may break between a letter and its own vowel sign.
+/// Mn/Mc -- combining marks.
 fn isCombining(cp: u21) bool {
     var lo: usize = 0;
     var hi = combining.len;
@@ -3637,8 +3611,8 @@ pub const Folded = struct {
     resolved: BreakClass,
     cp: u21 = 0,
 
-    /// LB9: CM/ZWJ take the class of the preceding character; at the start of
-    /// a line they become AL.
+    /// LB9: CM/ZWJ take the class of the preceding character; at the start of a line they
+    /// become AL.
     pub fn fold(cps: []const u21, out: []Folded) void {
         var i: usize = 0;
         while (i < cps.len) : (i += 1) {
@@ -3674,23 +3648,13 @@ pub fn riRun(f: []const Folded, i: usize) usize {
 }
 
 /// May a line break fall between two resolved classes?
-///
-/// This is the two-argument predicate the previous subset exposed, kept so the
-/// wrapping loop does not have to carry a scan array. It cannot answer the
-/// rules that reach back across a space run (LB14/LB15/LB16/LB8); callers that
-/// need those use `canBreak` with a `Folded` window instead.
 pub fn canBreakPair(prev: BreakClass, cur: BreakClass) bool {
     var f = [_]Folded{ .{ .cls = prev, .resolved = prev }, .{ .cls = cur, .resolved = cur } };
     return canBreak(&f, 1);
 }
 
-/// May a line break fall between `f[i-1]` and `f[i]`?
-/// `cp_cur` is the raw codepoint, needed by the East-Asian / QU-split rules.
-/// Unassigned codepoints that sit inside an Extended_Pictographic block.
-///
-/// Generated from `emoji-data.txt` (Extended_Pictographic) intersected with the
-/// gaps in `LineBreak.txt`. They default to XX, and LB30b distinguishes them
-/// from ordinary unassigned characters, which no class-level rule can do.
+/// May a line break fall between `f[i-1]` and `f[i]`? `cp_cur` is the raw codepoint, needed
+/// by the East-Asian / QU-split rules.
 fn isExtPictReserved(cp: u21) bool {
     for (ext_pict_unassigned) |r| {
         if (cp >= r.first and cp <= r.last) return true;
@@ -3895,9 +3859,8 @@ pub fn canBreak(f: []const Folded, i: usize) bool {
     return true; // LB31
 }
 
-/// The rule engine plus the LB15 quote split, which depends on whether the
-/// quote OPENS or CLOSES -- a fact the resolved class does not carry, so it is
-/// applied here, at the rule, not globally.
+/// The rule engine plus the LB15 quote split, which depends on whether the quote OPENS or
+/// CLOSES.
 fn expected(f: []const Folded, cps: []const u21, i: usize) bool {
     if (f[i - 1].cls == .sp and inSet(cps[i], &pf)) return false;
     if (inSet(cps[i - 1], &pi)) return false;

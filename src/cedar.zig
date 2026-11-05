@@ -1,28 +1,5 @@
-//! TrueType text: glyph metrics and rasterisation, via Cedar.
-//!
-//! Cedar is the font backend inside Elm. It is a separate project, published as
-//! `Inkwell`; that name appears once below, in the import, and nowhere else.
-//!
-//! No C and no stb. Cedar parses the face and rasterises the outline, and the
-//! glyph cache behind `drawText` is the reason the switch pays: stb allocates,
-//! rasterises and frees once per glyph per draw, where a cache hit here is a
-//! hash lookup and a slice into memory the caller already owns.
-//!
-//! There is no embedded font. A `Font` is made from bytes the caller owns and
-//! borrows them for as long as it is used. Every metric and every glyph comes
-//! from that same face, which is why layout and paint agree -- the bug class
-//! this module exists to avoid.
-//!
-//! THE SIZE CONVENTION IS stb's, not the obvious one: text scales by
-//! `size / (ascender - descender)`, NOT `size / units_per_em`. Elm has always
-//! been sized the first way, and Cedar is driven the first way here; the two
-//! differ by ~16% on a real face, so getting it wrong moves every glyph.
-//!
-//! The cache needs storage and Cedar allocates nothing, so the caller supplies
-//! it through `attachCache`. It is deliberately NOT a field of `Font`: the
-//! cache holds slices into that storage, and a `Font` carrying its own arena
-//! would leave those slices pointing into a temporary the moment the value is
-//! returned or copied.
+//! TrueType text: glyph metrics and rasterisation, via Cedar. Cedar is the font backend
+//! inside Elm.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -34,44 +11,36 @@ const linebreak = @import("linebreak.zig");
 // its own file and is tested as pure functions. Re-exported because callers of
 // this module reach for these names here.
 pub const BreakClass = linebreak.BreakClass;
-/// The RESOLVED class (LB1 applied), which is what wrapping wants: a raw table
-/// lookup leaves AI/SA/XX unresolved and every rule keyed on AL then misses.
+/// The RESOLVED class (LB1 applied), which is what wrapping wants: a raw table lookup
+/// leaves AI/SA/XX unresolved and every rule keyed on AL then misses.
 pub const breakClass = linebreak.resolveClass;
 pub const canBreakPair = linebreak.canBreakPair;
 
-/// The resolved `kern` lookup list, which `shape` can be handed instead of
-/// rebuilding it per call.
+/// The resolved `kern` lookup list, which `shape` can be handed instead of rebuilding it
+/// per call.
 pub const Kern = cedar.Kern;
 
 pub const V = struct { ascent: f32, descent: f32, line_gap: f32 };
 
 pub const Font = struct {
-    /// Bytes of scratch a glyph cache needs at the default options. Published
-    /// here so a caller can own the storage without importing Cedar.
+    /// Bytes of scratch a glyph cache needs at the default options. Published here so a
+    /// caller can own the storage without importing Cedar.
     pub const cache_bytes = cedar.Cache.needed(.{});
-    /// Bytes of scratch the codepoint lookup needs, published for the same
-    /// reason: a caller sizes its storage without importing Cedar.
+    /// Bytes of scratch the codepoint lookup needs, published for the same reason: a caller
+    /// sizes its storage without importing Cedar.
     pub const lookup_bytes = cedar.Lookup.needed(.{});
     face: cedar.Font = undefined,
     ok: bool = false,
     /// Cheap identity for caches: which byte buffer this face borrows.
-    ///
-    /// MIXED WITH THE COLLECTION INDEX AND THE VARIATION ID, because neither is
-    /// a property of the bytes. Two faces of one `.ttc` share a pointer and a
-    /// variable face pinned to two weights shares a pointer; a cache keyed on
-    /// the buffer alone would answer one for the other, forever.
     id: usize = 0,
-    /// Which face of a font collection was asked for. Kept so `atCoords` can
-    /// re-open from the same bytes at the same index rather than silently
-    /// dropping to face 0.
+    /// Which face of a font collection was asked for.
     index: u32 = 0,
     dbg: bool = true,
 
     cache: cedar.Cache = undefined,
     cache_ok: bool = false,
-    /// Resolved kern lookups, held BY POINTER: `Kern` carries a `Font`, and a
-    /// `Font` carrying a `Kern` by value is an infinite type. Null means every
-    /// shape call re-resolves -- correct, just repeated.
+    /// Resolved kern lookups, held BY POINTER: `Kern` carries a `Font`, and a `Font`
+    /// carrying a `Kern` by value is an infinite type.
     kern: ?*Kern = null,
 
     lookup: cedar.Lookup = undefined,
@@ -84,11 +53,6 @@ pub const Font = struct {
     }
 
     /// The cache key for the CURRENT instance.
-    ///
-    /// `id` alone identifies the bytes; this folds in the collection index and
-    /// Cedar's variation id so a face pinned to a different point in its design
-    /// space keys differently. Nothing that caches a glyph may key on
-    /// `fingerprint` instead -- that is the bug this exists to prevent.
     pub fn instanceKey(self: *const Font) usize {
         if (!self.ok) return 0;
         const v: usize = @intCast(self.face.variationId());
@@ -96,19 +60,6 @@ pub const Font = struct {
     }
 
     /// Whether a real typeface is attached.
-    ///
-    /// A caller that sees `false` has no glyphs to draw with, which is why the
-    /// renderer keeps a face of its own for exactly this case (`elmfont`). The
-    /// question is asked at the seam rather than guessed at the edge: `Font`
-    /// with no face is a legal value, so "is there a face" has to be answerable
-    /// without trying to measure something and finding out it measured zero.
-    /// Family name from the face's own `name` table, e.g. "DejaVu Sans".
-    ///
-    /// This is the string a theme file's font name is matched against, so it
-    /// has to come from the face rather than from the filename: `Inter-Regular.otf`
-    /// and `inter_v2.ttf` are the same family, and a file merely CALLED
-    /// "Inter.ttf" is not necessarily Inter. Null when the face carries no
-    /// record, which is decoration like kerning, not a load failure.
     pub fn family(self: *const Font, out: []u8) ?[]const u8 {
         if (!self.ok) return null;
         return self.face.family(out);
@@ -124,10 +75,7 @@ pub const Font = struct {
         return self.ok;
     }
 
-    /// Does this face actually map `cp`? A face can be perfectly valid and
-    /// still have no Latin: a Noto Arabic or CJK subset parses fine and paints
-    /// nothing for "Hamburgefonstiv". Tests that assert on specific glyphs need
-    /// to ask this rather than assume the system's first font will do.
+    /// Does this face actually map `cp`?
     pub fn hasGlyph(self: *const Font, cp: u21) bool {
         if (!self.ok) return false;
         // gid 0 is `.notdef`, and `glyphIndex` reports a MISSING character as 0
@@ -142,13 +90,6 @@ pub const Font = struct {
     }
 
     /// The Nth face of a font collection (`.ttc`).
-    ///
-    /// A collection is one file holding several faces, and on a stock system it
-    /// is frequently the ONLY place a CJK typeface lives -- so a loader that
-    /// accepts `.ttc` and then always reads face 0 hands back the wrong family
-    /// and nothing says so. A non-collection answers face 0 from any index
-    /// rather than refusing, because a caller walking faces has no way to know
-    /// which kind of file it is holding.
     pub fn initIndex(bytes: []const u8, index: u32) Font {
         var f: Font = .{};
         if (bytes.len == 0) return f;
@@ -160,12 +101,6 @@ pub const Font = struct {
     }
 
     /// One axis of the design space, e.g. `wght` from 100 to 900.
-    ///
-    /// The tag is Cedar's packed four-byte form, and `tagOf` turns "wght" into
-    /// it -- a caller should not be writing integer literals to name an axis.
-    /// Cedar keeps `Axis` in a module `Inkwell` does not re-export, so this is
-    /// the same four fields restated at the seam rather than reaching through
-    /// the backend's internals.
     pub const Axis = struct {
         tag: u32,
         min: f32,
@@ -179,8 +114,8 @@ pub const Font = struct {
             (@as(u32, name[2]) << 8) | @as(u32, name[3]);
     }
 
-    /// How many variation axes the face declares. Zero for a static face,
-    /// which is the ordinary case and not a failure.
+    /// How many variation axes the face declares. Zero for a static face, which is the
+    /// ordinary case and not a failure.
     pub fn axisCount(self: *const Font) usize {
         if (!self.ok) return 0;
         return self.face.axisCount();
@@ -193,18 +128,6 @@ pub const Font = struct {
     }
 
     /// This face pinned to a point in its design space.
-    ///
-    /// `user` is in axis order and in USER units -- a `wght` of 700, not a
-    /// normalised -1..1 -- and Cedar normalises it, through `avar` where the
-    /// face has one. Missing values stay at the axis default, so varying one
-    /// axis of a two-axis face is legal.
-    ///
-    /// The returned `Font` BORROWS THE SAME BYTES and answers a different
-    /// `instanceKey`, which is the whole contract: a cache shared between the
-    /// two serves each its own glyphs. Caches and kerns are deliberately NOT
-    /// copied across -- a cache holds slices into caller memory and a second
-    /// owner of the same slice would free or truncate it under the first.
-    /// Re-attach them (`attachCache` and friends) on the instance that draws.
     pub fn atCoords(self: *const Font, user: []const f32) Font {
         if (!self.ok) return .{};
         var f = self.*;
@@ -215,8 +138,8 @@ pub const Font = struct {
         return f;
     }
 
-    /// One layer of a colour glyph: a glyph id and the palette entry it takes
-    /// its colour from.
+    /// One layer of a colour glyph: a glyph id and the palette entry it takes its colour
+    /// from.
     pub const ColorLayer = struct {
         glyph: u16,
         palette_index: u16,
@@ -229,20 +152,14 @@ pub const Font = struct {
         a: u8,
     };
 
-    /// Whether the face carries colour glyphs at all -- what a caller asks
-    /// before deciding to check per glyph.
+    /// Whether the face carries colour glyphs at all -- what a caller asks before deciding
+    /// to check per glyph.
     pub fn hasColor(self: *const Font) bool {
         if (!self.ok) return false;
         return self.face.hasColor();
     }
 
     /// The layers of a colour glyph, or null for "draw this normally".
-    ///
-    /// Null is the ordinary answer, not an error: in every real emoji face most
-    /// glyphs are monochrome, and a caller that treated null as failure would
-    /// draw nothing for the alphabet. `out` is caller storage so this allocates
-    /// nothing; a glyph with more layers than `out` holds reports null, because
-    /// half a glyph is not the glyph.
     pub fn colorLayers(self: *const Font, gid: u16, out: []ColorLayer) ?[]ColorLayer {
         if (!self.ok) return null;
         // Cedar's `Layer` and this one are the same two u16s in the same order,
@@ -256,29 +173,21 @@ pub const Font = struct {
         return out[0..got.len];
     }
 
-    /// Largest layer stack accepted. COLRv0 glyphs are a handful of layers;
-    /// the cap exists so the scratch above is fixed-size and this stays
-    /// allocation-free on a per-glyph path.
+    /// Largest layer stack accepted.
     pub const max_layers = 32;
 
-    /// A colour from the face's palette. Null when the face has no CPAL, or
-    /// when that palette entry does not exist -- a layer naming an entry the
-    /// palette lacks is a font bug, and the caller decides what to paint.
+    /// A colour from the face's palette.
     pub fn paletteColor(self: *const Font, palette: u16, index: u16) ?Rgba {
         if (!self.ok) return null;
         const c = self.face.paletteColor(palette, index) orelse return null;
         return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
     }
 
-    /// Point the glyph cache at caller-owned storage. Must be called after the
-    /// `Font` is in its final home, because the cache keeps slices into `mem`.
-    /// A font with no cache still measures; it just paints nothing.
-    /// Storage for the kern cache, sized so callers need not import Cedar.
+    /// Point the glyph cache at caller-owned storage. Must be called after the `Font` is in
+    /// its final home, because the cache keeps slices into `mem`.
     pub const kern_bytes = Kern.needed(.{});
 
-    /// Point this face at a resolved kern cache. `slot` is the caller's and
-    /// must outlive the face, the same rule as the mask cache: a value copy of
-    /// `Font` would otherwise point into a temporary.
+    /// Point this face at a resolved kern cache.
     pub fn attachKern(self: *Font, slot: *Kern, mem: []align(8) u8) void {
         if (!self.ok) return;
         slot.* = Kern.init(mem, self.face, .{});
@@ -293,9 +202,7 @@ pub const Font = struct {
         self.cache_ok = true;
     }
 
-    /// Point the codepoint lookup at caller-owned storage. Same contract as
-    /// `attachCache`, including the "attach after the Font is in its final
-    /// home" rule, because the lookup keeps a slice into `mem` too.
+    /// Point the codepoint lookup at caller-owned storage.
     pub fn attachLookup(self: *Font, mem: []align(8) u8) void {
         if (!self.ok) return;
         self.lookup = cedar.Lookup.init(mem, .{}) catch return;
@@ -308,15 +215,8 @@ pub const Font = struct {
         return self.lookup.stats;
     }
 
-    /// Resolve a codepoint to its glyph and advance, through the lookup when
-    /// one is attached. A hit costs a probe; a miss costs the cmap search plus
-    /// the hmtx read, which is the per-glyph-per-draw cost this exists to
-    /// remove. Answers gid 0 with a zero advance whenever the face cannot,
-    /// which is what every caller did with the error anyway.
-    ///
-    /// The advance here is the RESOLVED one, so a composite that borrows its
-    /// metrics through USE_MY_METRICS reports the component's advance rather
-    /// than a stale copy from hmtx.
+    /// Resolve a codepoint to its glyph and advance, through the lookup when one is
+    /// attached.
     fn glyphFor(self: *const Font, cp: u21) cedar.Lookup.Entry {
         if (self.lookup_ok) {
             const mut = @constCast(self);
@@ -327,37 +227,22 @@ pub const Font = struct {
         return .{ .gid = gid, .advance = hm.advance };
     }
 
-    /// Counters for the glyph cache, or null when no storage is attached.
-    ///
-    /// This exists so a test can tell a HIT from a re-rasterisation. A picture
-    /// that looks right says nothing about which path produced it -- both
-    /// paths draw the same glyph -- so the counters are the only evidence that
-    /// the cache is doing anything at all.
+    /// Counters for the glyph cache, or null when no storage is attached. This exists so a
+    /// test can tell a HIT from a re-rasterisation.
     pub fn cacheStats(self: *const Font) ?cedar.Cache.Stats {
         if (!self.cache_ok) return null;
         return self.cache.stats;
     }
 
     /// Pixels per font unit. `size` names the EM SQUARE.
-    ///
-    /// The rasteriser multiplies raw font units by this and never reads
-    /// `units_per_em`, so the divisor must be the em. Using the hhea span
-    /// (asc - desc) instead is near 1:1 for DejaVu but 1.448:1 for a typical
-    /// CJK/Arabic face, which drew every non-Latin glyph at 69% of its size.
     fn scaleFor(self: *const Font, size: f32) f32 {
         const upem = self.face.units_per_em;
         if (upem == 0) return 1;
         return size / @as(f32, @floatFromInt(upem));
     }
 
-    /// The line box for `size`, normalised so `ascent + descent == size`.
-    ///
-    /// `size` names the EM, and the em is what a caller's box is. Scaling the
-    /// raw hhea numbers instead gives `asc - desc` = 1448 units on a CJK face
-    /// (asc 1160, desc -288, upem 1000), a 1.448x span: the box overshoots, the
-    /// baseline sits ~11px too low at size 30, and every glyph is cut off at
-    /// the bottom of its own element. Normalising keeps the face's PROPORTIONS
-    /// -- ascent still dominates -- while keeping the total equal to the em.
+    /// The line box for `size`, normalised so `ascent + descent == size`. `size` names the
+    /// EM, and the em is what a caller's box is.
     pub fn verticalMetrics(self: *const Font, size: f32) V {
         if (!self.ok) return .{ .ascent = size, .descent = 0, .line_gap = 0 };
         const v = self.face.vMetrics();
@@ -374,13 +259,8 @@ pub const Font = struct {
         };
     }
 
-    /// A laid-out window of text: glyph ids and their advances, in font units,
-    /// with pair kerning already applied.
-    ///
-    /// Kerning is Cedar's business. Nothing above this line asks which table
-    /// answered, and nothing above it runs a pair loop -- that loop is what
-    /// made the old path apply a pair twice, once to place the glyph and once
-    /// in the advance to the next one.
+    /// A laid-out window of text: glyph ids and their advances, in font units, with pair
+    /// kerning already applied. Kerning is Cedar's business.
     const run_max = 128;
 
     const Run = struct {
@@ -389,12 +269,8 @@ pub const Font = struct {
         len: usize = 0,
     };
 
-    /// True when the run is Arabic script and needs joining forms.
-    ///
-    /// The Arabic and Arabic Supplement blocks plus the presentation forms.
-    /// A run is treated as Arabic if ANY character falls in them, because a
-    /// mixed digit/letter run in Arabic text still joins; the digits simply
-    /// carry no joining behaviour of their own.
+    /// True when the run is Arabic script and needs joining forms. The Arabic and Arabic
+    /// Supplement blocks plus the presentation forms.
     fn isArabic(cps: []const u21) bool {
         for (cps) |cp| {
             switch (cp) {
@@ -410,20 +286,16 @@ pub const Font = struct {
         return false;
     }
 
-    /// Advance for one glyph id, in font units. The fallback when the generic
-    /// shaper declines a run, so a glyph still moves the pen.
+    /// Advance for one glyph id, in font units. The fallback when the generic shaper
+    /// declines a run, so a glyph still moves the pen.
     fn advanceOfGid(face: *const cedar.Font, gid: u16) i32 {
         if (face.hMetricsResolved(gid)) |m| return @as(i32, m.advance) else |_| {}
         if (face.hMetrics(gid)) |m| return @as(i32, m.advance) else |_| {}
         return 0;
     }
 
-    /// Lay out from `at`, stopping at a newline, the end of the text, or the
-    /// window. Returns the byte to resume from.
-    ///
-    /// Substitution runs, so `liga` may re-spell "fi" into one glyph -- the
-    /// advances that come back already account for it, which is the reason
-    /// measurement and drawing share this one call.
+    /// Lay out from `at`, stopping at a newline, the end of the text, or the window.
+    /// Returns the byte to resume from.
     fn layoutRun(self: *const Font, bytes: []const u8, at: usize, run: *Run) usize {
         var cps: [run_max]u21 = undefined;
         var i = at;
@@ -526,9 +398,8 @@ pub const Font = struct {
         return w;
     }
 
-    /// Codepoints in `bytes[start..end]`, NOT counting a trailing newline:
-    /// `layoutRun` consumes one but never produces a glyph for it, so counting
-    /// it would make every line that ends in a break look like a collapsed run.
+    /// Codepoints in `bytes[start..end]`, NOT counting a trailing newline: `layoutRun`
+    /// consumes one but never produces a glyph for it.
     fn cpsIn(bytes: []const u8, start: usize, end: usize) usize {
         var i = start;
         var n: usize = 0;
@@ -537,15 +408,8 @@ pub const Font = struct {
         return n;
     }
 
-    /// Where a caret sitting before byte `index` belongs, as a width from the
-    /// start of `bytes`. `index` is clamped, and 0 answers 0.
-    ///
-    /// Deliberately the same advance sum `measure` walks, so a caret and the
-    /// glyph beside it cannot disagree. Substitution can collapse a cluster
-    /// ("fi" into one glyph) and `shape` reports no codepoint-to-glyph mapping,
-    /// so a boundary INSIDE a collapsed run has no exact answer; that run falls
-    /// back to measuring its prefix, which is the definition of the position
-    /// even though it re-shapes. The ordinary case is one pass, no allocation.
+    /// Where a caret sitting before byte `index` belongs, as a width from the start of
+    /// `bytes`. `index` is clamped, and 0 answers 0.
     pub fn advanceTo(self: *const Font, bytes: []const u8, size: f32, index: usize) f32 {
         const target = @min(index, bytes.len);
         if (target == 0 or !self.ok) return 0;
@@ -576,10 +440,7 @@ pub const Font = struct {
         return w;
     }
 
-    /// The byte boundary nearest `x` — what a click at `x` puts the caret
-    /// before. Snaps to the CLOSER boundary, so clicking the right half of a
-    /// glyph puts the caret after it. Clamps outside the text instead of
-    /// indexing past either end.
+    /// The byte boundary nearest `x` — what a click at `x` puts the caret before.
     pub fn hitText(self: *const Font, bytes: []const u8, size: f32, x: f32) usize {
         if (bytes.len == 0 or !self.ok or x <= 0) return 0;
         const s = self.scaleFor(size);
@@ -622,14 +483,8 @@ pub const Font = struct {
         return bytes.len;
     }
 
-    /// Greedy line breaking -- the same loop the stb path ran, because a line
-    /// count that disagrees by one moves every border and shadow below it. The
-    /// quirks are deliberate: the advance is added BEFORE the overflow test,
-    /// and a no-space break resumes past the character that overflowed.
-    ///
-    /// Breaks are opportunities, not spaces. Latin only ever has one kind (the
-    /// space); CJK has one between most characters, which is why a space-only
-    /// rule broke Japanese badly rather than not at all. See `BreakClass`.
+    /// Greedy line breaking -- the same loop the stb path ran, because a line count that
+    /// disagrees by one moves every border and shadow below it.
     pub fn wrapLines(self: *const Font, bytes: []const u8, size: f32, max_w: f32, out: [][]const u8) usize {
         if (out.len == 0) return 0;
         const s = if (self.ok) self.scaleFor(size) else 1.0;
@@ -705,11 +560,7 @@ pub const Font = struct {
         }
     }
 
-    /// Draw a UTF-8 run. A kern pair is applied exactly once per gap, to place
-    /// the glyph, which is what `advanceOf` does -- so a drawn run is as wide
-    /// as its measure. The stb path this replaced applied the pair twice, once
-    /// here and again in the advance to the next glyph; that drifted steadily
-    /// wider and read as individual letters landing a pixel late.
+    /// Draw a UTF-8 run.
     pub fn drawText(
         self: *const Font,
         px: []u8,
@@ -793,8 +644,8 @@ fn cpOf(cp: u32) u21 {
     return if (cp <= 0x10FFFF) @intCast(cp) else 0xFFFD;
 }
 
-/// One codepoint from UTF-8. Malformed input yields U+FFFD and consumes one
-/// byte, so a bad string degrades to boxes instead of a crash or a loop.
+/// One codepoint from UTF-8. Malformed input yields U+FFFD and consumes one byte, so a bad
+/// string degrades to boxes instead of a crash or a loop.
 pub fn decode(bytes: []const u8, i: *usize) u32 {
     const b = bytes[i.*];
     if (b < 0x80) {
@@ -827,11 +678,7 @@ pub fn decode(bytes: []const u8, i: *usize) u32 {
     return cp;
 }
 
-/// Blend one glyph pixel. Coverage is scaled by the colour's own alpha, and the
-/// destination alpha is composited the way `Canvas.blendCoverage` does it --
-/// leaving it alone wrote correct colour at alpha 0 onto a cleared canvas,
-/// which `encodePng` (colour type 6) then exported as a hole. Two text paths
-/// disagreeing about alpha is worse than either choice made consistently.
+/// Blend one glyph pixel.
 fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8) void {
     if (x < 0 or y < 0) return;
     const ux: u32 = @intCast(x);
@@ -865,23 +712,11 @@ fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8)
 
 const testing = std.testing;
 
-/// The one face the tests use, and where to get it.
-///
-/// Deliberately NOT a search across whatever the machine happens to have. A test
-/// that asserts different things on different machines is not much of a test,
-/// and a search that silently picks the wrong family is worse than none: this
-/// one used to return on its FIRST iteration whatever the result -- there was no
-/// `else` on the loop -- so it queried DejaVu and gave up, and every caller
-/// skipped on a box with no DejaVu while three more paths sat unread.
-///
-/// So: name one face, and if it is not there, skip. Downloading it is a small
-/// price for a test that means the same thing everywhere.
+/// The one face the tests use, and where to get it. Deliberately NOT a search across
+/// whatever the machine happens to have.
 const fixture_face = "/usr/share/fonts/dejavu/DejaVuSans.ttf";
 
-/// A SECOND face, used where the test needs a real font and the box has no
-/// DejaVu. Kept separate from `fixture_face` so a machine WITH DejaVu still
-/// tests the same thing everywhere; `anyFace` prefers the first and falls
-/// back here rather than skipping a test that could have run.
+/// A SECOND face, used where the test needs a real font and the box has no DejaVu.
 const fixture_face_alt = "/root/NovusGroteskVF-cff2.otf.ttf";
 
 fn anyFace(bytes_out: []u8) ?[]const u8 {

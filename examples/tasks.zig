@@ -1,9 +1,5 @@
-//! A complete app, written the way user code is meant to look: a model, a
-//! message type, one update, one view. No allocators, no pointers to free, no
-//! backend, no platform.
-//!
-//!   zig build run-tasks          headless -> tasks_0.png, tasks_1.png
-//!   zig build run-tasks-sdl3   the same app in an SDL3 window
+//! A complete app, written the way user code is meant to look: a model, a message type, one
+//! update, one view.
 
 const std = @import("std");
 const elmz = @import("elmz");

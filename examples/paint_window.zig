@@ -1,15 +1,4 @@
-//! The fills demo in a real window — and nothing else.
-//!
-//! No SDL in this file. It composes the app (`paint.zig`, where `view` lives),
-//! a rasterizer (`software`), and a platform (`platform_sdl3`), then hands the
-//! loop to `runner`. Swapping SDL for a wl_shm backend later is a one-line
-//! change here.
-//!
-//! What to look for on screen: the borders in the second row are the honest
-//! test. A square gradient border cannot be four 1px quads, so it is stroked
-//! through the SDF against the element rect and ramps around the whole outline.
-//!
-//!   zig build run-paint-sdl3      (needs libsdl3-dev)
+//! The fills demo in a real window — and nothing else. No SDL in this file.
 
 const std = @import("std");
 const runner = @import("runner");

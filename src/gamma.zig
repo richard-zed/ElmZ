@@ -1,23 +1,9 @@
-//! sRGB transfer, so coverage is blended in light rather than in bytes.
-//!
-//! Interpolating encoded channels is not the same operation as combining
-//! light. Half coverage of white over black gives 127 when the bytes are
-//! interpolated and 188 when the light is combined. The error is proportional
-//! to how fractional the coverage is, so it is ZERO on the flat interior of a
-//! glyph and largest at the half-covered rim -- the one place a UI has edges
-//! by definition. That is the whole of "light text on a dark background looks
-//! thin and grubby": the rim is too dark, so the stroke reads thinner than the
-//! coverage says it is.
-//!
-//! Both directions are tables. A `pow` per pixel would be honest and slower
-//! than the rest of the rasteriser put together; 256 entries up and 4096 down
-//! is within a code value of the exact answer everywhere.
+//! sRGB transfer, so coverage is blended in light rather than in bytes. Interpolating
+//! encoded channels is not the same operation as combining light.
 
 const std = @import("std");
 
-/// Resolution of the linear -> encoded table. An 8-bit index would quantise
-/// the dark end badly: linear steps of 1/255 near zero are visible bands
-/// after encoding, because the curve is steepest there.
+/// Resolution of the linear -> encoded table.
 pub const steps = 4096;
 
 /// Encoded byte -> linear 0..1. Exact, not approximate.
@@ -55,9 +41,7 @@ pub inline fn encode(v: f32) u8 {
     return to_srgb[i];
 }
 
-/// Linear, fixed point, 24 bits. Wide on purpose: at 16 bits the rounding to
-/// the encode grid disagreed with the float path on 0.32% of combinations by
-/// one code value, and "only one" is still a rebaseline.
+/// Linear, fixed point, 24 bits.
 const q = 1 << 24;
 pub const linear24: [256]u32 = blk: {
     @setEvalBranchQuota(2_000_000);
@@ -71,13 +55,6 @@ pub const linear24: [256]u32 = blk: {
 };
 
 /// One channel of src-over, in linear light, in fixed point.
-///
-/// The float version this replaces measured 10.57 ns/px against 4.39 for plain
-/// encoded blending -- 2.41x -- because it did two table loads, a multiply, a
-/// round, a clamp and a third indexed load per channel. Integer arithmetic
-/// gives the same answer without the float conversions. `blendFloat` stays as
-/// the oracle: the test below walks all 256 dsts, 256 srcs and a spread of
-/// alphas and requires the two to agree exactly.
 pub inline fn blend(dst: u8, src: u8, a: f32) u8 {
     if (a <= 0) return dst;
     if (a >= 1.0) return src;

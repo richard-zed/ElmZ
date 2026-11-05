@@ -1,11 +1,4 @@
-//! The clicks app in a real window — and nothing else.
-//!
-//! No SDL in this file. It composes the app (`clicks.zig`, where
-//! `update`/`view` live), a rasterizer (`software`), and a platform
-//! (`platform_sdl3`), then hands the loop to `runner`. Swapping SDL for a
-//! wl_shm backend later is a one-line change here.
-//!
-//!   zig build run-clicks-sdl3      (needs libsdl3-dev)
+//! The clicks app in a real window — and nothing else. No SDL in this file.
 
 const std = @import("std");
 const runner = @import("runner");

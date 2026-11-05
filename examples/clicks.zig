@@ -1,14 +1,5 @@
-//! Click ownership, with the pointer states that make it visible.
-//!
-//! Hover a button and it lights up. Press it and it *stays* lit, even when the
-//! cursor leaves it — because the press is owned by the region it started on.
-//! While that press is in flight nothing else lights up, so dragging onto the
-//! other button shows a lit A and a cold B: the picture is the rule. Release
-//! over B and nothing fires; release back on A and A fires.
-//!
-//! Headless (`zig build run-clicks`): drives the cases, asserts both the
-//! outcome and the painted colours, writes clicks.png.
-//! Windowed: `zig build run-clicks-sdl3` (needs libsdl3-dev).
+//! Click ownership, with the pointer states that make it visible. Hover a button and it
+//! lights up.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -283,9 +274,7 @@ pub fn main(init: std.process.Init) !void {
     if (failed != 0) return error.ClickSemantics;
 }
 
-/// Lowest drawn edge. `Primitive.clipOf` is the scissor rect, not the shape,
-/// so it says nothing about where ink landed -- and at the root it is the
-/// unbounded sentinel.
+/// Lowest drawn edge.
 fn lowestEdge(prims: []const elmz.Primitive) f32 {
     var maxy: f32 = 0;
     for (prims) |pr| switch (pr) {
@@ -302,10 +291,8 @@ fn lowestEdge(prims: []const elmz.Primitive) f32 {
     return maxy;
 }
 
-/// Puts the runtime into the state a case describes: an optional press (taken
-/// through the real hit test, never a forged rect), then the cursor position,
-/// then a repaint. The press survives the frame it was taken against, which is
-/// the whole point of `Press` copying its hit out.
+/// Puts the runtime into the state a case describes: an optional press (taken through the
+/// real hit test, never a forged rect), then the cursor position.
 fn stage(
     rt: *elmz.Runtime(Model, Msg),
     canvas: *software.Canvas,

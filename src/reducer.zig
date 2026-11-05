@@ -1,28 +1,5 @@
-//! Text editing, as a pure state-to-state function.
-//!
-//! The Model owns the text, the caret and the selection. This file owns the
-//! RULES that move them: what backspace does to a selection, where the caret
-//! lands after a vertical move, which byte a "left arrow" jumps to. Those rules
-//! are identical in every text box ever written, and the reason to centralise
-//! them is not tidiness -- it is that leaving them to each app means the same
-//! off-by-one is written N times and fixed zero times.
-//!
-//! Everything here is a plain function over `*TextEdit`. No frame, no widget,
-//! no renderer, no font. That is what makes it testable without a window, and
-//! it is why the widget can be a thin painter over this.
-//!
-//! WHY THE CALLER PASSES AN ALLOCATOR: an edit produces a new string, and the
-//! allocator must be one that OUTLIVES THE FRAME. `Model.name.value` is read
-//! every frame: if it pointed into `Ui`'s per-frame arena it would dangle the
-//! moment the next frame began, and the symptom would be text that mutates
-//! while the user is not typing. Pass the app's allocator, or a Model-owned
-//! arena that is reset only when the document itself is replaced.
-//!
-//! BYTES, NOT GRAPHEMES: every boundary below is a UTF-8 codepoint boundary, so
-//! an edit can never split a multi-byte character. A combining sequence (`e`
-//! followed by U+0301) is still two codepoints and backspace removes the accent
-//! first. Grapheme clustering needs the Unicode tables; it is a real gap and it
-//! is stated rather than hidden.
+//! Text editing, as a pure state-to-state function. The Model owns the text, the caret and
+//! the selection.
 
 const std = @import("std");
 const keys = @import("keys.zig");
@@ -30,21 +7,16 @@ const keys = @import("keys.zig");
 const Allocator = std.mem.Allocator;
 const Key = keys.Key;
 
-/// A selection is an anchor plus wherever the caret is now.
-///
-/// The head is NOT stored: it is `caret`. Storing both invites the two to
-/// disagree, and every operation here would then have to pick a winner.
+/// A selection is an anchor plus wherever the caret is now. The head is NOT stored: it is
+/// `caret`.
 pub const TextEdit = struct {
     value: []const u8 = "",
     /// Byte offset of the insertion point, always on a codepoint boundary.
     caret: usize = 0,
-    /// Where the selection started. Null means "no selection"; equal to the
-    /// caret also means no selection, so a click-then-click never leaves a
-    /// zero-width range behind.
+    /// Where the selection started.
     anchor: ?usize = null,
-    /// Column to aim at for a run of vertical moves, so that driving the caret
-    /// down through short lines and back does not walk it leftwards. Cleared by
-    /// anything horizontal or by an edit.
+    /// Column to aim at for a run of vertical moves, so that driving the caret down through
+    /// short lines and back does not walk it leftwards.
     goal: ?usize = null,
 
     pub const Range = struct { start: usize, end: usize };
@@ -65,10 +37,6 @@ pub const TextEdit = struct {
     }
 
     /// Clamp the caret into the string and onto a codepoint boundary.
-    ///
-    /// Worth calling whenever `value` is set from outside -- a restored draft,
-    /// a load, a programmatic set -- because a caret left mid-codepoint makes
-    /// every subsequent edit corrupt the text rather than merely look wrong.
     pub fn normalize(self: *TextEdit) void {
         if (self.caret > self.value.len) self.caret = self.value.len;
         while (self.caret > 0 and self.caret < self.value.len and isCont(self.value[self.caret])) {
@@ -87,8 +55,8 @@ pub const TextEdit = struct {
         self.goal = null;
     }
 
-    /// Put the caret somewhere. `extend` is shift: keep the anchor so a
-    /// selection grows or shrinks, otherwise drop it.
+    /// Put the caret somewhere. `extend` is shift: keep the anchor so a selection grows or
+    /// shrinks, otherwise drop it.
     pub fn moveTo(self: *TextEdit, pos: usize, extend: bool) bool {
         const p = @min(pos, self.value.len);
         if (p == self.caret and (extend or self.anchor == null or self.anchor.? == p)) return false;
@@ -103,10 +71,6 @@ pub const TextEdit = struct {
     }
 
     /// The whole of the editing surface: one key in, a changed flag out.
-    ///
-    /// Returns FALSE for any key it does not own, which is not a failure --
-    /// it is how Tab reaches the focus ring and Escape reaches the app. The
-    /// app's hook is `if (m.field.handleKey(gpa, k)) return .edited;`.
     pub fn handleKey(self: *TextEdit, gpa: Allocator, k: Key) bool {
         const shift = k.mods.shift;
         const word = k.mods.ctrl;
@@ -157,8 +121,8 @@ pub const TextEdit = struct {
         return false;
     }
 
-    /// Typed text, from the text-input event. Never from a key: a dead key, a
-    /// compose sequence and an IME commit have no single key to derive from.
+    /// Typed text, from the text-input event. Never from a key: a dead key, a compose
+    /// sequence and an IME commit have no single key to derive from.
     pub fn typeBytes(self: *TextEdit, gpa: Allocator, bytes: []const u8) bool {
         if (bytes.len == 0) return false;
         // A carriage return is dropped: some backends report Enter as "\r",
@@ -200,18 +164,14 @@ pub const TextEdit = struct {
         return self.splice(gpa, at, at, bytes);
     }
 
-    /// Delete the selection without inserting anything. Cut is this plus the
-    /// clipboard write the app does.
+    /// Delete the selection without inserting anything. Cut is this plus the clipboard
+    /// write the app does.
     pub fn deleteSelection(self: *TextEdit, gpa: Allocator) bool {
         const r = self.selection() orelse return false;
         return self.splice(gpa, r.start, r.end, "");
     }
 
     /// Replace bytes `start..end` with `ins`, then place the caret after it.
-    ///
-    /// The single point where the string is rebuilt, so every operation above
-    /// inherits the same caret and selection rules instead of each one setting
-    /// them slightly differently.
     fn splice(self: *TextEdit, gpa: Allocator, start: usize, end: usize, ins: []const u8) bool {
         if (start == end and ins.len == 0) return false;
         const s = @min(start, self.value.len);
@@ -228,11 +188,8 @@ pub const TextEdit = struct {
         return true;
     }
 
-    /// Move one logical line up or down, keeping the column goal.
-    ///
-    /// Logical lines, not visual ones: wrapping is a font question and this
-    /// file has no font. A wrapped field should call `moveVerticalIn` with the
-    /// line starts the renderer gave it.
+    /// Move one logical line up or down, keeping the column goal. Logical lines, not visual
+    /// ones: wrapping is a font question and this file has no font.
     pub fn moveVertical(self: *TextEdit, dir: i2, extend: bool) bool {
         if (dir < 0) {
             const cur = lineStart(self.value, self.caret);
@@ -246,8 +203,8 @@ pub const TextEdit = struct {
         return self.moveToColumn(next, lineEnd(self.value, next) - next, extend);
     }
 
-    /// The same move against an arbitrary line table, for a wrapped field.
-    /// `lines` is sorted line-start offsets and must begin with 0.
+    /// The same move against an arbitrary line table, for a wrapped field. `lines` is
+    /// sorted line-start offsets and must begin with 0.
     pub fn moveVerticalIn(self: *TextEdit, lines: []const usize, dir: i2, extend: bool) bool {
         if (lines.len == 0) return self.moveVertical(dir, extend);
         const idx = lineOf(lines, self.caret);

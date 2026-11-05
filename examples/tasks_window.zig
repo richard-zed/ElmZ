@@ -1,7 +1,5 @@
-//! The tasks app in a window. That is the whole file: the app supplies its own
-//! size, background and runtime; this adds a platform.
-//!
-//!   zig build run-tasks-sdl3      (needs SDL3)
+//! The tasks app in a window. That is the whole file: the app supplies its own size,
+//! background and runtime; this adds a platform.
 
 const std = @import("std");
 const runner = @import("runner");

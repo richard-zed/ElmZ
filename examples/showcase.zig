@@ -1,21 +1,5 @@
-//! A whole screen: layout, panels, gradients, live theme, hit regions, keys,
-//! a disabled control, and the error band.
-//!
-//! Headless: `zig build run-showcase` writes three PNGs.
-//!
-//!    showcase.png        the screen as it renders from the compiled defaults
-//!    showcase-hover.png  the same screen with the pointer parked dead-centre
-//!                        on a keyed button -- the hover fill is DERIVED from
-//!                        that position, not set on the element
-//!    showcase-error.png  ONLY when a theme file exists and will not parse: the
-//!                        band carrying the loader's own file:line diagnostic
-//!
-//! Both frames come from the same chain the runner resolves -- `theme.zon` over
-//! `theme.defaults.zon` over the library's palette -- so a recoloured screen
-//! here is a recoloured screen in a window. No live `theme.zon` ships: copy the
-//! defaults beside the binary and edit the copy.
-//!
-//!     cp zig-out/bin/theme.defaults.zon zig-out/bin/theme.zon
+//! A whole screen: layout, panels, gradients, live theme, hit regions, keys, a disabled
+//! control, and the error band.
 
 const std = @import("std");
 const elmz = @import("elmz");
@@ -68,8 +52,8 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
     return .{};
 }
 
-/// A nav tab is a text element with a fill and padding -- not a widget. The
-/// only thing that makes it "selected" is which theme role it is filled with.
+/// A nav tab is a text element with a fill and padding -- not a widget. The only thing that
+/// makes it "selected" is which theme role it is filled with.
 fn tab(ui: *elmz.Ui(Msg), label: []const u8, active: bool, msg: Msg, key: u64) *elmz.Element(Msg) {
     const e = ui.text(.{ .label = label, .size = 14, .on_press = msg, .key = key, .style = .{ .pad = 11, .radius = 8, .bg = elmz.solid(if (active) ui.theme.selected else ui.theme.control), .color = elmz.solid(if (active) ui.theme.text else ui.theme.text_muted) } });
     return e;
@@ -86,11 +70,6 @@ fn listRow(ui: *elmz.Ui(Msg), label: []const u8, meta: []const u8, msg: Msg, key
 }
 
 /// The app tier: tokens this screen keeps in its own theme file.
-///
-/// Named here and pointed at from the app declaration below, so the runner
-/// parses the file's `.app` section against THIS type -- a typo in it is a
-/// parse error rather than a key nobody reads. Flat data only: the loader
-/// rejects types that would need an allocator.
 const Tokens = struct {
     /// Point size for the wordmark. A demo of the tier, not a design system.
     title_size: u8 = 28,

@@ -1,12 +1,4 @@
 //! A second example: a three-view gallery, still only text / quad / bar.
-//!
-//! Headless by default — writes `gallery_*.png` plus a contact sheet — so the
-//! exact pixels can be inspected without a display. `gallery_window.zig` puts
-//! this same app in an SDL3 window.
-//!
-//! Font note: 5x7 bitmap, integer scale only. Sizes snap to 7 / 14 / 21 / 28 px
-//! and lowercase is drawn as uppercase. There are no glyphs for , _ ' or a
-//! middot, so the copy avoids them.
 
 const std = @import("std");
 const elmz = @import("elmz");

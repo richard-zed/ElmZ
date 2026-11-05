@@ -1,12 +1,5 @@
-//! Every place a colour can go, taking a fill instead: backgrounds, borders
-//! (rounded and square), bar fills, and text. Headless: `zig build run-paint`
-//! writes paint.png.
-//!
-//! The point of the picture is the two border boxes on the second row. A solid
-//! square border is four 1px quads, and a gradient cannot be drawn that way --
-//! each quad's box is 1px on its short axis, so the ramp would restart per
-//! edge. Those route through the SDF stroke instead and ramp around the whole
-//! outline, which is what the top-to-bottom colour change shows.
+//! Every place a colour can go, taking a fill instead: backgrounds, borders (rounded and
+//! square), bar fills, and text.
 
 const std = @import("std");
 const elmz = @import("elmz");
