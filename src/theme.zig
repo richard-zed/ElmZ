@@ -861,6 +861,40 @@ pub fn loadTheme(
     // above frees. Getting this wrong is a use-after-free that renders as
     // garbage role names, or as nothing at all.
     if (built.styles.len > 0) out.styles = try copyStyles(gpa, built.styles);
+
+    // The app-wide face: the one every style names, when they all name the same
+    // one. `styles` is per-style by design (that is what lets a multi-script app
+    // give each script its own face), so "the app's font" only means something
+    // when the file is unanimous. Copy it here because these strings point into
+    // `file`, which the defer above frees.
+    //
+    // Styles that name NO font do not vote: they inherit whatever face is
+    // attached, which is the app-wide one when there is one.
+    if (built.styles.len > 0) {
+        var agreed: ?[]const u8 = null;
+        var unanimous = true;
+        for (built.styles) |entry| {
+            const f = entry.spec.font orelse continue;
+            if (agreed) |a| {
+                if (!std.mem.eql(u8, a, f)) {
+                    unanimous = false;
+                    break;
+                }
+            } else agreed = f;
+        }
+        // Only when there is something to attach. A file naming two faces has no
+        // app-wide one, and guessing between them is how an element ends up
+        // rendering in a face nobody asked for.
+        if (unanimous) if (agreed) |f| {
+            if (f.len > font_name_max) {
+                diag.set("{s}: font name is {d} bytes, the limit is {d}", .{ name, f.len, font_name_max });
+                return error.Style;
+            }
+            @memcpy(out.font_buf[0..f.len], f);
+            out.font_len = f.len;
+        };
+    }
+
     vars_transferred = true;
     return out;
 }
