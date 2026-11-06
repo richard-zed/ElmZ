@@ -2,7 +2,7 @@
     .version = 3,
     .styles = .{
         .base = .{
-            .font = "Quicksand",
+            .font = "Carlito",
         },
     },
 }
