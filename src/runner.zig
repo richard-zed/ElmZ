@@ -135,6 +135,8 @@ pub fn ThemeWatchOf(comptime App: type) type {
         /// The loader's own table, which owns the strings `styles` points at. Kept beside
         /// it rather than duplicated: `styles` is a VIEW of this.
         owned_styles: theme_mod.StylesSpec = &.{},
+        /// Backing store for `styles`, which is `view_buf.items`.
+        view_buf: std.ArrayListUnmanaged(elmz.StyleEntry) = .empty,
 
         pub const Stamp = struct { mtime: i128 = 0, size: u64 = 0 };
 
@@ -145,6 +147,15 @@ pub fn ThemeWatchOf(comptime App: type) type {
 
         pub fn init(floor: elmz.Theme, base_path: ?[:0]const u8, user_path: ?[:0]const u8) Self {
             return .{ .floor = floor, .base_path = base_path, .user_path = user_path };
+        }
+
+        /// Release the style table this watch holds. Safe to call twice, and safe
+        /// on a watch that never loaded a file -- the fields default to empty.
+        /// The watch outlives every `resolveChain` call, so it owns its own copy
+        /// of the table rather than borrowing a chain's.
+        pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+            theme_mod.freeStyles(gpa, &self.owned_styles);
+            self.view_buf.deinit(gpa);
         }
 
         pub fn changed(prev: Stamp, now: Stamp) bool {
@@ -187,6 +198,20 @@ pub fn ThemeWatchOf(comptime App: type) type {
             ui.theme = chain.theme;
             ui.gradients = chain.gradients;
             ui.setVars(App, chain.app);
+            // Styles, on the SAME path as the palette. Without this an app that
+            // only declares `theme_path` resolved everything except `.styles`,
+            // so `styleByName` returned null while the file read as loaded --
+            // and only an example that assigns `ui.styles` by hand (the way
+            // tests/languages.zig does) ever saw a style table.
+            // The chain's table is a view over `owned_styles`, so the loader
+            // table is kept beside it and the view is rebuilt: freeing only the
+            // view would leave the strings it points at alive but unreachable.
+            if (self.owned_styles.len > 0) theme_mod.freeStyles(gpa, &self.owned_styles);
+            self.owned_styles = chain.owned_styles;
+            self.styles = theme_mod.styleView(chain.owned_styles, &self.view_buf, gpa) catch &.{};
+            // Keep the COMPILED table when no file supplied one. Assigning null
+            // would discard `elmz.default_styles`.
+            ui.styles = if (self.styles.len > 0) self.styles else elmz.default_styles;
             // Kept, not applied: the watch has no canvas. The loop reads this
             // and swaps the face, so resolution still happens in exactly one
             // place (here) and attachment in exactly one place (the caller).
@@ -831,6 +856,9 @@ pub fn run(
         if (user_owned) |p| g.free(p);
         font_slot.deinit(g);
         if (font_reg) |*r| r.deinit();
+        // The watch owns the style table it holds across reloads. Nothing else
+        // frees it, and the strings it owns are duped, not borrowed.
+        if (theme_watch) |*w| w.deinit(g);
     };
     // The lookup outlives nothing: it points at `font_reg`, which lives to the
     // end of this function, and `rt` dies before that defer runs. Declared
