@@ -1,1 +1,9 @@
-zig-out/bin/examples-theme.zon
+.{
+    .version = 3,
+
+    .styles = .{
+        .base = .{
+            .font = "Quicksand",
+        },
+    },
+}
