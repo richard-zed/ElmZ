@@ -107,6 +107,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+
+    // ---------------------------------------------------------------------
+    // the -sdl3 variants. Only built when asked for, so a machine without
+    // SDL3 still gets a working `zig build` for everything else. Each one is the
+    // SAME app as its headless example, in a window: counter -> counter-sdl3.
+    // ---------------------------------------------------------------------
+    const sdl_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform_sdl3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "elmz", .module = elmz_mod }},
+    });
+    sdl_mod.linkSystemLibrary("SDL3", .{});
+
     // headless example: no window at all
     const exe = b.addExecutable(.{
         .name = "counter",
@@ -124,6 +139,24 @@ pub fn build(b: *std.Build) void {
     const exe_install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&exe_install.step);
     b.step("counter", "build the headless counter").dependOn(&exe_install.step);
+
+    const examples_counter = b.addExecutable(.{
+        .name = "e-counter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/counter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+                .{ .name = "platform_sdl3", .module = sdl_mod },
+            },
+        }),
+    });
+    const e_counter_install = b.addInstallArtifact(examples_counter, .{});
+    b.getInstallStep().dependOn(&e_counter_install.step);
+    b.step("e-counter", "build the headless counter").dependOn(&e_counter_install.step);
 
     // the caller `ui.textInput` did not have: a form, typed into headlessly
     const fields = b.addExecutable(.{
@@ -478,20 +511,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(cedar_tests).step);
     test_step.dependOn(&b.addRunArtifact(runner_tests).step);
     test_step.dependOn(&b.addRunArtifact(reducer_tests).step);
-
-    // ---------------------------------------------------------------------
-    // the -sdl3 variants. Only built when asked for, so a machine without
-    // SDL3 still gets a working `zig build` for everything else. Each one is the
-    // SAME app as its headless example, in a window: counter -> counter-sdl3.
-    // ---------------------------------------------------------------------
-    const sdl_mod = b.createModule(.{
-        .root_source_file = b.path("src/platform_sdl3.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{.{ .name = "elmz", .module = elmz_mod }},
-    });
-    sdl_mod.linkSystemLibrary("SDL3", .{});
 
     const tasks_win = b.addExecutable(.{
         .name = "tasks-sdl3",
