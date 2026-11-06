@@ -10,7 +10,7 @@ const app = .{
     .Msg = Msg,
     .update = update,
     .view = view,
-    .theme_path = @as(?[]const u8, "theme.zon"),
+    .theme_path = @as(?[]const u8, "examples-theme.zon"),
 };
 
 const Msg = enum { dec, inc, reset };
