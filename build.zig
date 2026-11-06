@@ -111,7 +111,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "counter",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/counter.zig"),
+            .root_source_file = b.path("tests/counter.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -129,7 +129,7 @@ pub fn build(b: *std.Build) void {
     const fields = b.addExecutable(.{
         .name = "fields",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/fields.zig"),
+            .root_source_file = b.path("tests/fields.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
     const fonts = b.addExecutable(.{
         .name = "fonts",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/fonts.zig"),
+            .root_source_file = b.path("tests/fonts.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -163,7 +163,7 @@ pub fn build(b: *std.Build) void {
     const languages = b.addExecutable(.{
         .name = "languages",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/languages.zig"),
+            .root_source_file = b.path("tests/languages.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -184,7 +184,7 @@ pub fn build(b: *std.Build) void {
     const gallery = b.addExecutable(.{
         .name = "gallery",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/gallery.zig"),
+            .root_source_file = b.path("tests/gallery.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -208,7 +208,7 @@ pub fn build(b: *std.Build) void {
     const tasks = b.addExecutable(.{
         .name = "tasks",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/tasks.zig"),
+            .root_source_file = b.path("tests/tasks.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) void {
     const radius_exe = b.addExecutable(.{
         .name = "radius",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/radius.zig"),
+            .root_source_file = b.path("tests/radius.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -246,7 +246,7 @@ pub fn build(b: *std.Build) void {
     const paint_exe = b.addExecutable(.{
         .name = "paint",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/paint.zig"),
+            .root_source_file = b.path("tests/paint.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) void {
     const effects_exe = b.addExecutable(.{
         .name = "effects",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/effects.zig"),
+            .root_source_file = b.path("tests/effects.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -279,7 +279,7 @@ pub fn build(b: *std.Build) void {
     const path_exe = b.addExecutable(.{
         .name = "path",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/path.zig"),
+            .root_source_file = b.path("tests/path.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -297,7 +297,7 @@ pub fn build(b: *std.Build) void {
     const overlay_exe = b.addExecutable(.{
         .name = "overlay",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/overlay.zig"),
+            .root_source_file = b.path("tests/overlay.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -314,7 +314,7 @@ pub fn build(b: *std.Build) void {
     const bench_exe = b.addExecutable(.{
         .name = "bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/bench.zig"),
+            .root_source_file = b.path("tests/bench.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -340,7 +340,7 @@ pub fn build(b: *std.Build) void {
     const showcase_exe = b.addExecutable(.{
         .name = "showcase",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/showcase.zig"),
+            .root_source_file = b.path("tests/showcase.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -353,7 +353,7 @@ pub fn build(b: *std.Build) void {
     const glow_exe = b.addExecutable(.{
         .name = "glow",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/glow.zig"),
+            .root_source_file = b.path("tests/glow.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -381,7 +381,7 @@ pub fn build(b: *std.Build) void {
     const clicks = b.addExecutable(.{
         .name = "clicks",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/clicks.zig"),
+            .root_source_file = b.path("tests/clicks.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -496,7 +496,7 @@ pub fn build(b: *std.Build) void {
     const tasks_win = b.addExecutable(.{
         .name = "tasks-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/tasks_window.zig"),
+            .root_source_file = b.path("tests/tasks_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -521,7 +521,7 @@ pub fn build(b: *std.Build) void {
     const win_exe = b.addExecutable(.{
         .name = "counter-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/counter_window.zig"),
+            .root_source_file = b.path("tests/counter_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -543,7 +543,7 @@ pub fn build(b: *std.Build) void {
     const bare_exe = b.addExecutable(.{
         .name = "counter-sdl3-bare",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/counter_sdl3.zig"),
+            .root_source_file = b.path("tests/counter_sdl3.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -565,7 +565,7 @@ pub fn build(b: *std.Build) void {
     const gal_win = b.addExecutable(.{
         .name = "gallery-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/gallery_window.zig"),
+            .root_source_file = b.path("tests/gallery_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -586,7 +586,7 @@ pub fn build(b: *std.Build) void {
     const clicks_win = b.addExecutable(.{
         .name = "clicks-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/clicks_window.zig"),
+            .root_source_file = b.path("tests/clicks_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -607,7 +607,7 @@ pub fn build(b: *std.Build) void {
     const glow_win = b.addExecutable(.{
         .name = "glow-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/glow_window.zig"),
+            .root_source_file = b.path("tests/glow_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -628,7 +628,7 @@ pub fn build(b: *std.Build) void {
     const paint_win = b.addExecutable(.{
         .name = "paint-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/paint_window.zig"),
+            .root_source_file = b.path("tests/paint_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -649,7 +649,7 @@ pub fn build(b: *std.Build) void {
     const show_win = b.addExecutable(.{
         .name = "showcase-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/showcase_window.zig"),
+            .root_source_file = b.path("tests/showcase_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -672,7 +672,7 @@ pub fn build(b: *std.Build) void {
     const radius_win = b.addExecutable(.{
         .name = "radius-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/radius_window.zig"),
+            .root_source_file = b.path("tests/radius_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -708,7 +708,7 @@ pub fn build(b: *std.Build) void {
     const panes = b.addExecutable(.{
         .name = "panes",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/panes.zig"),
+            .root_source_file = b.path("tests/panes.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -726,7 +726,7 @@ pub fn build(b: *std.Build) void {
     const panes_win = b.addExecutable(.{
         .name = "panes-sdl3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/panes_window.zig"),
+            .root_source_file = b.path("tests/panes_window.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
