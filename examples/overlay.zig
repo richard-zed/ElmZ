@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     canvas.clear(theme.bg);
     // Some furniture, so the overlay is judged against content rather than
     // against a flat field. A card, a bar, a line of text.
-    canvas.roundRect(.{ .x = 20, .y = 40, .w = 420, .h = 120 }, 12, .{ .solid = theme.panel }, false);
+    canvas.roundRect(.{ .x = 20, .y = 40, .w = 420, .h = 120 }, 12, .{ .solid = theme.panel }, null);
     canvas.fillRect(.{ .x = 40, .y = 70, .w = 260, .h = 10 }, elmz.Fill.hgrad(accent, theme.pressed));
     canvas.drawText(40, 96, 14, .{ .solid = fg }, "a frame, with the readout on it");
 

@@ -81,8 +81,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     for (tiles) |t| {
-        r.roundedRect(.{ .x = t.x, .y = t.y, .w = tile, .h = tile }, 12, .{ .solid = panel }, false, clip);
-        r.roundedRect(.{ .x = t.x, .y = t.y, .w = tile, .h = tile }, 12, .{ .solid = elmz.Color.rgbHex(0x585b70) }, true, clip);
+        r.roundedRect(.{ .x = t.x, .y = t.y, .w = tile, .h = tile }, 12, .{ .solid = panel }, null, clip);
+        r.roundedRect(.{ .x = t.x, .y = t.y, .w = tile, .h = tile }, 12, .{ .solid = elmz.Color.rgbHex(0x585b70) }, 2, clip);
         // Centred: the shapes are authored in a 100x100 box.
         r.path(t.x + 30, t.y + 30, t.p, .{ .solid = accent }, clip);
         r.text(t.x, t.y + tile + 22, 13, .{ .solid = text }, t.label, clip);

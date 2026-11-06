@@ -371,10 +371,10 @@ pub const Frost = struct {
 pub const Primitive = union(enum) {
     quad: struct { rect: Rect, fill: Fill, clip: Rect },
     /// rounded rect: `stroke` draws a 1px outline instead of a fill
-    rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect },
+    rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: ?u8, clip: Rect },
     /// `face` selects a registered typeface by index, 0 being the primary. Behind the
     /// scenes on purpose: a `view` never writes this.
-    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0, weight: u16 = 0 },
+    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0, weight: u16 = 0, stroke: ?u8 = null },
     /// Recorded where it has to composite: before the element's own fill for `glow` and
     /// `shadow`, after it for `inner_glow`.
     halo: struct { rect: Rect, corner: f32, halo: Halo, clip: Rect },
@@ -462,9 +462,12 @@ pub const Renderer = struct {
 
     pub const VTable = struct {
         quad: *const fn (ptr: *anyopaque, rect: Rect, fill: Fill, clip: Rect) void,
-        /// draws a rounded rect, or its 1px outline when `stroke` is set
-        rrect: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void,
+        /// draws a rounded rect, or its outline of `stroke` pixels when set
+        rrect: *const fn (ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: ?u8, clip: Rect) void,
         text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void,
+        /// Text drawn as an OUTLINE of the glyphs, not a fill. A backend with no
+        /// distance-field support falls back to `text`.
+        stroked_text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void,
         /// Point subsequent `text` calls at a registered face, by index. 0 is the primary.
         /// A backend with only one face ignores it.
         set_face: *const fn (ptr: *anyopaque, face: u16) void,
@@ -502,7 +505,7 @@ pub const Renderer = struct {
         self.vtable.quad(self.ptr, rect, fill, clip);
     }
 
-    pub fn roundedRect(self: Renderer, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void {
+    pub fn roundedRect(self: Renderer, rect: Rect, radius: f32, fill: Fill, stroke: ?u8, clip: Rect) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         self.vtable.rrect(self.ptr, rect, radius, fill, stroke, clip);
     }
@@ -510,6 +513,12 @@ pub const Renderer = struct {
     pub fn text(self: Renderer, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void {
         if (bytes.len == 0) return;
         self.vtable.text(self.ptr, x, y, size, fill, bytes, clip);
+    }
+
+    /// Text whose glyphs are outlined rather than filled.
+    pub fn strokedText(self: Renderer, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void {
+        if (bytes.len == 0) return;
+        self.vtable.stroked_text(self.ptr, x, y, size, fill, bytes, width, clip);
     }
 
     /// Point subsequent `text` calls at a registered face, by index.
@@ -738,8 +747,8 @@ pub const StyleEntry = struct {
         halo: ?HaloSpecEntry = null,
         /// Blur of what is behind this element, from a theme style.
         frost: ?FrostSpecEntry = null,
-        /// Draw this style as a 1px outline instead of a fill.
-        stroke: bool = false,
+        /// Outline width in pixels; absent fills solid.
+        stroke: ?u8 = null,
     } = .{},
 };
 
@@ -1221,8 +1230,9 @@ pub const Style = struct {
     /// Blur of what is behind this element. Nothing shows unless something is drawn under
     /// it, so it pairs with a translucent `bg`.
     frost: ?Frost = null,
-    /// Draw this element as a 1px outline instead of a fill.
-    stroke: bool = false,
+    /// Outline width in pixels. Absent fills solid; a value leaves the interior
+    /// hollow. `border` is a second pass, `stroke` replaces the fill.
+    stroke: ?u8 = null,
     /// All four margins at once. A named side wins over this, and this wins over whatever
     /// the element already carried.
     margin: ?f32 = null,
@@ -1286,9 +1296,9 @@ pub fn Element(comptime M: type) type {
         /// Blur of what is already drawn behind this element, before the element's own
         /// fill.
         frost: ?Frost = null,
-        /// Draw this element's fill as a 1px outline instead of a solid. `border` is a
-        /// second pass; `stroke` replaces the fill.
-        stroke: bool = false,
+        /// Outline width in pixels. Absent fills solid; a value leaves the
+        /// interior hollow. `border` is a second pass, `stroke` replaces the fill.
+        stroke: ?u8 = null,
         /// A halo drawn only while the pointer is over this element, merged over `halo`.
         hover_halo: ?Halo = null,
         /// 1px inset outline, drawn inside the rect so it costs no layout
@@ -1417,10 +1427,7 @@ pub fn Element(comptime M: type) type {
             if (s.pad) |v| self.pad = v;
             if (s.halo) |v| self.halo = v;
             if (s.frost) |v| self.frost = v;
-            // A plain bool carries no "unset" state, so a merge can only turn a
-            // stroke ON -- it can never clear one a widget set. Turning it off
-            // is `applyStyle`, which replaces rather than merges.
-            if (s.stroke) self.stroke = true;
+            if (s.stroke) |v| self.stroke = v;
             if (s.margin) |v| {
                 self.margin_left = v;
                 self.margin_right = v;
@@ -1959,13 +1966,26 @@ pub fn Element(comptime M: type) type {
             // A themed `stroke` draws the fill as an outline rather than a solid,
             // which is the one thing a theme could not ask for before: `border`
             // is a second pass, `stroke` replaces the fill.
-            const stroke_now = self.stroke;
+            //
+            // EXCEPT on an element that draws TEXT. There the stroke belongs on
+            // the GLYPHS -- the whole point of the distance field -- so filling
+            // the box with it would draw a rim round the label as well. `bg`
+            // still fills the box: that is the element's backdrop, and it is
+            // what a stroked label sits on.
+            const strokes_text = self.geometry == .text;
+            // A text element's `stroke` belongs to its GLYPHS, so the box must
+            // not take it -- and it must not fall back to a solid quad either.
+            // `stroke` used to double as "outline instead of fill", so clearing
+            // it here turned the fill back ON and painted the label's box solid
+            // over the text. That is the two-solid-rects bug.
+            const stroke_now: ?u8 = if (strokes_text) null else self.stroke;
+            const box_fill: ?Fill = if (strokes_text) null else fill_now;
             if (self.radius > 0) {
-                if (fill_now) |c| r.roundedRect(rect, self.radius, c, stroke_now, clip);
-                if (border_now) |c| r.roundedRect(rect, self.radius, c, true, clip);
+                if (box_fill) |c| r.roundedRect(rect, self.radius, c, stroke_now, clip);
+                if (border_now) |c| r.roundedRect(rect, self.radius, c, 1, clip);
             } else {
-                if (fill_now) |c| {
-                    if (stroke_now) r.roundedRect(rect, 0, c, true, clip) else r.quad(rect, c, clip);
+                if (box_fill) |c| {
+                    if (stroke_now != null) r.roundedRect(rect, 0, c, stroke_now, clip) else r.quad(rect, c, clip);
                 }
                 if (border_now) |b| {
                     // A gradient border cannot be four thin quads: each quad's
@@ -1973,7 +1993,7 @@ pub fn Element(comptime M: type) type {
                     // per edge and collapse to a single stop. Route it through
                     // the SDF stroke, which evaluates against the element rect.
                     if (!b.isSolid()) {
-                        r.roundedRect(rect, 0, b, true, clip);
+                        r.roundedRect(rect, 0, b, 1, clip);
                     } else {
                         r.quad(.{ .x = rect.x, .y = rect.y, .w = rect.w, .h = 1 }, b, clip);
                         r.quad(.{ .x = rect.x, .y = rect.y + rect.h - 1, .w = rect.w, .h = 1 }, b, clip);
@@ -2088,15 +2108,30 @@ pub fn Element(comptime M: type) type {
                         // width: a row that squeezes a label by a pixel must not
                         // lose two characters and gain an ellipsis for it.
                         const fit = fitText(r, t.bytes, t.size, iw + 2 * slack);
-                        r.text(ix, iy, t.size, fg_now, fit.bytes, tclip);
-                        if (fit.ellipsis) r.text(ix + fit.width, iy, t.size, fg_now, ellipsis, tclip);
+                        // A stroked label outlines its GLYPHS. `bg` above still
+                        // fills the box -- that is the element's backdrop, not
+                        // the stroke, which is why `.stroke` alone leaves the
+                        // interior empty and `.bg` + `.stroke` reads as a
+                        // labelled panel with outlined letters.
+                        if (self.stroke) |sw| {
+                            r.strokedText(ix, iy, t.size, fg_now, fit.bytes, sw, tclip);
+                            if (fit.ellipsis) r.strokedText(ix + fit.width, iy, t.size, fg_now, ellipsis, sw, tclip);
+                        } else {
+                            r.text(ix, iy, t.size, fg_now, fit.bytes, tclip);
+                            if (fit.ellipsis) r.text(ix + fit.width, iy, t.size, fg_now, ellipsis, tclip);
+                        }
                     } else {
                         var buf: [max_lines][]const u8 = undefined;
                         const n = r.wrapText(t.bytes, t.size, iw, &buf);
                         const ts = r.measureTextFace(t.bytes, t.size, t.face);
                         for (buf[0..n], 0..) |line, i| {
                             if (line.len == 0) continue;
-                            r.text(ix, iy + @as(f32, @floatFromInt(i)) * ts.line_height, t.size, fg_now, line, tclip);
+                            const ly = iy + @as(f32, @floatFromInt(i)) * ts.line_height;
+                            if (self.stroke) |sw| {
+                                r.strokedText(ix, ly, t.size, fg_now, line, sw, tclip);
+                            } else {
+                                r.text(ix, ly, t.size, fg_now, line, tclip);
+                            }
                         }
                     }
                 },
@@ -2124,7 +2159,7 @@ pub fn Element(comptime M: type) type {
                     // as a rectangle on top of it, covering the left corners.
                     var fill = rect;
                     fill.w = rect.w * std.math.clamp(b.value, 0, 1);
-                    r.vtable.rrect(r.ptr, fill, self.radius, self.style().colorFill(.{ .solid = th.accent }).?, false, clip);
+                    r.vtable.rrect(r.ptr, fill, self.radius, self.style().colorFill(.{ .solid = th.accent }).?, null, clip);
                 },
 
                 .rect => {},
@@ -3325,6 +3360,7 @@ pub fn Collector(comptime M: type) type {
             .path = vtPath,
             .rrect = vtRrect,
             .text = vtText,
+            .stroked_text = vtStrokedText,
             .set_face = vtSetFace,
             .set_weight = vtSetWeight,
             .halo = vtHalo,
@@ -3367,7 +3403,7 @@ pub fn Collector(comptime M: type) type {
             };
         }
 
-        fn vtRrect(ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: bool, clip: Rect) void {
+        fn vtRrect(ptr: *anyopaque, rect: Rect, radius: f32, fill: Fill, stroke: ?u8, clip: Rect) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             if (rect.intersect(clip).isEmpty()) return;
             self.prims.append(self.gpa, .{ .rrect = .{
@@ -3426,6 +3462,31 @@ pub fn Collector(comptime M: type) type {
                 .clip = clip,
                 .face = self.cur_face,
                 .weight = self.cur_weight,
+            } }) catch {
+                self.failed = true;
+            };
+        }
+
+        fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // Queue it exactly as `vtText` does, carrying the width; the
+            // canvas picks the stroked path off `.stroke` when it paints.
+            // This used to discard every parameter, so a stroked label was
+            // collected as NOTHING -- no prim, no draw, and the prim count
+            // did not move because nothing was ever appended.
+            const tm = self.metrics.measureText(bytes, size);
+            const box: Rect = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
+            if (box.intersect(clip).isEmpty()) return;
+            self.prims.append(self.gpa, .{ .text = .{
+                .x = x,
+                .y = y,
+                .size = size,
+                .fill = fill,
+                .bytes = bytes,
+                .clip = clip,
+                .face = self.cur_face,
+                .weight = self.cur_weight,
+                .stroke = width,
             } }) catch {
                 self.failed = true;
             };
@@ -3509,6 +3570,7 @@ pub fn nominalRenderer() Renderer {
         .path = nominalPath,
         .rrect = nominalRrect,
         .text = nominalText,
+        .stroked_text = nominalStrokedText,
         .set_face = nominalSetFace,
         .set_weight = nominalSetWeight,
         .halo = nominalHalo,
@@ -3572,8 +3634,9 @@ fn nominalMeasureFace(_: *anyopaque, bytes: []const u8, size: f32, _: u16) TextM
 fn nominalPath(_: *anyopaque, _: f32, _: f32, _: Path, _: Fill, _: Rect) void {}
 
 fn nominalQuad(_: *anyopaque, _: Rect, _: Fill, _: Rect) void {}
-fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: bool, _: Rect) void {}
+fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: ?u8, _: Rect) void {}
 fn nominalText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: Rect) void {}
+fn nominalStrokedText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: u8, _: Rect) void {}
 fn nominalSetFace(_: *anyopaque, _: u16) void {}
 fn nominalSetWeight(_: *anyopaque, _: u16) void {}
 fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
@@ -5309,6 +5372,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
             Fill => .{ .solid = .{ .r = 5, .g = 6, .b = 7, .a = 8 } },
             f32 => 7,
             u16 => 3,
+            u8 => 2,
             Halo => .{ .color = .{ .r = 9, .g = 10, .b = 11, .a = 12 }, .blur = 3, .spread = 1, .offset = .{ 1, 2 } },
             Frost => .{ .blur = 5 },
             else => @compileError("new Style field '" ++ f.name ++ "' of type " ++ @typeName(Child) ++

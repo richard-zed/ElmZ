@@ -463,7 +463,9 @@ pub const StyleSpec = struct {
     weight: ?u16 = null,
     halo: ?HaloSpec = null,
     frost: ?FrostSpec = null,
-    stroke: bool = false,
+    /// Outline width in pixels. Absent draws the fill solid; a value draws the
+    /// fill as an outline of that width, leaving the interior hollow.
+    stroke: ?u8 = null,
 };
 
 /// Blur of what is behind an element, in the theme file.
@@ -938,6 +940,11 @@ pub fn freeGradients(gpa: Allocator, grads: *Gradients) void {
 
 /// Free everything `loadTheme` handed back.
 pub fn freeLoaded(comptime App: type, gpa: Allocator, loaded: *Loaded(App)) void {
+    // The custom colour table lives on the THEME, not on the other three, so
+    // it was the one table this never released -- every themed example leaked
+    // one allocation per custom role, and DebugAllocator aborted at exit,
+    // which read as a crash AFTER a successful render.
+    freeCustom(gpa, &loaded.theme);
     freeStyles(gpa, &loaded.styles);
     freeVars(App, gpa, &loaded.vars);
     freeGradients(gpa, &loaded.gradients);
@@ -1464,7 +1471,7 @@ const Walker = struct {
             return;
         }
         if (std.mem.eql(u8, key, "stroke")) {
-            entry.stroke = self.readBool("style .stroke");
+            entry.stroke = try self.readWidth("style .stroke");
             return;
         }
         if (std.mem.eql(u8, key, "halo")) {
@@ -1530,6 +1537,29 @@ const Walker = struct {
         }
         self.diag.set("{s} must be true or false", .{what});
         return false;
+    }
+
+    /// A stroke width: absent, or 1..255 pixels. `false` is what the field used
+    /// to be, so it still reads as absent -- an old theme that wrote
+    /// `.stroke = true` gets a 1px outline rather than an error.
+    fn readWidth(self: *Walker, what: []const u8) ThemeLoadError!?u8 {
+        if (self.tok() == .identifier) {
+            const v = self.slice();
+            if (std.mem.eql(u8, v, "false")) {
+                self.advance();
+                return null;
+            }
+            if (std.mem.eql(u8, v, "true")) {
+                self.advance();
+                return 1;
+            }
+        }
+        const n = try self.readNumber(what);
+        if (n < 1 or n > 255 or @floor(n) != n) {
+            self.diag.set("{s} must be a width from 1 to 255", .{what});
+            return error.Palette;
+        }
+        return @intFromFloat(n);
     }
 
     /// `.{ .color = .accent, .blur = 8, .mode = .outer_glow, .offset = .{ 2, 4 } }` Every
@@ -2544,7 +2574,8 @@ test "a style's .frost and .stroke are read, not dropped" {
         \\    .theme = .{
         \\        .colors = .{ .bg = 0x1e1e2e },
         \\        .styles = .{
-        \\            .glass = .{ .bg = .bg, .frost = .{ .blur = 9 }, .stroke = true },
+        \\            .glass = .{ .bg = .bg, .frost = .{ .blur = 9 }, .stroke = 3 },
+        \\            .legacy = .{ .stroke = true },
         \\            .plain = .{},
         \\        },
         \\    },
@@ -2555,14 +2586,18 @@ test "a style's .frost and .stroke are read, not dropped" {
     var loaded = try loadTheme(App, gpa, "theme.zon", src, Theme{}, &diag);
     defer freeLoaded(App, gpa, &loaded);
 
-    try std.testing.expectEqual(@as(usize, 2), loaded.styles.len);
+    try std.testing.expectEqual(@as(usize, 3), loaded.styles.len);
     const f = loaded.styles[0].spec.frost orelse return error.TestExpectedFrost;
     try std.testing.expectEqual(@as(f32, 9), f.blur);
-    try std.testing.expect(loaded.styles[0].spec.stroke);
+    try std.testing.expectEqual(@as(?u8, 3), loaded.styles[0].spec.stroke);
+    // `.stroke = true` is what the field used to be; it reads as 1px rather
+    // than erroring, so an old theme keeps its outline instead of the fill it
+    // was hiding.
+    try std.testing.expectEqual(@as(?u8, 1), loaded.styles[1].spec.stroke);
     // A style that writes neither stays off: a default frost would blur
     // everything and a default stroke would empty every fill.
-    try std.testing.expectEqual(@as(?FrostSpec, null), loaded.styles[1].spec.frost);
-    try std.testing.expect(!loaded.styles[1].spec.stroke);
+    try std.testing.expectEqual(@as(?FrostSpec, null), loaded.styles[2].spec.frost);
+    try std.testing.expectEqual(@as(?u8, null), loaded.styles[2].spec.stroke);
 }
 
 test "an unknown .frost key is an error, not a silent default" {

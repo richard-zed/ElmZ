@@ -5,6 +5,7 @@ const std = @import("std");
 const elmz = @import("elmz");
 const gamma = @import("gamma.zig");
 const cedar = @import("inkwell");
+const strokeGlyph = cedar.strokeGlyph;
 const linebreak = cedar.linebreak;
 
 // Line breaking is pure Unicode logic with no font data in it, so it lives in
@@ -20,12 +21,22 @@ pub const canBreakPair = linebreak.canBreakPair;
 /// per call.
 pub const Kern = cedar.Kern;
 
+/// Widest stroke, in DEVICE pixels, that a single baked distance field can
+/// answer. Every narrower width re-thresholds the same numbers, so this is the
+/// one number that has to be generous rather than exact. Must match
+/// `FieldCache.Options.max_width_px`, which is what the bake is sized to.
+pub const max_stroke_px: u8 = 12;
+
 pub const V = struct { ascent: f32, descent: f32, line_gap: f32 };
 
 pub const Font = struct {
     /// Bytes of scratch a glyph cache needs at the default options. Published here so a
     /// caller can own the storage without importing Cedar.
     pub const cache_bytes = cedar.Cache.needed(.{});
+    /// Size of the glyph distance-field cache, for a caller that sizes its own
+    /// storage without importing Cedar. A sibling of `cache_bytes`, not a share
+    /// of it: distance fields are four bytes a pixel, coverage one.
+    pub const field_bytes = cedar.FieldCache.needed(.{});
     /// Bytes of scratch the codepoint lookup needs, published for the same reason: a caller
     /// sizes its storage without importing Cedar.
     pub const lookup_bytes = cedar.Lookup.needed(.{});
@@ -39,6 +50,11 @@ pub const Font = struct {
 
     cache: cedar.Cache = undefined,
     cache_ok: bool = false,
+    /// Distance fields for stroked glyphs. Separate from `cache` on purpose:
+    /// one entry serves every stroke width, because a ramp re-thresholds the
+    /// same numbers, where coverage would need one per width.
+    fields: cedar.FieldCache = undefined,
+    fields_ok: bool = false,
     /// Resolved kern lookups, held BY POINTER: `Kern` carries a `Font`, and a `Font`
     /// carrying a `Kern` by value is an infinite type.
     kern: ?*Kern = null,
@@ -200,6 +216,18 @@ pub const Font = struct {
         if (!self.ok) return;
         self.cache = cedar.Cache.init(mem, .{}) catch return;
         self.cache_ok = true;
+    }
+
+    pub fn attachFields(self: *Font, mem: []align(8) u8) void {
+        if (!self.ok) return;
+        // `max_width_px` is the widest stroke ONE baked field can answer:
+        // the field is baked to this distance and any narrower width is a
+        // threshold change on the same numbers. The default of 4 rejected
+        // the theme's `.stroke = 6` outright with `error.FieldTooNarrow`,
+        // and `strokeText` has no better answer than a silent fall-back to
+        // the fill -- which reads as "stroke does nothing", not as a limit.
+        self.fields = cedar.FieldCache.init(mem, .{ .max_width_px = max_stroke_px }) catch return;
+        self.fields_ok = true;
     }
 
     /// Point the codepoint lookup at caller-owned storage.
@@ -781,6 +809,104 @@ pub const Font = struct {
                 pen += @as(f32, @floatFromInt(adv)) * s;
             }
         }
+    }
+
+    /// The same string `drawText` lays out, drawn as an OUTLINE `width` pixels
+    /// wide instead of a fill: the interior is left alone.
+    ///
+    /// Deliberately a sibling of `drawText` and not a flag inside it. The two
+    /// walk the identical pen/run loop -- same layout, same advances, same
+    /// phase-zero grid the coverage cache uses -- but they composite different
+    /// things: coverage of the glyph versus a ramp over a distance field. A
+    /// flag would have put a four-byte-per-pixel field on the path every plain
+    /// label takes.
+    ///
+    /// Returns false when the face cannot answer, so the caller can fall back
+    /// to the fill rather than draw nothing.
+    pub fn strokeText(
+        self: *const Font,
+        px: []u8,
+        cw: u32,
+        ch: u32,
+        x: f32,
+        y: f32,
+        size: f32,
+        fill: elmz.Fill,
+        bytes: []const u8,
+        width: u8,
+        clip: elmz.Rect,
+        scratch: []u8,
+    ) bool {
+        if (!self.ok or !self.fields_ok) {
+            return false;
+        }
+        const solid_c: ?elmz.Color = switch (fill) {
+            .solid => |cc| cc,
+            else => null,
+        };
+        var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
+        if (solid_c == null) {
+            const tm = self.measure(bytes, size);
+            box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
+        }
+        const cx0: i64 = @intFromFloat(@floor(clip.x));
+        const cy0: i64 = @intFromFloat(@floor(clip.y));
+        const cx1: i64 = @intFromFloat(@ceil(clip.x + clip.w));
+        const cy1: i64 = @intFromFloat(@ceil(clip.y + clip.h));
+        const s = self.scaleFor(size);
+        const baseline = y + self.verticalMetrics(size).ascent;
+        const mut = @constCast(self);
+        var pen = x;
+        var at: usize = 0;
+        var run: Run = .{};
+        var drew = false;
+        while (at < bytes.len) {
+            at = self.layoutRun(bytes, at, &run);
+            for (run.gids[0..run.len], run.advs[0..run.len]) |gid, adv| {
+                // `.zero`, and it has to be the SAME phase the fill uses: the
+                // mask cache above is queried at `.zero`, so a field baked on
+                // any other grid would sit a subpixel off its own fill, which
+                // at a 1px width is the entire stroke.
+                // `aa` is the TOTAL ramp width in pixels, centred on each band
+                // boundary -- half a pixel of transition each side at 1.0.
+                // It scales with the stroke: a wide band's boundary cuts
+                // across pixels at a shallower angle than a thin one's, so a
+                // fixed 1px transition reads as stairs on a 6px stroke while
+                // looking smooth on a 1px one. Capped so the ramp never eats
+                // more than a quarter of the band.
+                const aa_w = @min(@as(f32, @floatFromInt(width)) * 0.5, 2.0);
+                const r = strokeGlyph(&mut.fields, &self.face, gid, s, .zero, .zero, width, @max(aa_w, 1.0), scratch) catch null;
+                if (r) |rr| {
+                    if (rr.w > 0 and rr.h > 0) {
+                        // `x0`/`y0` are already pixels, for the same reason the
+                        // mask path's are: `bitmapBoxPhase` floors and ceils
+                        // after multiplying by `scale`.
+                        const ox: i64 = @intFromFloat(@round(pen + @as(f32, @floatFromInt(rr.x0))));
+                        const oy: i64 = @intFromFloat(@round(baseline + @as(f32, @floatFromInt(rr.y0))));
+                        var row: u32 = 0;
+                        while (row < rr.h) : (row += 1) {
+                            const py = oy + row;
+                            if (py < cy0 or py >= cy1) continue;
+                            var col: u32 = 0;
+                            while (col < rr.w) : (col += 1) {
+                                const gx_px = ox + @as(i64, col);
+                                if (gx_px < cx0 or gx_px >= cx1) continue;
+                                const cov = scratch[row * rr.w + col];
+                                if (cov == 0) continue;
+                                drew = true;
+                                blend(px, cw, ch, gx_px, py, solid_c orelse fill.colorAt(
+                                    box,
+                                    @as(f32, @floatFromInt(gx_px)) + 0.5,
+                                    @as(f32, @floatFromInt(py)) + 0.5,
+                                ), cov);
+                            }
+                        }
+                    }
+                }
+                pen += @as(f32, @floatFromInt(adv)) * s;
+            }
+        }
+        return drew;
     }
 };
 

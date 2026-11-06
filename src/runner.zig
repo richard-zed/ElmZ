@@ -242,6 +242,9 @@ pub fn ChainOf(comptime App: type) type {
             // is per startup and per hot reload.
             theme_mod.freeVars(@TypeOf(self.app), gpa, &self.app);
             theme_mod.freeGradients(gpa, &self.gradients);
+            // The custom COLOUR table rides on `.theme` rather than being a
+            // field of its own, so it is the one the list above forgot.
+            theme_mod.freeCustom(gpa, &self.theme);
         }
 
         /// The typeface the chain names, or null when no file names one.
@@ -290,6 +293,11 @@ pub fn resolveChain(
         if (readZ(gpa, io, p)) |src| {
             defer gpa.free(src);
             if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
+                // The previous tier's CUSTOM COLOUR table dies here for the
+                // same reason the gradients and vars do -- it hangs off
+                // `theme`, so assigning `out.theme` is what drops the handle.
+                // This was the one tier-overwrite that leaked.
+                theme_mod.freeCustom(gpa, &out.theme);
                 out.theme = loaded.theme;
                 // The previous tier's table dies here: it was allocated into
                 // `gpa` and this overwrites the only handle to it.
@@ -330,6 +338,11 @@ pub fn resolveChain(
         if (readZ(gpa, io, p)) |src| {
             defer gpa.free(src);
             if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
+                // The previous tier's CUSTOM COLOUR table dies here for the
+                // same reason the gradients and vars do -- it hangs off
+                // `theme`, so assigning `out.theme` is what drops the handle.
+                // This was the one tier-overwrite that leaked.
+                theme_mod.freeCustom(gpa, &out.theme);
                 out.theme = loaded.theme;
                 // The previous tier's table dies here: it was allocated into
                 // `gpa` and this overwrites the only handle to it.

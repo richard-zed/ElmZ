@@ -585,6 +585,9 @@ fn boxBlur(buf: []u8, w: usize, h: usize, rad: usize, horizontal: bool, scratch:
 /// Glyph-cache storage.
 const FontMem = struct {
     bytes: [Face.cache_bytes]u8 align(8),
+    /// Distance fields for stroked glyphs: a sibling of `bytes`, not a share,
+    /// because a field is four bytes a pixel against coverage's one.
+    fields: [Face.field_bytes]u8 align(8),
     /// Resolved codepoint -> (glyph, advance), stored beside the mask cache for the same
     /// reason: both must outlive the value copies a `Face` goes through.
     lookup: [Face.lookup_bytes]u8 align(8),
@@ -674,6 +677,12 @@ pub const Canvas = struct {
     /// Device pixels per logical unit -- the HiDPI density.
     scale: f32 = 1.0,
 
+    /// Scratch for ramping a glyph field into coverage, one byte a pixel of the
+    /// glyph's own box. A field bakes per (glyph, scale, phase) and serves every
+    /// width, so the ONE thing that changes per draw is this ramp -- keeping it
+    /// here means a stroked label costs a lookup and a pass, not a bake.
+    stroke_scratch: []u8 = &.{},
+
     const Mask = struct {
         /// Shape size this stencil was baked at. `sw == 0` marks a SLICE TEMPLATE, which
         /// stands in for every size at its radius and blur.
@@ -761,6 +770,7 @@ pub const Canvas = struct {
         self.font_base = if (coords.len == 0) face else Face.initIndex(bytes, index);
         if (self.font_mem) |m| {
             self.font.attachCache(&m.bytes);
+            self.font.attachFields(&m.fields);
             self.font.attachLookup(&m.lookup);
             self.font.attachKern(&m.kern, &m.kern_mem);
         }
@@ -780,6 +790,7 @@ pub const Canvas = struct {
             // runs for a SECOND face, which is why no test reached it.
             mem.* = .{
                 .bytes = undefined,
+                .fields = undefined,
                 .lookup = undefined,
                 .kern = undefined,
                 .kern_mem = undefined,
@@ -793,6 +804,7 @@ pub const Canvas = struct {
         if (slot.face.ok) return;
         var face = Face.initIndex(bytes, face_index);
         face.attachCache(&slot.mem.bytes);
+        face.attachFields(&slot.mem.fields);
         face.attachLookup(&slot.mem.lookup);
         face.attachKern(&slot.mem.kern, &slot.mem.kern_mem);
         slot.face = face;
@@ -818,7 +830,8 @@ pub const Canvas = struct {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
         @memset(px, 0);
         const mem = try gpa.create(FontMem);
-        return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem };
+        const scratch = try gpa.alloc(u8, @as(usize, w) * h);
+        return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem, .stroke_scratch = scratch };
     }
 
     /// Re-point the pixel buffer at `w` x `h`.
@@ -827,8 +840,12 @@ pub const Canvas = struct {
         if (w == self.w and h == self.h) return;
         const px = try self.gpa.alloc(u8, @as(usize, w) * h * 4);
         @memset(px, 0);
+        // The stroke scratch tracks the canvas: it is one byte a pixel.
+        const scratch = try self.gpa.alloc(u8, @as(usize, w) * h);
         self.gpa.free(self.px);
         self.px = px;
+        if (self.stroke_scratch.len > 0) self.gpa.free(self.stroke_scratch);
+        self.stroke_scratch = scratch;
         self.w = w;
         self.h = h;
     }
@@ -844,6 +861,7 @@ pub const Canvas = struct {
         self.measure_cache.deinit(self.gpa);
         self.clearWrapCache();
         self.wrap_cache.deinit(self.gpa);
+        if (self.stroke_scratch.len > 0) self.gpa.free(self.stroke_scratch);
         if (self.font_mem) |m| self.gpa.destroy(m);
         for (self.extra_faces.items) |f| self.gpa.destroy(f.mem);
         self.extra_faces.deinit(self.gpa);
@@ -1368,7 +1386,7 @@ pub const Canvas = struct {
 
     /// Rounded rect by signed distance: the coverage of a pixel is derived from its
     /// distance to the rounded outline, which antialiases the curve and.
-    pub fn roundRect(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool) void {
+    pub fn roundRect(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: ?u8) void {
         self.roundRectClip(rect, radius, fill, stroke, elmz.Rect.unbounded);
     }
 
@@ -1605,12 +1623,12 @@ pub const Canvas = struct {
         }
     }
 
-    pub fn roundRectClip(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool, clip: elmz.Rect) void {
+    pub fn roundRectClip(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: ?u8, clip: elmz.Rect) void {
         // The corner geometry comes from the unclipped rect on purpose: a clip
         // is a window over the shape, never a change to the shape.
         const r = @min(radius, @min(rect.w, rect.h) * 0.5);
         if (r <= 0) {
-            if (!stroke) return self.fillRectClip(rect, fill, clip);
+            if (stroke == null) return self.fillRectClip(rect, fill, clip);
             // A solid square outline really is four quads, and emit draws it
             // that way. A GRADIENT one cannot be: each quad's box is 1px on
             // its short axis, so the ramp would restart per edge. Those fall
@@ -1636,7 +1654,7 @@ pub const Canvas = struct {
                 const ax = @max(qx, 0);
                 const d = @sqrt(ax * ax + ay * ay) + @min(@max(qx, qy), 0) - r;
                 var cov = std.math.clamp(0.5 - d, 0, 1);
-                if (stroke) cov -= std.math.clamp(0.5 - (d + 1.0), 0, 1);
+                if (stroke) |sw| cov -= std.math.clamp(0.5 - (d + @as(f32, @floatFromInt(sw))), 0, 1);
                 if (cov > 0) self.blendCoverage(x, y, fill.colorAt(
                     rect,
                     @as(f32, @floatFromInt(x)) + 0.5,
@@ -1935,7 +1953,15 @@ pub const Canvas = struct {
             .frost => |q| r.frost(q.rect, q.radius, q.blur, q.clip),
             .rrect => |q| r.roundedRect(q.rect, q.radius, q.fill, q.stroke, q.clip),
             .text => |t| {
-                if (t.face == 0) {
+                // A prim carrying `.stroke` is outlined glyphs, not filled ones.
+                // One branch here rather than a prim type of its own: the two
+                // share every field but the width, and a separate variant would
+                // need its own prune, its own face handling and its own count.
+                if (t.stroke) |sw| {
+                    if (t.face != 0) r.setFace(t.face);
+                    r.setWeight(t.weight);
+                    r.strokedText(t.x, t.y, t.size, t.fill, t.bytes, sw, t.clip);
+                } else if (t.face == 0) {
                     r.setWeight(t.weight);
                     r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
                 } else {
@@ -2283,6 +2309,7 @@ pub const Canvas = struct {
         .path = vtPath,
         .rrect = vtRrect,
         .text = vtText,
+        .stroked_text = vtStrokedText,
         .set_face = vtSetFace,
         .set_weight = vtSetWeight,
         .halo = vtHalo,
@@ -2320,13 +2347,13 @@ pub const Canvas = struct {
         self.fillRectClip(self.scaledRect(rect), fill, self.scaledRect(clip));
     }
 
-    fn vtRrect(ptr: *anyopaque, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: bool, clip: elmz.Rect) void {
+    fn vtRrect(ptr: *anyopaque, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: ?u8, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.roundRectClip(
             self.scaledRect(rect),
             radius * self.scale,
             fill,
-            stroke,
+            if (stroke) |w| @as(?u8, @intFromFloat(@max(1, @round(@as(f32, @floatFromInt(w)) * self.scale)))) else null,
             self.scaledRect(clip),
         );
     }
@@ -2405,6 +2432,7 @@ pub const Canvas = struct {
             self.font = varied;
             if (self.font_mem) |m| {
                 self.font.attachCache(&m.bytes);
+                self.font.attachFields(&m.fields);
                 self.font.attachLookup(&m.lookup);
                 self.font.attachKern(&m.kern, &m.kern_mem);
             }
@@ -2412,8 +2440,31 @@ pub const Canvas = struct {
             self.extra_faces.items[index].face = varied;
             const m = self.extra_faces.items[index].mem;
             self.extra_faces.items[index].face.attachCache(&m.bytes);
+            self.extra_faces.items[index].face.attachFields(&m.fields);
             self.extra_faces.items[index].face.attachLookup(&m.lookup);
             self.extra_faces.items[index].face.attachKern(&m.kern, &m.kern_mem);
+        }
+    }
+
+    fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, width: u8, clip: elmz.Rect) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const f = self.facePtrAt(self.cur_face);
+        const sx = x * self.scale;
+        const sy = y * self.scale;
+        const ss = size * self.scale;
+        const sclip = self.scaledRect(clip);
+        // `width` is a LOGICAL stroke like `radius`, so a 2x display turns 6
+        // into 12 device pixels. Clamp the DEVICE value to the field's limit:
+        // past it `strokeText` returns false and the label silently falls back
+        // to a fill, which reads as "stroke does nothing" rather than as a
+        // ceiling. Clamping keeps the outline, it just stops it growing.
+        const want: f32 = @round(@as(f32, @floatFromInt(width)) * self.scale);
+        const w: u8 = @intFromFloat(@min(@max(1.0, want), @as(f32, @floatFromInt(cedar.max_stroke_px))));
+        if (self.stroke_scratch.len == 0) return self.drawTextFace(f, sx, sy, ss, fill, bytes, sclip);
+        if (!f.strokeText(self.px, self.w, self.h, sx, sy, ss, fill, bytes, w, sclip, self.stroke_scratch)) {
+            // The face could not answer -- no field cache, or a glyph past the
+            // widest field. A blank label is never the better failure.
+            self.drawTextFace(f, sx, sy, ss, fill, bytes, sclip);
         }
     }
 
@@ -3010,7 +3061,7 @@ test "coverage and glyphs composite alpha, so text is not a hole in the png" {
     // whole-element case rather than an edge case.
     var c = try testCanvas(gpa, 16, 16);
     defer c.deinit();
-    c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = white }, false);
+    c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = white }, null);
     try std.testing.expectEqual(@as(u8, 255), c.px[(8 * 16 + 8) * 4 + 3]);
 
     // Text: the real-face path blends inside cedar, the built-in path inside
@@ -3032,7 +3083,7 @@ test "coverage and glyphs composite alpha, so text is not a hole in the png" {
     // And the common case is untouched: over an opaque backdrop, 255 stays 255
     // even for a half-transparent source.
     c.fillRect(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, .{ .solid = elmz.Color.rgbHex(0x102030) });
-    c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 128 } }, false);
+    c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 128 } }, null);
     try std.testing.expectEqual(@as(u8, 255), c.px[(8 * 16 + 8) * 4 + 3]);
 }
 
@@ -3061,7 +3112,7 @@ test "a gradient BORDER ramps around the outline and leaves the interior alone" 
         c.roundRectClip(.{ .x = 10, .y = 10, .w = 40, .h = 40 }, radius, elmz.Fill.vgrad(
             elmz.Color.rgbHex(0xff0000),
             elmz.Color.rgbHex(0x0000ff),
-        ), true, elmz.Rect.unbounded);
+        ), 1, elmz.Rect.unbounded);
         // top edge is the ramp's start, bottom edge its end
         const top = c.px[((10 * @as(usize, c.w)) + 30) * 4 ..][0..3];
         const bot = c.px[((49 * @as(usize, c.w)) + 30) * 4 ..][0..3];
@@ -4738,4 +4789,75 @@ test "the sticky face honours setFaceWeight, not just setFontAt" {
 
     try std.testing.expect(light_ink > 0);
     try std.testing.expect(heavy_ink > light_ink);
+}
+
+test "a stroked glyph is hollow, and its fill is not" {
+    // The falsifiable half of the text-effects work. A picture proves nothing:
+    // it is drawn from the same buffer the assertion would read. So compare two
+    // RENDERS of the same glyph and require the outline to ink less than the
+    // fill -- a box stroke and a glyph stroke both draw something, and only the
+    // glyph one leaves the interior alone.
+    const gpa = std.testing.allocator;
+    var c = try testCanvas(gpa, 200, 200);
+    defer c.deinit();
+    const copy = withFaceIf(&c, 'O') orelse return;
+    defer gpa.free(copy);
+
+    // 120px, not 40: the field's interior depth has to exceed the stroke width
+    // or there is nothing hollow to find. At 40px an 'O' measures min=-1.88,
+    // so a 1px ring leaves ~0.9px of interior on each side and reads as a fill.
+    const size: f32 = 120;
+    const fill_px = try gpa.alloc(u8, c.px.len);
+    defer gpa.free(fill_px);
+    @memset(c.px, 0);
+    c.drawText(8, 8, size, .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } }, "O");
+    @memcpy(fill_px, c.px);
+
+    var scratch: [200 * 200]u8 = undefined;
+    @memset(c.px, 0);
+    const drew = c.font.strokeText(
+        c.px,
+        c.w,
+        c.h,
+        8,
+        8,
+        size,
+        .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } },
+        "O",
+        1,
+        elmz.Rect.unbounded,
+        &scratch,
+    );
+    if (!drew) return; // no field cache attached, or a glyph the face cannot answer
+
+    var fill_ink: usize = 0;
+    var stroke_ink: usize = 0;
+    for (0..c.px.len / 4) |i| {
+        if (fill_px[i * 4 + 3] > 0) {
+            fill_ink += 1;
+            if (c.px[i * 4 + 3] > 0) stroke_ink += 1;
+        }
+    }
+    // Something was drawn, and it is strictly less than the solid fill: the
+    // ring, not the shape.
+    try std.testing.expect(stroke_ink > 0);
+
+    // A ring leaves interior ink alone; a solid fill, or a stroked bounding
+    // box, cannot. The 'O' at 40px has a stem ~9px wide, so a 1px ring on
+    // each side of a stem leaves most of its middle empty.
+    var interior_empty: usize = 0;
+    var interior_inked: usize = 0;
+    for (0..c.px.len / 4) |i| {
+        const o = i * 4;
+        if (fill_px[o + 3] == 0) continue;
+        // Distance from this fill pixel to the nearest UNINKED fill pixel on
+        // each side: deep inside a stem, the stroke must have skipped it.
+        if (c.px[o + 3] == 0) interior_empty += 1 else interior_inked += 1;
+    }
+    // The ring traces edges, so it must skip a real part of the glyph's ink.
+    try std.testing.expect(interior_empty > interior_inked);
+    // And it must not have skipped nearly all of it: that would mean it drew
+    // something thinner than an outline of the glyph, e.g. nothing at all in
+    // the right place.
+    try std.testing.expect(interior_inked > 0);
 }
