@@ -2775,7 +2775,6 @@ pub fn Ui(comptime M: type) type {
         /// What every builder accepts, repeated in each opts struct rather than shared
         /// through a nested field.
         fn finish(self: *Self, e: *Elem, o: anytype) *Elem {
-            _ = self;
             // Every margin an options struct happens to offer is applied.
             // @hasField rather than a required set: a builder that never wants
             // margins should not have to declare four zeroes to say so.
