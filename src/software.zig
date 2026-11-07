@@ -162,10 +162,30 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
         return if (isRegular(sty)) 0 else 1;
     }
     // Split at the LAST space, so a family with spaces of its own still works.
-    const cut = std.mem.lastIndexOfScalar(u8, name, ' ') orelse return no_match;
-    if (!eqlIgnoreCase(fam, name[0..cut])) return no_match;
-    const sty = face.style(&sty_buf) orelse return no_match;
-    return if (eqlIgnoreCase(sty, name[cut + 1 ..])) 2 else no_match;
+    // A name with NO space must NOT bail here: `Quicksand` is exactly that shape,
+    // and returning early is what kept the typographic pass below unreachable.
+    if (std.mem.lastIndexOfScalar(u8, name, ' ')) |cut| {
+        if (eqlIgnoreCase(fam, name[0..cut])) {
+            const sty = face.style(&sty_buf) orelse return no_match;
+            return if (eqlIgnoreCase(sty, name[cut + 1 ..])) 2 else no_match;
+        }
+    }
+    // Typographic family LAST. A named instance that ships as one variable file
+    // puts the whole style in the legacy family ("Quicksand Light"), so the
+    // legacy set alone cannot reach the plain family name -- and a directory
+    // holding nothing but that file answers "no font named Quicksand". ID 16/17
+    // exist for exactly this split and carry the unsuffixed name.
+    var typ_buf: [128]u8 = undefined;
+    var typsty_buf: [128]u8 = undefined;
+    const typ = face.typographicFamily(&typ_buf) orelse return no_match;
+    if (eqlIgnoreCase(typ, name)) {
+        const ts = face.typographicStyle(&typsty_buf) orelse return 1;
+        return if (isRegular(ts)) 0 else 1;
+    }
+    const tcut = std.mem.lastIndexOfScalar(u8, name, ' ') orelse return no_match;
+    if (!eqlIgnoreCase(typ, name[0..tcut])) return no_match;
+    const ts = face.typographicStyle(&typsty_buf) orelse return no_match;
+    return if (eqlIgnoreCase(ts, name[tcut + 1 ..])) 2 else no_match;
 }
 
 /// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`. What a
@@ -4942,3 +4962,4 @@ test "a stroked glyph is hollow, and its fill is not" {
     // the right place.
     try std.testing.expect(interior_inked > 0);
 }
+

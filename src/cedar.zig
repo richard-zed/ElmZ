@@ -160,6 +160,23 @@ pub const Font = struct {
         return self.face.style(out);
     }
 
+    /// The TYPOGRAPHIC family (name ID 16), which is unsuffixed even when the
+    /// legacy family carries the style -- a variable file whose named instances
+    /// are split into separate downloads reports "Quicksand Light" as its family
+    /// and "Quicksand" here. Null when the face declares no typographic record,
+    /// which is the common case for static faces.
+    pub fn typographicFamily(self: *const Font, out: []u8) ?[]const u8 {
+        if (!self.ok) return null;
+        return self.face.name(.typographic_family, out);
+    }
+
+    /// The typographic subfamily (name ID 17), the companion to
+    /// `typographicFamily`.
+    pub fn typographicStyle(self: *const Font, out: []u8) ?[]const u8 {
+        if (!self.ok) return null;
+        return self.face.name(.typographic_subfamily, out);
+    }
+
     pub fn available(self: *const Font) bool {
         return self.ok;
     }
