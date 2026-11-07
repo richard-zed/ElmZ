@@ -152,22 +152,77 @@ fn isRegular(style: []const u8) bool {
 
 const no_match: u8 = 0xff;
 
-/// How well a face answers to `name`, lower being better.
+/// True when `style` is slanted (italic/oblique), wherever the word sits in it.
+fn isItalic(style: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, style, " -");
+    while (it.next()) |w| {
+        if (eqlIgnoreCase(w, "Italic")) return true;
+        if (eqlIgnoreCase(w, "Oblique")) return true;
+    }
+    return false;
+}
+
+/// True when a style record like "Light Italic" answers a query word like
+/// "Italic" or "Light". Exact equality is not enough: a variable font's ID 17
+/// carries the weight AND the slant fused ("Light Italic"), while a user types
+/// one word. Every query token must appear in the style's tokens.
+fn styleAnswers(style: []const u8, query: []const u8) bool {
+    // A bare "Regular" means "the upright one", whatever weight word the record
+    // carries -- "Light" is the only style word on a Roman instance.
+    if (isRegular(query)) return !isItalic(style);
+    if (!isItalic(query) and isItalic(style)) return false;
+    var qit = std.mem.tokenizeAny(u8, query, " -");
+    var found = false;
+    while (qit.next()) |qw| {
+        if (eqlIgnoreCase(qw, "Regular")) continue;
+        var sit = std.mem.tokenizeAny(u8, style, " -");
+        var hit = false;
+        while (sit.next()) |sw| {
+            if (eqlIgnoreCase(qw, sw)) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) return false;
+        found = true;
+    }
+    return found or isRegular(query);
+}
+
+/// How well a face answers to `name`, lower being better. 0 is the only rank
+/// that stops the search, so it must mean unambiguously "the plain face".
+///
+/// Ladder (a plain family name like `Quicksand` should reach tier 0 or 1, never
+/// an italic):
+///   0  legacy family exact + Regular
+///   1  typographic family exact + Regular   (the unsuffixed name is the point)
+///   2  legacy family exact + any style
+///   3  typographic family exact + any style
+///   4  "Family Style" split, legacy, style answers
+///   5  "Family Style" split, typographic, style answers
+/// Italic/oblique faces are pushed to the back of EVERY tier, so an italic can
+/// never beat a Roman that matched at the same specificity.
 fn faceRank(face: *const Face, name: []const u8) u8 {
     var fam_buf: [128]u8 = undefined;
     var sty_buf: [128]u8 = undefined;
     const fam = face.family(&fam_buf) orelse return no_match;
+    const fam_style = face.style(&sty_buf) orelse "";
+
+    // Italic penalty: added to any tier a slanted face reaches.
+    const italic_penalty: u8 = 4;
+
     if (eqlIgnoreCase(fam, name)) {
-        const sty = face.style(&sty_buf) orelse return 1;
-        return if (isRegular(sty)) 0 else 1;
+        if (isRegular(fam_style)) return 0;
+        return 2 + italic_penalty;
     }
     // Split at the LAST space, so a family with spaces of its own still works.
     // A name with NO space must NOT bail here: `Quicksand` is exactly that shape,
     // and returning early is what kept the typographic pass below unreachable.
     if (std.mem.lastIndexOfScalar(u8, name, ' ')) |cut| {
         if (eqlIgnoreCase(fam, name[0..cut])) {
-            const sty = face.style(&sty_buf) orelse return no_match;
-            return if (eqlIgnoreCase(sty, name[cut + 1 ..])) 2 else no_match;
+            if (styleAnswers(fam_style, name[cut + 1 ..])) {
+                return if (isItalic(fam_style)) 4 + italic_penalty else 4;
+            }
         }
     }
     // Typographic family LAST. A named instance that ships as one variable file
@@ -178,14 +233,20 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
     var typ_buf: [128]u8 = undefined;
     var typsty_buf: [128]u8 = undefined;
     const typ = face.typographicFamily(&typ_buf) orelse return no_match;
+    const typ_style = face.typographicStyle(&typsty_buf) orelse "";
+
     if (eqlIgnoreCase(typ, name)) {
-        const ts = face.typographicStyle(&typsty_buf) orelse return 1;
-        return if (isRegular(ts)) 0 else 1;
+        if (isRegular(typ_style)) return 1;
+        // A bare family name on a variable face: ANY upright instance beats
+        // every slanted one, whatever weight word the record carries. "Light"
+        // is not isRegular, so without this the Roman and Italic tie and the
+        // byte-sorted path (`...Italic` < `...Regular`) wins.
+        return if (isItalic(typ_style)) 3 + italic_penalty else 3;
     }
     const tcut = std.mem.lastIndexOfScalar(u8, name, ' ') orelse return no_match;
     if (!eqlIgnoreCase(typ, name[0..tcut])) return no_match;
-    const ts = face.typographicStyle(&typsty_buf) orelse return no_match;
-    return if (eqlIgnoreCase(ts, name[tcut + 1 ..])) 2 else no_match;
+    if (!styleAnswers(typ_style, name[tcut + 1 ..])) return no_match;
+    return if (isItalic(typ_style)) 5 + italic_penalty else 5;
 }
 
 /// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`. What a
@@ -229,6 +290,7 @@ fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []cons
         // collection is that one name lives at index 3 and another at index 0.
         const n = faceCount(bytes);
         var found_here: ?Found = null;
+        var found_rank: u8 = no_match;
         var i: u32 = 0;
         while (i < n) : (i += 1) {
             const face = Face.initIndex(bytes, i);
@@ -239,13 +301,16 @@ fn searchDirs(gpa: Allocator, io: std.Io, dirs: []const []const u8, name: []cons
             if (rank < best_rank) {
                 if (found_here) |f| gpa.free(f.bytes);
                 found_here = .{ .bytes = bytes, .index = i };
+                found_rank = rank;
                 if (rank == 0) break;
             }
         }
         if (found_here) |f| {
             if (best) |b| gpa.free(b.bytes);
             best = f;
-            best_rank = faceRankIndex(&f, name);
+            // Carry the rank that WON, rather than re-deriving it: re-ranking
+            // re-reads the face and can disagree with the comparison above.
+            best_rank = found_rank;
             if (best_rank == 0) break;
         } else {
             gpa.free(bytes);
@@ -4736,7 +4801,6 @@ test "two weights of a variable face differ through the seam" {
     const light_hash = std.hash.Wyhash.hash(0, c.px);
     const light_ink = countInk(c.px);
 
-    std.debug.print("PROBE light inst={x} heavy_will={x} ncoords={d}\n", .{ probe.atCoords(wghtCoords(probe, 300, &cb)).instanceKey(), probe.atCoords(wghtCoords(probe, 900, &cb)).instanceKey(), probe.atCoords(wghtCoords(probe, 900, &cb)).face.n_coords });
     @memset(c.px, 0);
     c.setFontAt(bytes, 0, wghtCoords(probe, 900, &cb));
     r.text(10, 10, 60, ink, "H", area);
@@ -4962,4 +5026,5 @@ test "a stroked glyph is hollow, and its fill is not" {
     // the right place.
     try std.testing.expect(interior_inked > 0);
 }
+
 
