@@ -202,7 +202,28 @@ fn styleAnswers(style: []const u8, query: []const u8) bool {
 ///   5  "Family Style" split, typographic, style answers
 /// Italic/oblique faces are pushed to the back of EVERY tier, so an italic can
 /// never beat a Roman that matched at the same specificity.
+///
+/// STATIC faces run the same ladder six ranks higher (`static_bias`). A file
+/// with no `wght` axis cannot be asked for a weight at all: `revaryFace` finds
+/// no axis, returns, and the outline stays at the base instance. So when a
+/// family ships `static/Regular.ttf` beside its variable file, the static
+/// Regular matched the plain name at rank 0 and won -- and `.weight = 800`
+/// silently did nothing. Biasing statics keeps them available (a family with
+/// no variable file still resolves, since all its candidates move together)
+/// while letting the variable file take the plain name.
+/// A face with no `wght` axis is pushed this far back. Must clear the HIGHEST
+/// rank a variable face can reach, which is tier 5 plus the italic penalty (4),
+/// so 6 is not enough -- a variable italic would outrank a static Regular and a
+/// bare family name would resolve to a slanted outline.
+const static_bias: u8 = 10;
+
 fn faceRank(face: *const Face, name: []const u8) u8 {
+    return faceRankAt(face, name, if (face.axisCount() == 0) static_bias else 0);
+}
+
+/// The same ladder, offset by `bias`. One body rather than two, so a fix to a
+/// tier applies to statics and variable faces alike.
+fn faceRankAt(face: *const Face, name: []const u8, bias: u8) u8 {
     var fam_buf: [128]u8 = undefined;
     var sty_buf: [128]u8 = undefined;
     const fam = face.family(&fam_buf) orelse return no_match;
@@ -212,8 +233,8 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
     const italic_penalty: u8 = 4;
 
     if (eqlIgnoreCase(fam, name)) {
-        if (isRegular(fam_style)) return 0;
-        return 2 + italic_penalty;
+        if (isRegular(fam_style)) return bias;
+        return bias + 2 + italic_penalty;
     }
     // Split at the LAST space, so a family with spaces of its own still works.
     // A name with NO space must NOT bail here: `Quicksand` is exactly that shape,
@@ -221,11 +242,11 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
     if (std.mem.lastIndexOfScalar(u8, name, ' ')) |cut| {
         if (eqlIgnoreCase(fam, name[0..cut])) {
             if (styleAnswers(fam_style, name[cut + 1 ..])) {
-                return if (isItalic(fam_style)) 4 + italic_penalty else 4;
+                return bias + 4 + (if (isItalic(fam_style)) italic_penalty else 0);
             }
         }
     }
-    // Typographic family LAST. A named instance that ships as one variable file
+    // Typographic family next. A named instance that ships as one variable file
     // puts the whole style in the legacy family ("Quicksand Light"), so the
     // legacy set alone cannot reach the plain family name -- and a directory
     // holding nothing but that file answers "no font named Quicksand". ID 16/17
@@ -236,17 +257,17 @@ fn faceRank(face: *const Face, name: []const u8) u8 {
     const typ_style = face.typographicStyle(&typsty_buf) orelse "";
 
     if (eqlIgnoreCase(typ, name)) {
-        if (isRegular(typ_style)) return 1;
+        if (isRegular(typ_style)) return bias + 1;
         // A bare family name on a variable face: ANY upright instance beats
         // every slanted one, whatever weight word the record carries. "Light"
         // is not isRegular, so without this the Roman and Italic tie and the
         // byte-sorted path (`...Italic` < `...Regular`) wins.
-        return if (isItalic(typ_style)) 3 + italic_penalty else 3;
+        return bias + 3 + (if (isItalic(typ_style)) italic_penalty else 0);
     }
     const tcut = std.mem.lastIndexOfScalar(u8, name, ' ') orelse return no_match;
     if (!eqlIgnoreCase(typ, name[0..tcut])) return no_match;
     if (!styleAnswers(typ_style, name[tcut + 1 ..])) return no_match;
-    return if (isItalic(typ_style)) 5 + italic_penalty else 5;
+    return bias + 5 + (if (isItalic(typ_style)) italic_penalty else 0);
 }
 
 /// Best match for `name` among the fonts under `dirs`, or `error.FontNotFound`. What a
@@ -5026,5 +5047,3 @@ test "a stroked glyph is hollow, and its fill is not" {
     // the right place.
     try std.testing.expect(interior_inked > 0);
 }
-
-
