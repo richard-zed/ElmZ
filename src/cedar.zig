@@ -5,7 +5,80 @@ const std = @import("std");
 const elmz = @import("elmz");
 const gamma = @import("gamma.zig");
 const cedar = @import("inkwell");
-const strokeGlyph = cedar.strokeGlyph;
+const ramp = @import("ramp.zig");
+
+/// Bake or fetch the glyph's signed distance field and ramp a stroke band out of
+/// it. Cedar owns the field; the band's shape is elm's business, so the ramp is
+/// `ramp.strokeCoverageAA` rather than a Cedar function.
+fn strokeGlyph(
+    cache: *cedar.FieldCache,
+    font: *const cedar.Font,
+    gid: u16,
+    scale: f32,
+    phase: cedar.Phase,
+    phase_y: cedar.Phase,
+    reach: u8,
+    width: u8,
+    aa: f32,
+    out: []u8,
+) cedar.GlyphError!cedar.FieldCache.FieldRef {
+    const f = try cache.fieldAt(font, gid, scale, phase, phase_y, reach);
+    const n = @as(usize, f.w) * @as(usize, f.h);
+    if (out.len < n) return error.BufferTooSmall;
+    ramp.strokeCoverageAA(f.dist, out[0..n], width, aa);
+    return f;
+}
+
+/// The BORDER band around a glyph: from the ink boundary outward, leaving the
+/// interior to the fill painted after it.
+///
+/// This is a halo with the feathering removed: same field, same cache, same
+/// sign convention, same units. `spread`/`offset` are zero and `falloff` is
+/// zero, so only the AA term softens the inner edge and the whole band is
+/// solid out to `radius`. Writing a separate ramp for it duplicated the sign
+/// and unit reasoning and got both wrong.
+fn borderGlyph(
+    cache: *cedar.FieldCache,
+    font: *const cedar.Font,
+    gid: u16,
+    scale: f32,
+    phase: cedar.Phase,
+    phase_y: cedar.Phase,
+    reach: u8,
+    width: f32,
+    aa: f32,
+    out: []u8,
+) cedar.GlyphError!cedar.FieldCache.FieldRef {
+    const f = try cache.fieldAt(font, gid, scale, phase, phase_y, reach);
+    const n = @as(usize, f.w) * @as(usize, f.h);
+    if (out.len < n) return error.BufferTooSmall;
+    ramp.haloCoverageAA(f.dist, out[0..n], f.w, f.h, width + 1.0, -1.0, aa, .glow, 1.0, 0.0, 0.0);
+    return f;
+}
+
+/// The same for a halo, on whichever side of the contour its mode names.
+fn haloGlyph(
+    cache: *cedar.FieldCache,
+    font: *const cedar.Font,
+    gid: u16,
+    scale: f32,
+    phase: cedar.Phase,
+    phase_y: cedar.Phase,
+    reach: u8,
+    radius: f32,
+    falloff: f32,
+    aa: f32,
+    mode: ramp.HaloMode,
+    spread: f32,
+    offset: [2]f32,
+    out: []u8,
+) cedar.GlyphError!cedar.FieldCache.FieldRef {
+    const f = try cache.fieldAt(font, gid, scale, phase, phase_y, reach);
+    const n = @as(usize, f.w) * @as(usize, f.h);
+    if (out.len < n) return error.BufferTooSmall;
+    ramp.haloCoverageAA(f.dist, out[0..n], f.w, f.h, radius, falloff, aa, mode, spread, offset[0], offset[1]);
+    return f;
+}
 const linebreak = cedar.linebreak;
 
 // Line breaking is pure Unicode logic with no font data in it, so it lives in
@@ -762,10 +835,14 @@ pub const Font = struct {
             const tm = self.measure(bytes, size);
             box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
         }
-        const cx0: i64 = @intFromFloat(@floor(clip.x));
-        const cy0: i64 = @intFromFloat(@floor(clip.y));
-        const cx1: i64 = @intFromFloat(@ceil(clip.x + clip.w));
-        const cy1: i64 = @intFromFloat(@ceil(clip.y + clip.h));
+        // Clip is the RUN's rect, not the canvas: a glow grows well past the
+        // glyph bounds, so clamping to the run truncated it to a rectangle the
+        // size of the text. Intersect with the target instead and let the
+        // element rect do its job only where it is narrower than the canvas.
+        const cx0: i64 = @max(0, @as(i64, @intFromFloat(@floor(clip.x))));
+        const cy0: i64 = @max(0, @as(i64, @intFromFloat(@floor(clip.y))));
+        const cx1: i64 = @min(@as(i64, cw), @as(i64, @intFromFloat(@ceil(clip.x + clip.w))));
+        const cy1: i64 = @min(@as(i64, ch), @as(i64, @intFromFloat(@ceil(clip.y + clip.h))));
         const s = self.scaleFor(size);
         const baseline = y + self.verticalMetrics(size).ascent;
         const mut = @constCast(self);
@@ -837,6 +914,49 @@ pub const Font = struct {
         clip: elmz.Rect,
         scratch: []u8,
     ) bool {
+        return self.bandedText(px, cw, ch, x, y, size, fill, bytes, width, .stroke, clip, scratch);
+    }
+
+    /// Glyph text drawn as a BAND around each outline rather than a solid fill.
+    /// `Banded.kind` picks which band: a `.stroke` replaces the fill and leaves
+    /// the interior hollow, while a `.border` runs from the ink boundary
+    /// outward so a fill can be painted inside it afterwards. Everything else --
+    /// layout, pen advance, field cache, blending -- is shared, which is why
+    /// there is one body and not two.
+    pub const Banded = enum { stroke, border };
+
+    pub fn borderedText(
+        self: *const Font,
+        px: []u8,
+        cw: u32,
+        ch: u32,
+        x: f32,
+        y: f32,
+        size: f32,
+        fill: elmz.Fill,
+        bytes: []const u8,
+        width: u8,
+        clip: elmz.Rect,
+        scratch: []u8,
+    ) bool {
+        return self.bandedText(px, cw, ch, x, y, size, fill, bytes, width, .border, clip, scratch);
+    }
+
+    fn bandedText(
+        self: *const Font,
+        px: []u8,
+        cw: u32,
+        ch: u32,
+        x: f32,
+        y: f32,
+        size: f32,
+        fill: elmz.Fill,
+        bytes: []const u8,
+        width: u8,
+        kind: Banded,
+        clip: elmz.Rect,
+        scratch: []u8,
+    ) bool {
         if (!self.ok or !self.fields_ok) {
             return false;
         }
@@ -849,10 +969,14 @@ pub const Font = struct {
             const tm = self.measure(bytes, size);
             box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
         }
-        const cx0: i64 = @intFromFloat(@floor(clip.x));
-        const cy0: i64 = @intFromFloat(@floor(clip.y));
-        const cx1: i64 = @intFromFloat(@ceil(clip.x + clip.w));
-        const cy1: i64 = @intFromFloat(@ceil(clip.y + clip.h));
+        // Clip is the RUN's rect, not the canvas: a glow grows well past the
+        // glyph bounds, so clamping to the run truncated it to a rectangle the
+        // size of the text. Intersect with the target instead and let the
+        // element rect do its job only where it is narrower than the canvas.
+        const cx0: i64 = @max(0, @as(i64, @intFromFloat(@floor(clip.x))));
+        const cy0: i64 = @max(0, @as(i64, @intFromFloat(@floor(clip.y))));
+        const cx1: i64 = @min(@as(i64, cw), @as(i64, @intFromFloat(@ceil(clip.x + clip.w))));
+        const cy1: i64 = @min(@as(i64, ch), @as(i64, @intFromFloat(@ceil(clip.y + clip.h))));
         const s = self.scaleFor(size);
         const baseline = y + self.verticalMetrics(size).ascent;
         const mut = @constCast(self);
@@ -875,7 +999,14 @@ pub const Font = struct {
                 // looking smooth on a 1px one. Capped so the ramp never eats
                 // more than a quarter of the band.
                 const aa_w = @min(@as(f32, @floatFromInt(width)) * 0.5, 2.0);
-                const r = strokeGlyph(&mut.fields, &self.face, gid, s, .zero, .zero, width, @max(aa_w, 1.0), scratch) catch null;
+                const aa_dev = @max(aa_w, 1.0);
+                // Border band starts AT the ink boundary, so its width is the
+                // device width measured outward; a stroke straddles it. Both
+                // draw from the reach that width implies.
+                const r = switch (kind) {
+                    .stroke => strokeGlyph(&mut.fields, &self.face, gid, s, .zero, .zero, width, width, aa_dev, scratch) catch null,
+                    .border => borderGlyph(&mut.fields, &self.face, gid, s, .zero, .zero, if (width < 12) width + 1 else width, @floatFromInt(width), aa_dev, scratch) catch null,
+                };
                 if (r) |rr| {
                     if (rr.w > 0 and rr.h > 0) {
                         // `x0`/`y0` are already pixels, for the same reason the
@@ -899,6 +1030,89 @@ pub const Font = struct {
                                     @as(f32, @floatFromInt(gx_px)) + 0.5,
                                     @as(f32, @floatFromInt(py)) + 0.5,
                                 ), cov);
+                            }
+                        }
+                    }
+                }
+                pen += @as(f32, @floatFromInt(adv)) * s;
+            }
+        }
+        return drew;
+    }
+
+    /// Draw a HALO around the glyphs: a band OUTSIDE the contour, behind the
+    /// letterform, faded toward `radius`.
+    ///
+    /// Same machinery as `strokeText` and the same cached distance field, with
+    /// the inner half of the band discarded -- ink is negative and outside is
+    /// positive, so keeping `d > 0` is the whole of "behind the glyph". That is
+    /// why a glow needs no stencil pass to avoid painting over its own letters.
+    ///
+    /// Returns false when the face cannot answer, so the caller can fall back to
+    /// drawing nothing rather than a wrong shape.
+    pub fn haloText(
+        self: *const Font,
+        px: []u8,
+        cw: u32,
+        ch: u32,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: elmz.Color,
+        bytes: []const u8,
+        radius: f32,
+        falloff: f32,
+        mode: ramp.HaloMode,
+        spread: f32,
+        offset: [2]f32,
+        clip: elmz.Rect,
+        scratch: []u8,
+    ) bool {
+        if (!self.ok or !self.fields_ok) return false;
+        if (color.a == 0 or radius <= 0) return false;
+        // Clip is the RUN's rect, not the canvas: a glow grows well past the
+        // glyph bounds, so clamping to the run truncated it to a rectangle the
+        // size of the text. Intersect with the target instead and let the
+        // element rect do its job only where it is narrower than the canvas.
+        const cx0: i64 = @max(0, @as(i64, @intFromFloat(@floor(clip.x))));
+        const cy0: i64 = @max(0, @as(i64, @intFromFloat(@floor(clip.y))));
+        const cx1: i64 = @min(@as(i64, cw), @as(i64, @intFromFloat(@ceil(clip.x + clip.w))));
+        const cy1: i64 = @min(@as(i64, ch), @as(i64, @intFromFloat(@ceil(clip.y + clip.h))));
+        const s = self.scaleFor(size);
+        const baseline = y + self.verticalMetrics(size).ascent;
+        const mut = @constCast(self);
+        // Baked to the FULL reach: a field baked exactly to `radius` has no
+        // samples beyond it, so the fade would be cut off at the rim. `spread`
+        // pushes the band further out, and `offset` slides it, so both widen
+        // what has to be baked or the glow is clipped on one side.
+        const band: f32 = radius + @max(0.0, spread) + @max(@abs(offset[0]), @abs(offset[1]));
+        const reach_f: f32 = @ceil(band) + 1.0;
+        const reach: u8 = @intFromFloat(@min(reach_f, @as(f32, @floatFromInt(cedar.max_stroke_px))));
+        const aa_w: f32 = @min(radius * 0.5, 2.0);
+        var pen = x;
+        var at: usize = 0;
+        var run: Run = .{};
+        var drew = false;
+        while (at < bytes.len) {
+            at = self.layoutRun(bytes, at, &run);
+            for (run.gids[0..run.len], run.advs[0..run.len]) |gid, adv| {
+                const r = haloGlyph(&mut.fields, &self.face, gid, s, .zero, .zero, reach, radius, falloff, @max(aa_w, 1.0), mode, spread, offset, scratch) catch null;
+                if (r) |rr| {
+                    if (rr.w > 0 and rr.h > 0) {
+                        const ox: i64 = @intFromFloat(@round(pen + @as(f32, @floatFromInt(rr.x0))));
+                        const oy: i64 = @intFromFloat(@round(baseline + @as(f32, @floatFromInt(rr.y0))));
+                        var row: u32 = 0;
+                        while (row < rr.h) : (row += 1) {
+                            const py = oy + row;
+                            if (py < cy0 or py >= cy1) continue;
+                            var col: u32 = 0;
+                            while (col < rr.w) : (col += 1) {
+                                const gx_px = ox + @as(i64, col);
+                                if (gx_px < cx0 or gx_px >= cx1) continue;
+                                const cov = scratch[row * rr.w + col];
+                                if (cov == 0) continue;
+                                drew = true;
+                                blend(px, cw, ch, gx_px, py, color, cov);
                             }
                         }
                     }

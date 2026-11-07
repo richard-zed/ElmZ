@@ -4,6 +4,7 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const cedar = @import("cedar.zig");
+const ramps = @import("ramp.zig");
 const gamma = @import("gamma.zig");
 const elmfont = @import("elmfont.zig");
 
@@ -97,9 +98,16 @@ fn collectFonts(gpa: Allocator, io: std.Io, font_home: ?[]const u8, dir_path: []
     // contents of `font_dirs` stay literal and readable. No HOME means no user
     // fonts -- a daemon with no home directory still gets the system ones, and
     // that is a skip, not a failure.
+    // The separator after `~` is dropped before joining. `path.join` tolerates
+    // it either way (a leading '/' in a later component does NOT reset the
+    // path), so this only keeps the joined string free of a doubled separator.
     const root = if (isHomeRelative(dir_path)) blk: {
         const home = font_home orelse return;
-        const joined = std.fs.path.join(gpa, &.{ home, dir_path[1..] }) catch return;
+        if (home.len == 0) return;
+        var rel = dir_path[1..];
+        while (rel.len > 0 and rel[0] == '/') rel = rel[1..];
+        if (rel.len == 0) return;
+        const joined = std.fs.path.join(gpa, &.{ home, rel }) catch return;
         defer gpa.free(joined);
         break :blk joined;
     } else dir_path;
@@ -1953,11 +1961,30 @@ pub const Canvas = struct {
             .frost => |q| r.frost(q.rect, q.radius, q.blur, q.clip),
             .rrect => |q| r.roundedRect(q.rect, q.radius, q.fill, q.stroke, q.clip),
             .text => |t| {
-                // A prim carrying `.stroke` is outlined glyphs, not filled ones.
-                // One branch here rather than a prim type of its own: the two
-                // share every field but the width, and a separate variant would
-                // need its own prune, its own face handling and its own count.
-                if (t.stroke) |sw| {
+                const face_idx: u16 = t.face;
+                // An INNER glow lives inside the letterform, so painting the fill
+                // on top erases it completely -- which reads as "inner_glow does
+                // nothing". An outer glow belongs BEHIND the glyphs; an inner one
+                // is only visible painted after them, over the ink.
+                const halo_inside = if (t.text_halo) |th| th.mode == .inner_glow else false;
+                if (t.text_halo) |th| {
+                    if (!halo_inside) {
+                        const hair = self.facePtrAt(face_idx).*;
+                        self.drawTextHalo(hair, t.x * self.scale, t.y * self.scale, t.size * self.scale, th, t.bytes, .{ .x = 0, .y = 0, .w = @floatFromInt(self.w), .h = @floatFromInt(self.h) });
+                    }
+                }
+                if (t.border) |bw| {
+                    // A BORDER runs outside the ink and leaves the interior to
+                    // the fill painted after it. The collector encodes it as its
+                    // own field, not as `.stroke`, so testing `.stroke` alone
+                    // sent every border prim down the plain-text path below --
+                    // queued, counted, and drawn as ordinary text.
+                    if (t.face != 0) r.setFace(t.face);
+                    r.setWeight(t.weight);
+                    r.borderedText(t.x, t.y, t.size, t.border_fill orelse t.fill, t.bytes, bw, t.clip);
+                    r.setFace(t.face);
+                    r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
+                } else if (t.stroke) |sw| {
                     if (t.face != 0) r.setFace(t.face);
                     r.setWeight(t.weight);
                     r.strokedText(t.x, t.y, t.size, t.fill, t.bytes, sw, t.clip);
@@ -1969,6 +1996,12 @@ pub const Canvas = struct {
                     r.setWeight(t.weight);
                     const f = self.facePtrAt(t.face);
                     self.drawTextFace(f, t.x * self.scale, t.y * self.scale, t.size * self.scale, t.fill, t.bytes, self.scaledRect(t.clip));
+                }
+                if (t.text_halo) |th| {
+                    if (halo_inside) {
+                        const hair = self.facePtrAt(face_idx).*;
+                        self.drawTextHalo(hair, t.x * self.scale, t.y * self.scale, t.size * self.scale, th, t.bytes, .{ .x = 0, .y = 0, .w = @floatFromInt(self.w), .h = @floatFromInt(self.h) });
+                    }
                 }
             },
         };
@@ -2310,6 +2343,7 @@ pub const Canvas = struct {
         .rrect = vtRrect,
         .text = vtText,
         .stroked_text = vtStrokedText,
+        .text_halo = vtTextHaloNoop,
         .set_face = vtSetFace,
         .set_weight = vtSetWeight,
         .halo = vtHalo,
@@ -2446,7 +2480,7 @@ pub const Canvas = struct {
         }
     }
 
-    fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, width: u8, clip: elmz.Rect) void {
+    fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, width: u8, clip: elmz.Rect, kind: u8) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const f = self.facePtrAt(self.cur_face);
         const sx = x * self.scale;
@@ -2461,11 +2495,51 @@ pub const Canvas = struct {
         const want: f32 = @round(@as(f32, @floatFromInt(width)) * self.scale);
         const w: u8 = @intFromFloat(@min(@max(1.0, want), @as(f32, @floatFromInt(cedar.max_stroke_px))));
         if (self.stroke_scratch.len == 0) return self.drawTextFace(f, sx, sy, ss, fill, bytes, sclip);
-        if (!f.strokeText(self.px, self.w, self.h, sx, sy, ss, fill, bytes, w, sclip, self.stroke_scratch)) {
+        // `kind` picks which band: 0 is a stroke, which replaces the fill and
+        // leaves the interior hollow; 1 is a border, which runs outside the ink
+        // so a fill painted afterwards still shows inside it.
+        const ok = if (kind == 1)
+            f.borderedText(self.px, self.w, self.h, sx, sy, ss, fill, bytes, w, sclip, self.stroke_scratch)
+        else
+            f.strokeText(self.px, self.w, self.h, sx, sy, ss, fill, bytes, w, sclip, self.stroke_scratch);
+        if (!ok) {
             // The face could not answer -- no field cache, or a glyph past the
             // widest field. A blank label is never the better failure.
             self.drawTextFace(f, sx, sy, ss, fill, bytes, sclip);
         }
+    }
+
+    /// The vtable slot is never reached in this canvas: a halo is carried on the
+    /// text prim and painted by `drawTextHalo` below. Kept so the interface is
+    /// total, and so a backend that prefers a separate call can use it.
+    fn vtTextHaloNoop(_: *anyopaque, _: f32, _: f32, _: f32, _ : elmz.Halo, _: []const u8, _: elmz.Rect) void {}
+
+    /// Paint the glow around a run's glyphs. Device pixels in, like every other
+    /// draw here: callers multiply by `self.scale` before arriving.
+    fn drawTextHalo(self: *Self, f: cedar.Font, x: f32, y: f32, size: f32, h: elmz.Halo, bytes: []const u8, clip: elmz.Rect) void {
+        if (self.stroke_scratch.len == 0) return;
+        // LOGICAL radius scaled like every other length, then clamped to the
+        // field's baked reach: past it `haloText` returns false and the glow
+        // silently vanishes, which reads as "text_halo does nothing".
+        // `blur` is the reach: on a BOX halo it straddles the silhouette, but a
+        // glyph halo only grows outward, so the whole of it lands outside the
+        // letterform. Halved to keep the visual weight comparable to a box halo.
+        const reach_logical = @max(h.blur * 0.5, 1.0);
+        const r_dev: f32 = @min(reach_logical * self.scale, @as(f32, @floatFromInt(cedar.max_stroke_px)));
+        if (r_dev <= 0) return;
+        // Everything below the radius was hardcoded: `.mode` collapsed to glow,
+        // `spread` was dropped and `offset` never arrived. The theme parsed all
+        // three and the paint path ignored them.
+        const mode: ramps.HaloMode = switch (h.mode) {
+            .glow => .glow,
+            .outer_glow => .outer_glow,
+            .inner_glow => .inner_glow,
+        };
+        const spread_dev: f32 = h.spread * self.scale;
+        // BOTH axes: passing only `offset[1]` meant a horizontal offset did
+        // nothing at all on a glyph halo.
+        const offset_dev: [2]f32 = .{ h.offset[0] * self.scale, h.offset[1] * self.scale };
+        _ = f.haloText(self.px, self.w, self.h, x, y, size, h.color, bytes, r_dev, 1.0, mode, spread_dev, offset_dev, clip, self.stroke_scratch);
     }
 
     fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {

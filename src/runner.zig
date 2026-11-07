@@ -466,6 +466,12 @@ pub const FontSlot = struct {
     bytes: ?[]u8 = null,
     applied: [elmz.font_name_max]u8 = undefined,
     applied_len: usize = 0,
+    /// The name that most recently FAILED to load. Without this the search runs
+    /// again every single frame: a miss costs a full scan of every font
+    /// directory, and a frame is 16ms. Absent fonts are the common case, so the
+    /// slow path is the one everybody hits.
+    failed: [elmz.font_name_max]u8 = undefined,
+    failed_len: usize = 0,
     canvas: ?*software.Canvas = null,
 
     pub fn deinit(self: *FontSlot, gpa: std.mem.Allocator) void {
@@ -475,6 +481,10 @@ pub const FontSlot = struct {
 
     fn appliedName(self: *const FontSlot) []const u8 {
         return self.applied[0..self.applied_len];
+    }
+
+    fn failedName(self: *const FontSlot) []const u8 {
+        return self.failed[0..self.failed_len];
     }
 };
 
@@ -565,16 +575,25 @@ pub const FontRegistry = struct {
 /// there.
 pub fn applyChainFont(ui: anytype, gpa: std.mem.Allocator, io: std.Io, want: ?[]const u8, slot: *FontSlot, home: ?[]const u8) bool {
     const name = want orelse return false;
+    // Already attached, or already known to be absent. Both are no-ops, and the
+    // second is the one that matters: retrying a missing name each frame walks
+    // the font directories forever. The band was raised once, on the first
+    // attempt, so nothing is lost by staying quiet.
     if (std.mem.eql(u8, name, slot.appliedName())) return false;
+    if (std.mem.eql(u8, name, slot.failedName())) return false;
+    if (name.len > elmz.font_name_max) return false;
 
     const bytes = software.loadFontByNameHome(gpa, io, name, &.{}, home) catch {
         ui.failExternal(.font, "no font named {s}", .{name});
+        @memcpy(slot.failed[0..name.len], name);
+        slot.failed_len = name.len;
         return false;
     };
     slot.deinit(gpa);
     slot.bytes = bytes;
     @memcpy(slot.applied[0..name.len], name);
     slot.applied_len = name.len;
+    slot.failed_len = 0;
     if (slot.canvas) |cv| cv.setFont(bytes);
     return true;
 }
@@ -606,6 +625,12 @@ fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io:
 }
 
 /// Compose a whole app onto a window backend.
+///
+/// No environment map is handed in, so the font search has no HOME and skips
+/// every `~` directory -- meaning user-installed fonts are invisible to an app
+/// that starts here. That is not a failure worth crashing on, but it is a
+/// capability silently missing. Use `runAppEnv` with `init.environ_map` when the
+/// app names a font family rather than shipping its own file.
 pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Window) !Stats {
     return runAppEnv(app, gpa, io, null, window);
 }

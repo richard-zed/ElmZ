@@ -314,8 +314,10 @@ pub const ColorSpec = struct {
 
     pub const Error = error{ColorNotOneForm};
 
-    /// Fold to a `Color`. Six-digit hex is opaque, eight is `0xRRGGBBAA`, both handled by
-    /// `Color.hex` -- the same rule the built-in roles already use.
+    /// Fold to a `Color`. Hex is RGB ONLY and always opaque: `0xRRGGBB`. An eighth
+    /// digit cannot be read, because `0x000000ff` is the number 255 -- it is
+    /// indistinguishable from `0x0000ff` and parses as blue. Use `.rgba` when alpha
+    /// is needed.
     pub fn resolve(self: ColorSpec) Error!elmz.Color {
         var seen: u2 = 0;
         var out: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0xff };
@@ -458,6 +460,9 @@ pub const StyleSpec = struct {
     bg: ?[]const u8 = null,
     color: ?[]const u8 = null,
     border: ?[]const u8 = null,
+    /// Border width in pixels. Absent means 1, the only width that existed
+    /// before this field, so every theme written against it is unchanged.
+    border_width: ?f32 = null,
     font: ?[]const u8 = null,
     size: ?f32 = null,
     weight: ?u16 = null,
@@ -910,6 +915,7 @@ pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntr
                 .bg = e.spec.bg,
                 .color = e.spec.color,
                 .border = e.spec.border,
+                .border_width = e.spec.border_width,
                 .font = e.spec.font,
                 .size = e.spec.size,
                 .weight = e.spec.weight,
@@ -1436,6 +1442,10 @@ const Walker = struct {
             };
             const owned = try self.gpa.dupe(u8, ref.name);
             if (std.mem.eql(u8, key, "color")) entry.color = owned else if (std.mem.eql(u8, key, "bg")) entry.bg = owned else entry.border = owned;
+            return;
+        }
+        if (std.mem.eql(u8, key, "border_width")) {
+            entry.border_width = try self.readNumber("style .border_width");
             return;
         }
         if (std.mem.eql(u8, key, "font")) {

@@ -35,7 +35,9 @@ pub const Color = struct {
         };
     }
 
-    /// Six digits or eight, decided by the value's own magnitude.
+    /// RGB ONLY, always opaque. There is no eight-digit form: `0x000000ff` is the
+    /// number 255, identical to `0x0000ff`, and a magnitude test cannot tell them
+    /// apart -- it would parse as blue. Alpha comes from `rgbaHex` or a literal.
     pub fn hex(v: u32) Color {
         return if (v > 0xFFFFFF) rgbaHex(v) else rgbHex(v);
     }
@@ -374,7 +376,28 @@ pub const Primitive = union(enum) {
     rrect: struct { rect: Rect, radius: f32, fill: Fill, stroke: ?u8, clip: Rect },
     /// `face` selects a registered typeface by index, 0 being the primary. Behind the
     /// scenes on purpose: a `view` never writes this.
-    text: struct { x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect, face: u16 = 0, weight: u16 = 0, stroke: ?u8 = null },
+    text: struct {
+        x: f32,
+        y: f32,
+        size: f32,
+        fill: Fill,
+        bytes: []const u8,
+        clip: Rect,
+        face: u16 = 0,
+        weight: u16 = 0,
+        stroke: ?u8 = null,
+        /// Glyph outline width when `.border` is set on text; null means no
+        /// glyph border. Carried beside `stroke` because the two are different
+        /// paints: a stroke REPLACES the fill and leaves the interior hollow,
+        /// a border runs outside the ink so the fill still shows inside it.
+        border: ?u8 = null,
+        /// Colour of the glyph border, separate from the fill it encloses.
+        border_fill: ?Fill = null,
+        /// A glow traced around the GLYPH OUTLINES, drawn before the fill so it
+        /// sits behind the letters. The same `.halo` a theme writes for any
+        /// element: on TEXT it follows the contours instead of the box.
+        text_halo: ?Halo = null,
+    },
     /// Recorded where it has to composite: before the element's own fill for `glow` and
     /// `shadow`, after it for `inner_glow`.
     halo: struct { rect: Rect, corner: f32, halo: Halo, clip: Rect },
@@ -467,7 +490,10 @@ pub const Renderer = struct {
         text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, clip: Rect) void,
         /// Text drawn as an OUTLINE of the glyphs, not a fill. A backend with no
         /// distance-field support falls back to `text`.
-        stroked_text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void,
+        stroked_text: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect, kind: u8) void,
+        /// A glow around the GLYPH OUTLINES. Drawn before the fill, so it
+        /// composites behind the letters rather than washing over them.
+        text_halo: *const fn (ptr: *anyopaque, x: f32, y: f32, size: f32, h: Halo, bytes: []const u8, clip: Rect) void,
         /// Point subsequent `text` calls at a registered face, by index. 0 is the primary.
         /// A backend with only one face ignores it.
         set_face: *const fn (ptr: *anyopaque, face: u16) void,
@@ -516,9 +542,27 @@ pub const Renderer = struct {
     }
 
     /// Text whose glyphs are outlined rather than filled.
+    /// Glyphs outlined in `fill`, with the interior left to a fill drawn
+    /// afterwards. `.stroke` is the hollow alternative.
+    pub fn borderedText(self: Renderer, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void {
+        self.vtable.stroked_text(self.ptr, x, y, size, fill, bytes, width, clip, 1);
+    }
+
     pub fn strokedText(self: Renderer, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void {
+        // kind 0 = stroke (hollow), 1 = border (filled inside).
+
         if (bytes.len == 0) return;
-        self.vtable.stroked_text(self.ptr, x, y, size, fill, bytes, width, clip);
+        self.vtable.stroked_text(self.ptr, x, y, size, fill, bytes, width, clip, 0);
+    }
+
+    /// A glow traced around the glyphs themselves, not round a box.
+    pub fn textHalo(self: Renderer, x: f32, y: f32, size: f32, h: Halo, bytes: []const u8, clip: Rect) void {
+        if (bytes.len == 0) return;
+        // A glyph halo has no box, but it does have a signed distance field, so
+        // `mode`, `spread` and `offset` all apply: the same ramp runs on either
+        // side of the contour, pushed off it by `spread` and slid by `offset`.
+        if (h.color.a == 0 or h.blur <= 0) return;
+        self.vtable.text_halo(self.ptr, x, y, size, h, bytes, clip);
     }
 
     /// Point subsequent `text` calls at a registered face, by index.
@@ -737,6 +781,8 @@ pub const StyleEntry = struct {
         bg: ?[]const u8 = null,
         color: ?[]const u8 = null,
         border: ?[]const u8 = null,
+        /// Border width in pixels; absent means 1.
+        border_width: ?f32 = null,
         font: ?[]const u8 = null,
         /// Point size named by the theme.
         size: ?f32 = null,
@@ -1220,6 +1266,8 @@ pub const Style = struct {
     bg: ?Fill = null,
     color: ?Fill = null,
     border: ?Fill = null,
+    /// Border width in logical pixels; absent means 1.
+    border_width: ?f32 = null,
     /// `null` means the caller did not specify, which is what lets a widget merge a caller
     /// style over its own defaults and still let someone force a square.
     radius: ?f32 = null,
@@ -1301,8 +1349,10 @@ pub fn Element(comptime M: type) type {
         stroke: ?u8 = null,
         /// A halo drawn only while the pointer is over this element, merged over `halo`.
         hover_halo: ?Halo = null,
-        /// 1px inset outline, drawn inside the rect so it costs no layout
+        /// Inset outline, drawn inside the rect so it costs no layout.
         border: ?Fill = null,
+        /// Border width in logical pixels; absent means 1.
+        border_width: ?f32 = null,
         /// wrap text to the width layout gives this element
         wrap: bool = false,
         /// corner rounding; 0 = square. Clamped to half the shorter side.
@@ -1375,6 +1425,11 @@ pub fn Element(comptime M: type) type {
                 .bg = self.bg,
                 .color = self.color,
                 .border = self.border,
+                // `border_width` belongs here for exactly the reason `face`
+                // does below: anything that round-trips an element through
+                // `style()` drops the field otherwise, and a border reverts to
+                // the 1px default without any error.
+                .border_width = self.border_width,
                 // `face` belongs here or the round trip drops it: `finish` reads
                 // the face back off `style()` to copy it into the text geometry,
                 // so a `style()` that omits the field makes that copy a no-op.
@@ -1387,6 +1442,7 @@ pub fn Element(comptime M: type) type {
                 .pad = self.pad,
                 .halo = self.halo,
                 .frost = self.frost,
+                .stroke = self.stroke,
             };
         }
 
@@ -1396,6 +1452,7 @@ pub fn Element(comptime M: type) type {
             self.bg = mergeFill(self.bg, s.bg);
             self.color = mergeFill(self.color, s.color);
             self.border = mergeFill(self.border, s.border);
+            if (s.border_width) |v| self.border_width = v;
             if (s.face) |v| self.face = v;
             if (s.weight) |v| self.weight = v;
             self.radius = s.radius orelse 0;
@@ -1421,6 +1478,7 @@ pub fn Element(comptime M: type) type {
             if (s.bg) |v| self.bg = v;
             if (s.color) |v| self.color = v;
             if (s.border) |v| self.border = v;
+            if (s.border_width) |v| self.border_width = v;
             if (s.face) |v| self.face = v;
             if (s.weight) |v| self.weight = v;
             if (s.radius) |v| self.radius = v;
@@ -1980,25 +2038,37 @@ pub fn Element(comptime M: type) type {
             // over the text. That is the two-solid-rects bug.
             const stroke_now: ?u8 = if (strokes_text) null else self.stroke;
             const box_fill: ?Fill = if (strokes_text) null else fill_now;
+            // Themed border width, in LOGICAL pixels like `radius` -- the
+            // renderer scales it. Absent means 1, which is what every theme
+            // written before the field draws.
+            const bw_f: f32 = @max(self.border_width orelse 1, 0);
+            const bw_i: u8 = @intFromFloat(@max(@min(bw_f, 255.0), 1.0));
+            // On an element that draws TEXT, `.border` belongs to the GLYPHS,
+            // for the same reason `.stroke` and `.halo` do: a rim round the
+            // label's box is not what "outline this text" means. The box path
+            // below therefore skips it entirely, exactly as it skips `stroke`.
+            const border_now_box: ?Fill = if (strokes_text) null else border_now;
             if (self.radius > 0) {
                 if (box_fill) |c| r.roundedRect(rect, self.radius, c, stroke_now, clip);
-                if (border_now) |c| r.roundedRect(rect, self.radius, c, 1, clip);
+                if (border_now_box) |c| r.roundedRect(rect, self.radius, c, bw_i, clip);
             } else {
                 if (box_fill) |c| {
                     if (stroke_now != null) r.roundedRect(rect, 0, c, stroke_now, clip) else r.quad(rect, c, clip);
                 }
-                if (border_now) |b| {
-                    // A gradient border cannot be four thin quads: each quad's
-                    // box is 1px on its short axis, so the ramp would restart
-                    // per edge and collapse to a single stop. Route it through
-                    // the SDF stroke, which evaluates against the element rect.
-                    if (!b.isSolid()) {
-                        r.roundedRect(rect, 0, b, 1, clip);
-                    } else {
+                if (border_now_box) |b| {
+                    // Four quads only serve a 1px solid border: their boxes are
+                    // one pixel on the short axis, so a gradient's ramp would
+                    // restart per edge and collapse to one stop, and a thicker
+                    // border drawn as four full-length rects would overlap its
+                    // own corners. Everything else goes through the SDF stroke,
+                    // which evaluates a true inset ring against the element rect.
+                    if (b.isSolid() and bw_i == 1) {
                         r.quad(.{ .x = rect.x, .y = rect.y, .w = rect.w, .h = 1 }, b, clip);
                         r.quad(.{ .x = rect.x, .y = rect.y + rect.h - 1, .w = rect.w, .h = 1 }, b, clip);
                         r.quad(.{ .x = rect.x, .y = rect.y, .w = 1, .h = rect.h }, b, clip);
                         r.quad(.{ .x = rect.x + rect.w - 1, .y = rect.y, .w = 1, .h = rect.h }, b, clip);
+                    } else {
+                        r.roundedRect(rect, 0, b, bw_i, clip);
                     }
                 }
             }
@@ -2007,7 +2077,18 @@ pub fn Element(comptime M: type) type {
             // the fill it would simply be covered. `.outer_glow` cuts the inner
             // half and `.inner_glow` cuts the outer one, so the same order is
             // correct for all three and no mode needs a rule of its own.
-            if (halo_now) |h| r.halo(rect, self.radius, h, clip);
+            //
+            // EXCEPT on an element that draws TEXT. There the halo belongs on
+            // the GLYPHS -- the same reason `stroke` moves to the glyphs rather
+            // than outlining the label's box. Drawing the box halo too would put
+            // a rounded rectangle behind a word, which is what a text element
+            // used to get: `.halo` read as a rect because nothing told it the
+            // element was text.
+            const is_text = self.geometry == .text;
+            const text_halo_now: ?Halo = if (is_text) halo_now else null;
+            if (!is_text) {
+                if (halo_now) |h| r.halo(rect, self.radius, h, clip);
+            }
             // A region exists for anything the runtime must be able to FIND,
             // not only for things that produce a message: a focusable control
             // with no message is exactly the case where Tab had nothing to
@@ -2113,6 +2194,18 @@ pub fn Element(comptime M: type) type {
                         // the stroke, which is why `.stroke` alone leaves the
                         // interior empty and `.bg` + `.stroke` reads as a
                         // labelled panel with outlined letters.
+                        // Glow rides the text prim, so it lands BEHIND the
+                        // glyphs without needing its own z slot.
+                        if (text_halo_now) |hs| r.textHalo(ix, iy, t.size, hs, fit.bytes, tclip);
+                        // A GLYPH BORDER, outlined before the letters so they
+                        // sit inside their own rim. The box border was cleared
+                        // for a text element above; this is the same field
+                        // painted round the glyphs instead of the rect.
+                        if (border_now) |bf| r.borderedText(ix, iy, t.size, bf, fit.bytes, bw_i, tclip);
+                        // A GLYPH BORDER was already queued as its own prim by
+                        // `vtBorderedText`, which paints before this fill. All
+                        // that is left here is the letters themselves, in the
+                        // style's text colour.
                         if (self.stroke) |sw| {
                             r.strokedText(ix, iy, t.size, fg_now, fit.bytes, sw, tclip);
                             if (fit.ellipsis) r.strokedText(ix + fit.width, iy, t.size, fg_now, ellipsis, sw, tclip);
@@ -2127,6 +2220,8 @@ pub fn Element(comptime M: type) type {
                         for (buf[0..n], 0..) |line, i| {
                             if (line.len == 0) continue;
                             const ly = iy + @as(f32, @floatFromInt(i)) * ts.line_height;
+                            if (text_halo_now) |hs| r.textHalo(ix, ly, t.size, hs, line, tclip);
+                            if (border_now) |bf| r.borderedText(ix, ly, t.size, bf, line, bw_i, tclip);
                             if (self.stroke) |sw| {
                                 r.strokedText(ix, ly, t.size, fg_now, line, sw, tclip);
                             } else {
@@ -2561,6 +2656,7 @@ pub fn Ui(comptime M: type) type {
                 if (entry.spec.bg) |r| out.bg = self.roleFill(r);
                 if (entry.spec.color) |r| out.color = self.roleFill(r);
                 if (entry.spec.border) |r| out.border = self.roleFill(r);
+                out.border_width = entry.spec.border_width;
                 if (entry.spec.font) |f| out.face = self.font(f);
                 out.size = entry.spec.size;
                 out.weight = entry.spec.weight;
@@ -3350,6 +3446,10 @@ pub fn Collector(comptime M: type) type {
         /// The face the next recorded text prim draws in.
         cur_face: u16 = 0,
         cur_weight: u16 = 0,
+        /// The halo for the NEXT text prim this collector queues. Set by
+        /// `vtTextHalo` and cleared by whatever text call consumes it, so a
+        /// glow and its letters are one prim and the canvas owns the order.
+        pending_halo: ?Halo = null,
 
         pub fn renderer(self: *Self) Renderer {
             return .{ .ptr = @ptrCast(self), .vtable = &vtable };
@@ -3361,6 +3461,7 @@ pub fn Collector(comptime M: type) type {
             .rrect = vtRrect,
             .text = vtText,
             .stroked_text = vtStrokedText,
+            .text_halo = vtTextHalo,
             .set_face = vtSetFace,
             .set_weight = vtSetWeight,
             .halo = vtHalo,
@@ -3451,7 +3552,11 @@ pub fn Collector(comptime M: type) type {
             // will draw it. Measured twice per line overall (layout, then here)
             // and never per pixel.
             const tm = self.metrics.measureText(bytes, size);
-            const box: Rect = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
+            // Grown by the glow, when there is one: a halo reaches past the
+            // glyph box, and pruning on the bare box would discard one that sits
+            // entirely outside the letters it belongs to.
+            const grow = if (self.pending_halo) |h| h.blur + h.spread else 0;
+            const box: Rect = .{ .x = x - grow, .y = y - grow, .w = tm.width + grow * 2, .h = tm.height + grow * 2 };
             if (box.intersect(clip).isEmpty()) return;
             self.prims.append(self.gpa, .{ .text = .{
                 .x = x,
@@ -3462,12 +3567,24 @@ pub fn Collector(comptime M: type) type {
                 .clip = clip,
                 .face = self.cur_face,
                 .weight = self.cur_weight,
+                .text_halo = self.pending_halo,
             } }) catch {
                 self.failed = true;
             };
+            self.pending_halo = null;
         }
 
-        fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect) void {
+        fn vtTextHalo(ptr: *anyopaque, x: f32, y: f32, size: f32, h: Halo, bytes: []const u8, clip: Rect) void {
+            _ = x;
+            _ = y;
+            _ = size;
+            _ = bytes;
+            _ = clip;
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.pending_halo = h;
+        }
+
+        fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: Fill, bytes: []const u8, width: u8, clip: Rect, kind: u8) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             // Queue it exactly as `vtText` does, carrying the width; the
             // canvas picks the stroked path off `.stroke` when it paints.
@@ -3486,10 +3603,14 @@ pub fn Collector(comptime M: type) type {
                 .clip = clip,
                 .face = self.cur_face,
                 .weight = self.cur_weight,
-                .stroke = width,
+                .stroke = if (kind == 0) width else null,
+                .border = if (kind == 1) width else null,
+                .border_fill = if (kind == 1) fill else null,
+                .text_halo = self.pending_halo,
             } }) catch {
                 self.failed = true;
             };
+            self.pending_halo = null;
         }
 
         fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) TextMetrics {
@@ -3571,6 +3692,7 @@ pub fn nominalRenderer() Renderer {
         .rrect = nominalRrect,
         .text = nominalText,
         .stroked_text = nominalStrokedText,
+        .text_halo = nominalTextHalo,
         .set_face = nominalSetFace,
         .set_weight = nominalSetWeight,
         .halo = nominalHalo,
@@ -3636,7 +3758,8 @@ fn nominalPath(_: *anyopaque, _: f32, _: f32, _: Path, _: Fill, _: Rect) void {}
 fn nominalQuad(_: *anyopaque, _: Rect, _: Fill, _: Rect) void {}
 fn nominalRrect(_: *anyopaque, _: Rect, _: f32, _: Fill, _: ?u8, _: Rect) void {}
 fn nominalText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: Rect) void {}
-fn nominalStrokedText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: u8, _: Rect) void {}
+fn nominalStrokedText(_: *anyopaque, _: f32, _: f32, _: f32, _: Fill, _: []const u8, _: u8, _: Rect, _: u8) void {}
+fn nominalTextHalo(_: *anyopaque, _: f32, _: f32, _: f32, _: Halo, _: []const u8, _: Rect) void {}
 fn nominalSetFace(_: *anyopaque, _: u16) void {}
 fn nominalSetWeight(_: *anyopaque, _: u16) void {}
 fn nominalHalo(_: *anyopaque, _: Rect, _: f32, _: Halo, _: Rect) void {}
