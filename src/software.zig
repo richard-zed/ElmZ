@@ -101,15 +101,22 @@ fn collectFonts(gpa: Allocator, io: std.Io, font_home: ?[]const u8, dir_path: []
     // The separator after `~` is dropped before joining. `path.join` tolerates
     // it either way (a leading '/' in a later component does NOT reset the
     // path), so this only keeps the joined string free of a doubled separator.
+    // OWNED only when the directory was `~`-relative and had to be grown. The
+    // free lives HERE, at function scope, not inside the block: a `defer` in the
+    // block runs as the block exits, so `root` was dangling for the whole walk
+    // below -- openDir, the join and the walker all read freed bytes. It
+    // surfaced as an intermittent segfault inside the io layer's path check,
+    // not as a failed load, because `openDir` turns a bad path into `return`.
+    var owned: ?[]u8 = null;
+    defer if (owned) |o| gpa.free(o);
     const root = if (isHomeRelative(dir_path)) blk: {
         const home = font_home orelse return;
         if (home.len == 0) return;
         var rel = dir_path[1..];
         while (rel.len > 0 and rel[0] == '/') rel = rel[1..];
         if (rel.len == 0) return;
-        const joined = std.fs.path.join(gpa, &.{ home, rel }) catch return;
-        defer gpa.free(joined);
-        break :blk joined;
+        owned = std.fs.path.join(gpa, &.{ home, rel }) catch return;
+        break :blk owned.?;
     } else dir_path;
 
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return;
