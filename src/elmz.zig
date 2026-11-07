@@ -2794,6 +2794,13 @@ pub fn Ui(comptime M: type) type {
             if (fieldOr(o, "hover_bg", @as(?Fill, null))) |v| e.hover_bg = v;
             if (fieldOr(o, "hover_halo", @as(?Halo, null))) |v| e.hover_halo = v;
             if (fieldOr(o, "press_bg", @as(?Fill, null))) |v| e.press_bg = v;
+            // A NAMED theme style first, then the caller's inline fields over it.
+            // Order matters: the inline `style` is the more specific statement, so
+            // it must win, but a widget given only `.style_name` still gets colour,
+            // size and weight from the theme.
+            if (fieldOr(o, "style_name", @as(?[]const u8, null))) |nm| {
+                if (self.styleByName(nm)) |named| e.mergeStyle(named);
+            }
             // Caller last: a caller who set a field meant it, and `mergeStyle`
             // writes only the fields they actually set.
             const style: Style = fieldOr(o, "style", Style{});
@@ -2834,6 +2841,12 @@ pub fn Ui(comptime M: type) type {
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, e.g. `.style_name = "bold"`.
+            /// Merged UNDER `style`, so an inline field still wins. Without this a
+            /// theme could declare `.weight` and no element could ever reach it --
+            /// the value parsed, `styleByName` resolved it, and every call site used
+            /// the empty default.
+            style_name: ?[]const u8 = null,
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -2991,11 +3004,17 @@ pub fn Ui(comptime M: type) type {
             // style the element carries, then the widget default. The style is
             // read here rather than in `finish` because `size` is a field of
             // the geometry, and finish runs after it was already recorded.
-            const size: f32 = o.size orelse (o.style.size orelse 14);
+            // A named theme style is resolved HERE as well as in `finish`, because
+            // `size` and `weight` are fields of the text geometry and finish runs
+            // after the geometry was recorded. Resolving both places is what makes
+            // `.style_name` work for text at all.
+            const named = if (o.style_name) |nm| self.styleByName(nm) else null;
+            const size: f32 = o.size orelse (o.style.size orelse (if (named) |n| n.size else null) orelse 14);
+            const weight: u16 = o.style.weight orelse (if (named) |n| n.weight else null) orelse 0;
             const e = self.mk(.{ .text = .{
                 .bytes = o.label,
                 .size = size,
-                .weight = o.style.weight orelse 0,
+                .weight = weight,
             } });
             // The ONLY place a name becomes a face. `font` returns an opaque
             // handle; nothing downstream can forge one.

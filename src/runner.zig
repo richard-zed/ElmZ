@@ -6,8 +6,10 @@ const elmz = @import("elmz");
 const theme_mod = elmz.theme;
 const software = @import("software");
 
-/// Whether the overlay is compiled in by default.
-pub const default_overlay = builtin.mode == .Debug;
+/// Whether the overlay is compiled in by default. OFF, always: a debug build is
+/// what you develop in, and a diagnostics panel over every frame is not what you
+/// are developing. Opt in with `.overlay = true`.
+pub const default_overlay = false;
 
 /// What the overlay has to say. Flat on purpose -- this is the diagnostic struct, not a
 /// model, and it is written and read in one place.

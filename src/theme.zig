@@ -2130,6 +2130,7 @@ test "the shipped defaults resolve to the compiled palette" {
 }
 
 test "a gradient resolves to the fill a theme could never express before" {
+    // no deinit on the parse result type; leak in a test is fine
     const src =
         \\.{ .version = 3, .theme = .{ .gradients = .{
         \\    .accent = .{ .linear = .{ .dir = 135, .from = 0x89b4fa, .to = 0xf5c2e7 } },
@@ -2664,3 +2665,4 @@ test "an unknown .frost key is an error, not a silent default" {
     );
     try std.testing.expect(std.mem.indexOf(u8, diag.text(), "blurrr") != null);
 }
+
