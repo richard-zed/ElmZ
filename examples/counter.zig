@@ -5,7 +5,7 @@ const sdl = @import("platform_sdl3");
 
 const app = .{
     .title = "elmz",
-    .size = .{ .w = 420, .h = 300 },
+    .size = .{ .w = 420, .h = 210 },
     .Model = Model,
     .Msg = Msg,
     .update = update,
