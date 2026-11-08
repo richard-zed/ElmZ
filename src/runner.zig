@@ -109,6 +109,10 @@ pub const Options = struct {
     /// Path to a theme file, relative to the *executable's directory* (an absolute path is
     /// taken as given).
     theme_path: ?[]const u8 = null,
+    /// `$XDG_CONFIG_HOME`, if the caller has it. Passed rather than read so the
+    /// lookup stays a pure function of its arguments and a test can point it at
+    /// a temp dir.
+    xdg_config_home: ?[]const u8 = null,
     /// Allocator for re-reading the theme file. Only needed with `theme_path`.
     gpa: ?std.mem.Allocator = null,
 };
@@ -118,17 +122,23 @@ pub const Options = struct {
 pub fn ThemeWatchOf(comptime App: type) type {
     return struct {
         const Self = @This();
+
+        /// How many candidate paths a watch tracks. Four is what
+        /// `themeCandidates` builds; the cap lets the stamps live inline so
+        /// `init` stays allocation-free.
+        pub const max_paths = 8;
+
         /// What a missing or broken base falls back to. Held rather than read off
         /// `ui.theme`, which is the *result* of the previous resolution.
         floor: elmz.Theme,
-        /// The developer's palette, beside the binary. Absent is the normal case.
-        base_path: ?[:0]const u8,
-        /// The end user's override, beside the binary.
-        user_path: ?[:0]const u8,
-        base_stamp: ?Stamp = null,
-        user_stamp: ?Stamp = null,
-        base_seen: bool = false,
-        user_seen: bool = false,
+        /// Every place a theme may live, highest priority first. BORROWED: the
+        /// caller built it and it outlives this watch. Empty is the normal case
+        /// for an app that ships and uses no theme file.
+        paths: []const []const u8,
+        /// One stamp per candidate, so a file appearing later still reloads.
+        stamps: [max_paths]?Stamp = @splat(null),
+        /// Stat'd at least once. Without this a first poll always reloads.
+        seen: [max_paths]bool = @splat(false),
         font_buf: [elmz.font_name_max]u8 = undefined,
         font_len: usize = 0,
         /// Named styles from the files, OWNED: they hold strings and cannot ride in a fixed
@@ -147,8 +157,8 @@ pub fn ThemeWatchOf(comptime App: type) type {
             return if (self.font_len == 0) null else self.font_buf[0..self.font_len];
         }
 
-        pub fn init(floor: elmz.Theme, base_path: ?[:0]const u8, user_path: ?[:0]const u8) Self {
-            return .{ .floor = floor, .base_path = base_path, .user_path = user_path };
+        pub fn init(floor: elmz.Theme, paths: []const []const u8) Self {
+            return .{ .floor = floor, .paths = paths };
         }
 
         /// Release the style table this watch holds. Safe to call twice, and safe
@@ -181,22 +191,21 @@ pub fn ThemeWatchOf(comptime App: type) type {
         /// Re-resolve the whole chain if either file changed. `ui` is `*Ui(Msg)`; generic
         /// because the composition layer must not know the app's message type.
         pub fn poll(self: *Self, ui: anytype, io: std.Io, gpa: std.mem.Allocator) void {
-            const base_now = stampOf(io, self.base_path);
-            const user_now = stampOf(io, self.user_path);
-            const base_reload = shouldReload(self.base_seen, self.base_stamp, base_now);
-            const user_reload = shouldReload(self.user_seen, self.user_stamp, user_now);
-
-            if (base_now) |st| {
-                self.base_stamp = st;
-                self.base_seen = true;
+            // Any candidate changing reloads the WHOLE chain, because a higher
+            // file appearing can displace one already being read.
+            var reload = false;
+            for (self.paths, 0..) |path, n| {
+                if (n >= max_paths) break;
+                const now = stampOf(io, path);
+                if (shouldReload(self.seen[n], self.stamps[n], now)) reload = true;
+                if (now) |st| {
+                    self.stamps[n] = st;
+                    self.seen[n] = true;
+                }
             }
-            if (user_now) |st| {
-                self.user_stamp = st;
-                self.user_seen = true;
-            }
-            if (!base_reload and !user_reload) return;
+            if (!reload) return;
 
-            const chain = resolveChain(App, gpa, io, self.floor, self.base_path, self.user_path);
+            const chain = resolveChain(App, gpa, io, self.floor, self.paths);
             ui.theme = chain.theme;
             ui.gradients = chain.gradients;
             ui.setVars(App, chain.app);
@@ -249,14 +258,11 @@ pub fn ChainOf(comptime App: type) type {
         owned_styles: theme_mod.StylesSpec = &.{},
         /// Backing store for `styles`, which is `view_buf.items`.
         view_buf: std.ArrayListUnmanaged(elmz.StyleEntry) = .empty,
-        /// A `theme.defaults.zon` supplied the base rather than the compiled floor.
-        base_from_file: bool = false,
-        /// The defaults file was there and would not load; `diag` says why.
-        base_rejected: bool = false,
-        /// A `theme.zon` supplied the override.
-        user_from_file: bool = false,
-        /// The override was there and would not load; `diag` says why.
-        user_rejected: bool = false,
+        /// At least one candidate file loaded, so the palette is not just the
+        /// compiled floor.
+        from_file: bool = false,
+        /// Some candidate was there and would not load; `diag` says why.
+        rejected: bool = false,
         diag: elmz.ThemeDiag = .{},
 
         /// Releases the owned style table. Safe to call twice.
@@ -281,13 +287,11 @@ pub fn ChainOf(comptime App: type) type {
 
         /// The one line the band should show, or null when nothing went wrong.
         pub fn message(self: *const @This()) ?[]const u8 {
-            if (!(self.base_rejected or self.user_rejected)) return null;
+            if (!self.rejected) return null;
             // A rejection with an EMPTY diagnostic reads as "no problem" and
             // gets printed as an empty band. Name the file that failed even
             // when the loader could not say more.
-            if (self.diag.len == 0) {
-                return if (self.base_rejected) "theme.defaults.zon: rejected" else "theme.zon: rejected";
-            }
+            if (self.diag.len == 0) return "theme rejected";
             return self.diag.text();
         }
     };
@@ -301,114 +305,91 @@ fn readZ(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
     return gpa.dupeZ(u8, src);
 }
 
-/// Resolve `theme.zon` over `theme.defaults.zon` over `floor`.
+/// Resolve every theme file over `floor`, lowest priority first.
+///
+/// `paths` is in PRIORITY ORDER (highest first), so it is walked in reverse:
+/// the highest-priority file must be applied LAST to win. Each file layers over
+/// the one before it -- a partial document inherits what it omits, which is the
+/// rule the old two-tier chain had and the reason `.styles` is replaced whole
+/// while colours merge.
+///
+/// A file that exists but will not load costs a diagnostic and leaves the
+/// previous tier standing. A missing file is not an error; most candidates
+/// genuinely are not there.
 pub fn resolveChain(
     comptime App: type,
     gpa: std.mem.Allocator,
     io: std.Io,
     floor: elmz.Theme,
-    base_path: ?[]const u8,
-    user_path: ?[]const u8,
+    paths: []const []const u8,
 ) ChainOf(App) {
     var out: ChainOf(App) = .{ .theme = floor };
 
-    // The developer's palette. A file that will not load costs a diagnostic and
-    // leaves the floor in place: an app with no palette at all is not something
-    // a colour typo should be able to cause.
-    if (base_path) |p| {
-        const name = "theme.defaults.zon";
-        if (readZ(gpa, io, p)) |src| {
-            defer gpa.free(src);
-            if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
-                // The previous tier's CUSTOM COLOUR table dies here for the
-                // same reason the gradients and vars do -- it hangs off
-                // `theme`, so assigning `out.theme` is what drops the handle.
-                // This was the one tier-overwrite that leaked.
-                theme_mod.freeCustom(gpa, &out.theme);
-                out.theme = loaded.theme;
-                // The previous tier's table dies here: it was allocated into
-                // `gpa` and this overwrites the only handle to it.
-                theme_mod.freeGradients(gpa, &out.gradients);
-                out.gradients = loaded.gradients;
-                // The previous tier's vars die here: they were duped into
-                // `gpa` and this overwrites the only handle to them.
-                theme_mod.freeVars(App, gpa, &out.app);
-                out.app = loaded.vars;
-                // Replaced, not merged: the files layer as documents, and a
-                // half-inherited style table would mean a style's `.color` came
-                // from one file and its `.font` from another. Take the newer
-                // document whole, exactly as `.theme` does.
-                if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
-                out.owned_styles = loaded.styles;
-                out.styles = theme_mod.styleView(loaded.styles, &out.view_buf, gpa) catch &.{};
-                if (loaded.fontName()) |f| {
-                    @memcpy(out.font_buf[0..f.len], f);
-                    out.font_len = f.len;
-                }
-                out.base_from_file = true;
-            } else |e| {
-                if (out.diag.len == 0) out.diag.set("{s}: {t}", .{ name, e });
-                out.base_rejected = true;
-            }
-        } else |e| switch (e) {
-            error.FileNotFound => {},
-            else => {
-                out.diag.set("{s}: {t}", .{ name, e });
-                out.base_rejected = true;
-            },
-        }
-    }
+    if (paths.len == 0) return out;
 
-    // The end user's override: partial by design, inheriting whatever it omits.
-    if (user_path) |p| {
-        const name = "theme.zon";
-        if (readZ(gpa, io, p)) |src| {
-            defer gpa.free(src);
-            if (elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag)) |loaded| {
-                // The previous tier's CUSTOM COLOUR table dies here for the
-                // same reason the gradients and vars do -- it hangs off
-                // `theme`, so assigning `out.theme` is what drops the handle.
-                // This was the one tier-overwrite that leaked.
-                theme_mod.freeCustom(gpa, &out.theme);
-                out.theme = loaded.theme;
-                // The previous tier's table dies here: it was allocated into
-                // `gpa` and this overwrites the only handle to it.
-                theme_mod.freeGradients(gpa, &out.gradients);
-                out.gradients = loaded.gradients;
-                // The previous tier's vars die here: they were duped into
-                // `gpa` and this overwrites the only handle to them.
-                theme_mod.freeVars(App, gpa, &out.app);
-                out.app = loaded.vars;
-                if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
-                out.owned_styles = loaded.styles;
-                out.styles = theme_mod.styleView(loaded.styles, &out.view_buf, gpa) catch &.{};
-                // The end user's name wins outright, and an override that omits
-                // `.font` inherits the developer's -- the same rule the colours
-                // follow, so one file cannot mean two things.
-                if (loaded.fontName()) |f| {
-                    @memcpy(out.font_buf[0..f.len], f);
-                    out.font_len = f.len;
-                }
-                out.user_from_file = true;
-            } else |e| {
-                // A rejection that says NOTHING is the reason "my theme.zon is
-                // ignored" is undiagnosable: the band stays blank, the palette
-                // falls back to the base, and nothing anywhere names a cause.
-                // `loadTheme` writes into `out.diag` on the paths it detects
-                // itself; this covers the ones it returns as an error.
-                if (out.diag.len == 0) out.diag.set("{s}: {t}", .{ name, e });
-                out.user_rejected = true;
-            }
-        } else |e| switch (e) {
-            error.FileNotFound => {},
+    var i = paths.len;
+    while (i > 0) {
+        i -= 1;
+        const p = paths[i];
+        const name = std.fs.path.basename(p);
+        const src = readZ(gpa, io, p) catch |e| switch (e) {
+            error.FileNotFound => continue,
             else => {
                 out.diag.set("{s}: {t}", .{ name, e });
-                out.user_rejected = true;
+                out.rejected = true;
+                continue;
             },
+        };
+        defer gpa.free(src);
+
+        const loaded = elmz.loadTheme(App, gpa, name, src, out.theme, &out.diag) catch |e| {
+            // A rejection that says NOTHING is why "my theme.zon is ignored" is
+            // undiagnosable. `loadTheme` fills `diag` on the paths it detects
+            // itself; this covers the ones it returns as an error.
+            if (out.diag.len == 0) out.diag.set("{s}: {t}", .{ name, e });
+            out.rejected = true;
+            continue;
+        };
+
+        // The previous tier's custom colours die here: they hang off `theme`,
+        // so assigning is what drops the handle. This was the one leaking tier.
+        theme_mod.freeCustom(gpa, &out.theme);
+        out.theme = loaded.theme;
+        theme_mod.freeGradients(gpa, &out.gradients);
+        out.gradients = loaded.gradients;
+        theme_mod.freeVars(App, gpa, &out.app);
+        out.app = loaded.vars;
+        // Replaced, not merged: a half-inherited table would mean a style's
+        // `.color` came from one file and its `.font` from another.
+        if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
+        out.owned_styles = loaded.styles;
+        out.styles = theme_mod.styleView(loaded.styles, &out.view_buf, gpa) catch &.{};
+        // A file that omits `.font` inherits the tier below it, the same rule
+        // the colours follow, so one file cannot mean two things.
+        if (loaded.fontName()) |f| {
+            @memcpy(out.font_buf[0..f.len], f);
+            out.font_len = f.len;
         }
+        out.from_file = true;
     }
 
     return out;
+}
+
+/// The running executable's file name, without directory or extension, or null
+/// when the platform will not say. Used as the `<app>` in the per-app config
+/// tier, so a renamed binary follows its name with no app field to remember --
+/// the same reasoning as the rest of the chain.
+pub fn exeStem(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
+    const exe = std.process.executablePathAlloc(io, gpa) catch return null;
+    defer gpa.free(exe);
+    const base = std.fs.path.basename(exe);
+    const stem = if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot|
+        (if (dot > 0) base[0..dot] else base)
+    else
+        base;
+    if (stem.len == 0) return null;
+    return gpa.dupe(u8, stem) catch null;
 }
 
 /// Resolve an app's `theme_path` against the directory the executable lives in. That is
@@ -419,6 +400,75 @@ pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8)
     defer gpa.free(exe);
     const dir = std.fs.path.dirname(exe) orelse return null;
     return std.fs.path.joinZ(gpa, &.{ dir, given }) catch null;
+}
+
+/// Build the search list, in priority order. Nothing here stats a file; the
+/// caller decides which entries exist.
+///
+/// Order: `$XDG_CONFIG_HOME/ElmZ/<app>.zon`, `.../ElmZ/theme.zon`, then
+/// `theme.zon` and `theme.defaults.zon` beside the executable.
+/// `XDG_CONFIG_HOME` unset falls back to `$HOME/.config`; with neither the
+/// config tier is absent rather than the whole lookup failing.
+///
+/// The caller owns the returned slice AND every string in it.
+pub fn themeCandidates(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    app_name: ?[]const u8,
+    home: ?[]const u8,
+    xdg_config_home: ?[]const u8,
+) ?[][]const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (list.items) |it| gpa.free(it);
+        list.deinit(gpa);
+    }
+
+    const xdg = xdg_config_home;
+    if (xdg != null or home != null) {
+        // XDG_CONFIG_HOME points AT the config dir; HOME needs `.config` added.
+        const config: ?[]u8 = if (xdg) |b|
+            (if (b.len > 0) gpa.dupe(u8, b) catch return null else null)
+        else if (home) |h|
+            (if (h.len > 0) std.fs.path.join(gpa, &.{ h, ".config" }) catch return null else null)
+        else
+            null;
+        defer if (config) |c| gpa.free(c);
+
+        if (config) |c| {
+            const dir = std.fs.path.join(gpa, &.{ c, "ElmZ" }) catch return null;
+            defer gpa.free(dir);
+
+            if (app_name) |an| {
+                const p = std.fs.path.join(gpa, &.{ dir, an }) catch return null;
+                list.append(gpa, p) catch {
+                    gpa.free(p);
+                    return null;
+                };
+            }
+            const t = std.fs.path.join(gpa, &.{ dir, "theme.zon" }) catch return null;
+            list.append(gpa, t) catch {
+                gpa.free(t);
+                return null;
+            };
+        }
+    }
+
+    // Beside the executable. Both entries stay in the list so the existing rule
+    // -- `theme.zon` layers over `theme.defaults.zon` -- is preserved.
+    const exe = std.process.executablePathAlloc(io, gpa) catch return null;
+    defer gpa.free(exe);
+    if (std.fs.path.dirname(exe)) |dir| {
+        for ([_][]const u8{ "theme.zon", "theme.defaults.zon" }) |leaf| {
+            const p = std.fs.path.join(gpa, &.{ dir, leaf }) catch return null;
+            list.append(gpa, p) catch {
+                gpa.free(p);
+                return null;
+            };
+        }
+    }
+
+    return list.toOwnedSlice(gpa) catch null;
 }
 
 /// How long the loop may block in poll before it gets to re-stat the theme.
@@ -683,6 +733,8 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
     // Same optional-field trick as `state`: an app that wants a theme file
     // declares `theme_path` in its struct, and one that does not never sees it.
     if (@hasField(@TypeOf(app), "theme_path")) opts.theme_path = app.theme_path;
+    // `app.title` is the name a user would recognise, so the per-app XDG tier
+    // needs no extra field. An undeclared or empty title just skips that tier.
 
     // Same trick again, for the type rather than a value: an app that wants
     // tokens in its theme file names the struct here (`theme_tokens = Tokens`),
@@ -861,8 +913,7 @@ pub fn run(
     // Resolved once, against the executable's own directory, and owned for the
     // life of the loop. The watch holds the resolved paths; the copies are freed
     // on the way out.
-    var base_owned: ?[:0]u8 = null;
-    var user_owned: ?[:0]u8 = null;
+    var candidates: ?[][]const u8 = null;
     var theme_watch: ?ThemeWatchOf(App) = null;
     // The face the chain names, and the bytes behind it. Owned here so a swap
     // frees the previous buffer instead of leaking it.
@@ -879,8 +930,10 @@ pub fn run(
     else
         null;
     defer if (opts.gpa) |g| {
-        if (base_owned) |p| g.free(p);
-        if (user_owned) |p| g.free(p);
+        if (candidates) |list| {
+            for (list) |p| g.free(p);
+            g.free(list);
+        }
         font_slot.deinit(g);
         if (font_reg) |*r| r.deinit();
         // The watch owns the style table it holds across reloads. Nothing else
@@ -897,18 +950,27 @@ pub fn run(
     }
     if (opts.io) |io_arg| {
         if (opts.gpa) |g| {
-            base_owned = themePathBesideExe(g, io_arg, "theme.defaults.zon");
-            if (opts.theme_path) |given| user_owned = themePathBesideExe(g, io_arg, given);
+            // The binary's own file name names the per-app tier, so nothing has
+            // to be declared and a renamed binary follows its name.
+            var stem_owned: ?[]u8 = null;
+            defer if (stem_owned) |st| g.free(st);
+            stem_owned = exeStem(g, io_arg);
+            const app_name: ?[]const u8 = if (stem_owned) |st| st else null;
+            candidates = themeCandidates(g, io_arg, app_name, opts.home, opts.xdg_config_home);
 
-            // Watch only when there is something to watch. A stat four times a
-            // second forever is a real cost for an app that ships no theme file,
-            // and a defaults file created later is a restart away.
-            const base_there = if (base_owned) |p|
-                (std.Io.Dir.cwd().statFile(io_arg, p, .{}) catch null) != null
-            else
-                false;
-            if (base_there or user_owned != null) {
-                theme_watch = ThemeWatchOf(App).init(rt.ui.theme, base_owned, user_owned);
+            // Watch only when at least one candidate exists. A stat four times a
+            // second forever is a real cost for an app that ships no theme file.
+            var any_there = false;
+            if (candidates) |list| {
+                for (list) |p| {
+                    if ((std.Io.Dir.cwd().statFile(io_arg, p, .{}) catch null) != null) {
+                        any_there = true;
+                        break;
+                    }
+                }
+            }
+            if (any_there) {
+                theme_watch = ThemeWatchOf(App).init(rt.ui.theme, candidates orelse &.{});
                 // Resolve before the first frame, through the same call the
                 // loop makes on a change.
                 if (theme_watch) |*w| {
@@ -2763,9 +2825,9 @@ test "a defaults file that will not load keeps the floor and says so" {
     var bb: [128]u8 = undefined;
     const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
 
-    const chain = resolveChain(struct {}, gpa, io, .{}, base, null);
-    try std.testing.expect(chain.base_rejected);
-    try std.testing.expect(!chain.base_from_file);
+    const chain = resolveChain(struct {}, gpa, io, .{}, &.{base});
+    try std.testing.expect(chain.rejected);
+    try std.testing.expect(!chain.from_file);
     try std.testing.expect(std.meta.eql(chain.theme, elmz.Theme{}));
     // The band has to name the file: a bare parse error does not tell the reader
     // which of the two theme files to open.
@@ -2783,9 +2845,11 @@ test "a file that is not there is not an error in the chain" {
     const base = try tmpPath(&bb, tmp, "theme.defaults.zon");
     const user = try tmpPath(&ub, tmp, "theme.zon");
 
-    const chain = resolveChain(struct {}, gpa, io, .{}, base, user);
-    try std.testing.expect(!chain.base_rejected);
-    try std.testing.expect(!chain.user_rejected);
+    // Neither file exists, so nothing loads and nothing is rejected: absence is
+    // not an error, and the compiled floor is the answer.
+    const chain = resolveChain(struct {}, gpa, io, .{}, &.{ user, base });
+    try std.testing.expect(!chain.rejected);
+    try std.testing.expect(!chain.from_file);
     try std.testing.expectEqual(@as(?[]const u8, null), chain.message());
     try std.testing.expect(std.meta.eql(chain.theme, elmz.Theme{}));
 }

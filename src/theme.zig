@@ -2032,7 +2032,21 @@ fn isRole(ref: []const u8, extra: []const Theme.CustomColor) bool {
         if (std.mem.eql(u8, ref, f.name)) return true;
     }
     for (extra) |c| if (std.mem.eql(u8, c.name, ref)) return true;
-    return false;
+    // Built-ins LAST, matching `roleColor`'s resolution order: a name the file
+    // declares always beats `.red`, so adding the table cannot break a theme
+    // that already defines its own `red`.
+    return builtinColorName(ref);
+}
+
+/// Whether `name` is one of the colours a theme need not declare. Kept beside
+/// `isRole` so the guard and the resolver cannot drift apart -- a name the guard
+/// accepts and `roleColor` cannot resolve would paint the `text` fallback with no
+/// diagnostic, which is the exact failure this table exists to remove.
+pub fn builtinColorName(name: []const u8) bool {
+    // ONE table, in elmz: the guard asks whether the name exists, `roleColor`
+    // asks what it is. Two lists would drift and a name accepted here but
+    // unresolvable there would paint `text` with no diagnostic.
+    return elmz.builtinColor(name) != null;
 }
 
 /// A name the file gave a `.gradients` entry.
@@ -2665,4 +2679,3 @@ test "an unknown .frost key is an error, not a silent default" {
     );
     try std.testing.expect(std.mem.indexOf(u8, diag.text(), "blurrr") != null);
 }
-

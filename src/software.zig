@@ -2625,7 +2625,7 @@ pub const Canvas = struct {
     /// The vtable slot is never reached in this canvas: a halo is carried on the
     /// text prim and painted by `drawTextHalo` below. Kept so the interface is
     /// total, and so a backend that prefers a separate call can use it.
-    fn vtTextHaloNoop(_: *anyopaque, _: f32, _: f32, _: f32, _ : elmz.Halo, _: []const u8, _: elmz.Rect) void {}
+    fn vtTextHaloNoop(_: *anyopaque, _: f32, _: f32, _: f32, _: elmz.Halo, _: []const u8, _: elmz.Rect) void {}
 
     /// Paint the glow around a run's glyphs. Device pixels in, like every other
     /// draw here: callers multiply by `self.scale` before arriving.

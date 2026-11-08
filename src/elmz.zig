@@ -749,6 +749,34 @@ pub const ScrollChange = union(enum) {
     by: struct { key: u64, dy: f32 },
 };
 
+/// The named colours a theme need not declare. CSS's base 16 plus the few every
+/// dialect adds, because `.color = .red` should work the way it does everywhere else.
+///
+/// `transparent` is here rather than in CSS's own list because a theme has no other
+/// way to spell it, and `Color.a` defaults to 255 so a solid is the only thing a hex
+/// can express.
+pub fn builtinColor(name: []const u8) ?Color {
+    const list = .{
+        .{ "black", 0x000000 },   .{ "white", 0xffffff },
+        .{ "gray", 0x808080 },    .{ "grey", 0x808080 },
+        .{ "silver", 0xc0c0c0 },  .{ "maroon", 0x800000 },
+        .{ "red", 0xff0000 },     .{ "purple", 0x800080 },
+        .{ "fuchsia", 0xff00ff }, .{ "green", 0x008000 },
+        .{ "lime", 0x00ff00 },    .{ "olive", 0x808000 },
+        .{ "yellow", 0xffff00 },  .{ "navy", 0x000080 },
+        .{ "blue", 0x0000ff },    .{ "teal", 0x008080 },
+        .{ "aqua", 0x00ffff },    .{ "cyan", 0x00ffff },
+        .{ "magenta", 0xff00ff }, .{ "orange", 0xffa500 },
+    };
+    inline for (list) |e| {
+        if (std.mem.eql(u8, name, e[0])) return Color.rgbHex(e[1]);
+    }
+    // Alphabetic aliases of the same thing, kept out of the table above so the
+    // canonical spelling stays first in it.
+    if (std.mem.eql(u8, name, "transparent")) return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    return null;
+}
+
 /// One viewport's offset, keyed by the element's `key`.
 pub fn roleColor(pal: Theme, name: []const u8) Color {
     // Custom FIRST, and the order is load-bearing: a file that writes
@@ -762,6 +790,12 @@ pub fn roleColor(pal: Theme, name: []const u8) Color {
             if (std.mem.eql(u8, name, f.name)) return @field(pal, f.name);
         }
     }
+    // THEN the built-ins, and only after the file's own names. A theme that
+    // happens to declare `.red = 0xff0088` must keep it, so this can never run
+    // first; and a genuinely misspelled role is likelier to be a colour someone
+    // reached for than a name the theme forgot.
+    if (builtinColor(name)) |c| return c;
+
     // A name the file defined beats the `text` fallback. Without this a custom
     // role resolved to `text` -- a real colour, so nothing looked broken, the
     // label just drew in the wrong one.
@@ -8116,4 +8150,76 @@ test "a field paints its box, its mask and its caret where the caret is" {
 
     // ...and the runtime agrees the keyboard belongs to a field.
     try std.testing.expect(rt.text_editing);
+}
+
+test "built-in colour names resolve, and a theme's own name still wins" {
+    // The point of the table: `.color = "red"` with no `.colors` entry.
+    try std.testing.expectEqual(Color.rgbHex(0xff0000), builtinColor("red").?);
+    try std.testing.expectEqual(Color.rgbHex(0xffffff), builtinColor("white").?);
+    try std.testing.expectEqual(Color.rgbHex(0x000000), builtinColor("black").?);
+    // Aliases land on the same value rather than drifting apart.
+    try std.testing.expectEqual(builtinColor("cyan").?, builtinColor("aqua").?);
+    try std.testing.expectEqual(builtinColor("magenta").?, builtinColor("fuchsia").?);
+    try std.testing.expectEqual(builtinColor("gray").?, builtinColor("grey").?);
+    // Alpha defaults to 255, so transparent has to be spelled out.
+    try std.testing.expectEqual(@as(u8, 0), builtinColor("transparent").?.a);
+    try std.testing.expectEqual(@as(u8, 255), builtinColor("red").?.a);
+    // A name that is not a colour is still a miss.
+    try std.testing.expect(builtinColor("bg") == null);
+
+    // ORDER: the table must never shadow a theme's own name. A theme that
+    // declares `.red` keeps it, which is the whole reason this is a fallback
+    // rather than a lookup that runs first.
+    const pal: Theme = .{};
+    // No custom entry: the built-in answers, not the `text` fallback.
+    try std.testing.expectEqual(Color.rgbHex(0xff0000), roleColor(pal, "red"));
+    // A declared role still beats it. `text` is a built-in ROLE, and roles are
+    // checked before the colour table, so this is the shadowing case that matters.
+    try std.testing.expectEqual(pal.text, roleColor(pal, "text"));
+}
+
+test "a theme can write .color = .red and the builtin answers it" {
+    // The read path by inspection: `readStyleField` -> `readRef` strips the dot and
+    // returns a bare name, so `.red` arrives downstream as "red". This test exists
+    // because inspection has been wrong here before -- `.halo` and `.stroke` both
+    // read fine at every hop and reached nothing on screen.
+    const App = struct {};
+    const gpa = std.testing.allocator;
+    // The walker reads `.styles` as a NAMED MAP: `.name = .{ fields }`. A list
+    // of `.{ .name = ... }` entries parses clean and yields nothing, because the
+    // reader looks for an identifier after the dot and finds a brace.
+    const src =
+        \\.{
+        \\    .version = 3,
+        \\    .theme = .{
+        \\        .colors = .{ .bg = 0x000000 },
+        \\        .styles = .{
+        \\            .alarm = .{ .color = .red, .bg = .navy },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var diag: @import("theme.zig").ThemeDiag = .{};
+    var loaded = try @import("theme.zig").loadTheme(App, gpa, "t.zon", src, Theme{}, &diag);
+    defer @import("theme.zig").freeLoaded(App, gpa, &loaded);
+
+    // A parse miss is a band, not a silent empty table.
+    try std.testing.expectEqual(@as(usize, 0), diag.len);
+
+    const entries = loaded.styles;
+    try std.testing.expect(entries.len >= 1);
+
+    var found = false;
+    for (entries) |e| {
+        if (std.mem.eql(u8, e.name, "alarm")) {
+            found = true;
+            // The dot is gone: a bare name survived the read.
+            try std.testing.expectEqualStrings("red", e.spec.color.?);
+            try std.testing.expectEqualStrings("navy", e.spec.bg.?);
+            // And it resolves to the real value, not to `text`.
+            try std.testing.expectEqual(Color.rgbHex(0xff0000), roleColor(loaded.theme, e.spec.color.?));
+            try std.testing.expectEqual(Color.rgbHex(0x000080), roleColor(loaded.theme, e.spec.bg.?));
+        }
+    }
+    try std.testing.expect(found);
 }
