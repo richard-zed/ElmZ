@@ -2172,7 +2172,7 @@ fn cardView(s: *TState, ui: *elmz.Ui(TMsg)) *elmz.Element(TMsg) {
 
     const card = ui.column(.{ .children = &.{
         b,
-    }, .width = 200, .hover_bg = .{ .solid = ui.theme.hover }, .press_bg = .{ .solid = ui.theme.pressed }, .style = .{ .pad = 20, .bg = elmz.solid(ui.theme.control) } });
+    }, .width = 200, .hover = .{ .solid = ui.theme.hover }, .pressed = .{ .solid = ui.theme.pressed }, .style = .{ .pad = 20, .bg = elmz.solid(ui.theme.control) } });
     return card;
 }
 

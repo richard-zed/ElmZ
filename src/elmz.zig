@@ -713,6 +713,10 @@ pub const FailKind = enum {
     /// the theme file could not be parsed or resolved; the detail in the band carries the
     /// file, line and column.
     theme,
+    /// a style NAME was looked up and the theme has no such style. Reported rather than
+    /// silently defaulting: an unknown name paints the compiled floor with no error,
+    /// which is indistinguishable from a typo that "worked".
+    style,
 
     /// The fallback text, used when the failure carries no detail. Callers that know more
     /// call `Ui.failFmt` and get the detail appended instead.
@@ -721,6 +725,7 @@ pub const FailKind = enum {
             .layout_allocation => "render failed: layout allocation",
             .duplicate_key => "render failed: duplicate key",
             .theme => "render failed: theme",
+            .style => "render failed: unknown style",
             .font => "render failed: font",
         };
     }
@@ -1289,6 +1294,52 @@ pub const Style = struct {
     margin_top: ?f32 = null,
     margin_bottom: ?f32 = null,
 
+    /// Size overrides. Same meaning as the bare fields on an Element, carried here so a
+    /// named style can set them.
+    width: ?f32 = null,
+    height: ?f32 = null,
+    /// Wrap text to the width layout gives the element.
+    wrap: ?bool = null,
+    /// Appearance while the pointer is over the element. Null means no hover feedback,
+    /// which is the same rule the bare Element fields follow.
+    hover: ?Fill = null,
+    hover_halo: ?Halo = null,
+    /// Appearance while the element owns the press.
+    pressed: ?Fill = null,
+
+    /// A NAMED theme style this tuple extends, e.g. `.style = .{ .name = "bold", .size = 12 }`.
+    /// Resolved UNDER the other fields here, so anything written beside it still wins.
+    /// A string, not a bare `.bold`: a bare identifier cannot carry a slice.
+    name: ?[]const u8 = null,
+    /// Alias of `name`. Both set is an error rather than one silently winning.
+    class: ?[]const u8 = null,
+
+    /// The theme style this tuple extends, requiring that `name` and `class` agree.
+    /// Null when neither is set; never silent when both disagree.
+    pub fn refName(self: Style) ?[]const u8 {
+        const n = self.name;
+        const c = self.class;
+        if (n != null and c != null) {
+            std.debug.assert(std.mem.eql(u8, n.?, c.?));
+            return n;
+        }
+        return n orelse c;
+    }
+
+    /// Fold `s` over this style: every field `s` sets wins, everything else is
+    /// kept. The same rule `Elem.mergeStyle` applies, but between two styles, so a
+    /// builder can resolve a chain before the Element exists.
+    pub fn merge(self: *Style, s: Style) void {
+        inline for (@typeInfo(Style).@"struct".fields) |f| {
+            // The reference keys are not values; they were followed already.
+            if (comptime std.mem.eql(u8, f.name, "name")) continue;
+            if (comptime std.mem.eql(u8, f.name, "class")) continue;
+            const is_opt = @typeInfo(f.type) == .optional;
+            if (!is_opt) @compileError("Style field '" ++ f.name ++ "' is not optional");
+            if (@field(s, f.name)) |v| @field(self, f.name) = v;
+        }
+    }
+
     pub fn bgFill(self: Style, fallback: ?Fill) ?Fill {
         return self.bg orelse fallback;
     }
@@ -1383,9 +1434,9 @@ pub fn Element(comptime M: type) type {
         scroll_offset_x: f32 = 0,
         /// background while the pointer is over this element. null = no hover feedback, so
         /// nothing that does not ask for it changes.
-        hover_bg: ?Fill = null,
+        hover: ?Fill = null,
         /// background while this element owns the press.
-        press_bg: ?Fill = null,
+        pressed: ?Fill = null,
         /// refuses input: no hit region, no hover, no press visual.
         disabled: bool = false,
         /// Whether this element may hold focus.
@@ -1443,6 +1494,16 @@ pub fn Element(comptime M: type) type {
                 .halo = self.halo,
                 .frost = self.frost,
                 .stroke = self.stroke,
+                // The six added with the `.style` overhaul. Omitting any of them is
+                // the same silent round-trip loss that dropped `border_width` and
+                // `face`: the element carries the value, this projection returns
+                // null, and whoever reads `style()` sees a default.
+                .width = self.width,
+                .height = self.height,
+                .wrap = self.wrap,
+                .hover = self.hover,
+                .hover_halo = self.hover_halo,
+                .pressed = self.pressed,
             };
         }
 
@@ -1460,6 +1521,12 @@ pub fn Element(comptime M: type) type {
             self.halo = s.halo;
             self.frost = s.frost;
             self.stroke = s.stroke;
+            if (s.hover) |v| self.hover = v;
+            if (s.hover_halo) |v| self.hover_halo = v;
+            if (s.pressed) |v| self.pressed = v;
+            if (s.width) |v| self.width = v;
+            if (s.height) |v| self.height = v;
+            if (s.wrap) |v| self.wrap = v;
             if (s.margin) |m| {
                 self.margin_left = m;
                 self.margin_right = m;
@@ -1486,6 +1553,12 @@ pub fn Element(comptime M: type) type {
             if (s.halo) |v| self.halo = v;
             if (s.frost) |v| self.frost = v;
             if (s.stroke) |v| self.stroke = v;
+            if (s.hover) |v| self.hover = v;
+            if (s.hover_halo) |v| self.hover_halo = v;
+            if (s.pressed) |v| self.pressed = v;
+            if (s.width) |v| self.width = v;
+            if (s.height) |v| self.height = v;
+            if (s.wrap) |v| self.wrap = v;
             if (s.margin) |v| {
                 self.margin_left = v;
                 self.margin_right = v;
@@ -1954,13 +2027,13 @@ pub fn Element(comptime M: type) type {
             var bg_now: ?Fill = self.style().bgFill(null);
             if (!self.disabled) {
                 if (ptr.held) |held| {
-                    if (self.press_bg) |pc| {
+                    if (self.pressed) |pc| {
                         // Rect identity keeps a press through a reflow; key
                         // identity keeps it through a reorder, where the rect
                         // is no longer the one that was pressed.
                         if (held.eql(rect, clip) or (held.key == kid)) bg_now = pc;
                     }
-                } else if (self.hover_bg) |hc| {
+                } else if (self.hover) |hc| {
                     if (hov.target) |target| {
                         if (target.eql(rect, clip)) bg_now = hc;
                     } else if (ptr.pos) |p| {
@@ -1976,7 +2049,7 @@ pub fn Element(comptime M: type) type {
             // would be a second place for that answer to disagree. Recorded even
             // for a DISABLED element -- "why is this greyed out" is the main
             // reason to have a tooltip at all.
-            if (self.hover_bg != null or self.tooltip != null) {
+            if (self.hover != null or self.tooltip != null) {
                 if (hov.out) |out| try out.append(gpa, .{ .rect = rect, .clip = clip, .key = kid, .active = !self.disabled, .radius = self.radius, .tooltip = self.tooltip });
             }
             // A button or bar always fills, even with no `bg` set, so the
@@ -2701,6 +2774,39 @@ pub fn Ui(comptime M: type) type {
             _ = self.arena.reset(.retain_capacity);
         }
 
+        /// Merge a named theme style onto `e`, or REPORT the miss. A name the theme does
+        /// not have used to resolve to null and merge nothing, so the element painted the
+        /// compiled floor with no diagnostic -- the same silent-drop class as `.halo`
+        /// vanishing. `where` names the path the name came in through.
+        fn applyNamed(self: *Self, e: *Elem, nm: []const u8, comptime where: []const u8) void {
+            if (self.styleByName(nm)) |named| {
+                e.mergeStyle(named);
+            } else {
+                self.noteMiss(nm, where);
+            }
+        }
+
+        /// The ONE resolution order, as a value: the inline tuple's own `.name`/`.class`
+        /// first, then its fields. Builders that need a style field BEFORE the Element
+        /// exists (text needs `size` for geometry) call this instead of duplicating the
+        /// walk. There is exactly one spelling -- `.style = .{ .name = "x" }` -- because
+        /// a second, bare name field made two spellings for one job and no way to tell
+        /// which a call site meant.
+        fn resolveStyle(self: *Self, o: anytype) Style {
+            var out: Style = .{};
+            const given: Style = fieldOr(o, "style", Style{});
+            if (given.refName()) |nm| {
+                if (self.styleByName(nm)) |n| out.merge(n) else self.noteMiss(nm, "style.name");
+            }
+            out.merge(given);
+            return out;
+        }
+
+        /// Raise the band for a style name the theme does not define.
+        fn noteMiss(self: *Self, nm: []const u8, comptime where: []const u8) void {
+            self.failFmt(.style, where ++ " names \"{s}\", which no theme style defines", .{nm});
+        }
+
         /// Records a failure that has no detail beyond its kind.
         pub fn failWith(self: *Self, kind: FailKind) void {
             self.failed = true;
@@ -2790,19 +2896,17 @@ pub fn Ui(comptime M: type) type {
             // `msg`, everything else through this.
             if (fieldOr(o, "on_press", @as(?M, null))) |msg| e.on_press = msg;
             if (fieldOr(o, "clips", false)) e.clips = true;
-            if (fieldOr(o, "hover_bg", @as(?Fill, null))) |v| e.hover_bg = v;
+            if (fieldOr(o, "hover", @as(?Fill, null))) |v| e.hover = v;
             if (fieldOr(o, "hover_halo", @as(?Halo, null))) |v| e.hover_halo = v;
-            if (fieldOr(o, "press_bg", @as(?Fill, null))) |v| e.press_bg = v;
-            // A NAMED theme style first, then the caller's inline fields over it.
-            // Order matters: the inline `style` is the more specific statement, so
-            // it must win, but a widget given only `.style_name` still gets colour,
-            // size and weight from the theme.
-            if (fieldOr(o, "style_name", @as(?[]const u8, null))) |nm| {
-                if (self.styleByName(nm)) |named| e.mergeStyle(named);
+            if (fieldOr(o, "pressed", @as(?Fill, null))) |v| e.pressed = v;
+            // Precedence, least specific first: a named style via `.{ .name = "x" }`
+            // supplies the base, and inline fields override it field by field.
+            const style: Style = fieldOr(o, "style", Style{});
+            if (style.refName()) |nm| {
+                self.applyNamed(e, nm, "style.name");
             }
             // Caller last: a caller who set a field meant it, and `mergeStyle`
             // writes only the fields they actually set.
-            const style: Style = fieldOr(o, "style", Style{});
             e.mergeStyle(style);
             // A text element also carries its face inside the geometry, which is
             // what paint reads. Copied here rather than in `text()` because the
@@ -2833,19 +2937,13 @@ pub fn Ui(comptime M: type) type {
             tone: Tone = .normal,
             wrap: bool = false,
             on_press: ?M = null,
-            hover_bg: ?Fill = null,
-            press_bg: ?Fill = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
             /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
-            /// A NAMED style from the theme's `.styles` table, e.g. `.style_name = "bold"`.
-            /// Merged UNDER `style`, so an inline field still wins. Without this a
-            /// theme could declare `.weight` and no element could ever reach it --
-            /// the value parsed, `styleByName` resolved it, and every call site used
-            /// the empty default.
-            style_name: ?[]const u8 = null,
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -2859,13 +2957,14 @@ pub fn Ui(comptime M: type) type {
             children: []const *Elem,
             gap: f32 = 0,
             on_press: ?M = null,
-            hover_bg: ?Fill = null,
-            press_bg: ?Fill = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
             /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -2884,13 +2983,14 @@ pub fn Ui(comptime M: type) type {
             msg: M,
             size: f32 = 16,
             on_press: ?M = null,
-            hover_bg: ?Fill = null,
-            press_bg: ?Fill = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
             /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -2903,13 +3003,14 @@ pub fn Ui(comptime M: type) type {
         pub const BarOpts = struct {
             value: f32,
             on_press: ?M = null,
-            hover_bg: ?Fill = null,
-            press_bg: ?Fill = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
             /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             height: ?f32 = null,
             style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -2923,11 +3024,12 @@ pub fn Ui(comptime M: type) type {
             width: f32,
             height: f32,
             on_press: ?M = null,
-            hover_bg: ?Fill = null,
-            press_bg: ?Fill = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
             /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
             hover_halo: ?Halo = null,
             style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -2968,13 +3070,14 @@ pub fn Ui(comptime M: type) type {
         pub const ScrollOpts = struct {
             child: *Elem,
             on_press: ?M = null,
-            hover_bg: ?Fill = null,
-            press_bg: ?Fill = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
             hover_halo: ?Halo = null,
             width: ?f32 = null,
             /// The viewport's height.
             height: ?f32 = null,
             style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -3006,10 +3109,14 @@ pub fn Ui(comptime M: type) type {
             // A named theme style is resolved HERE as well as in `finish`, because
             // `size` and `weight` are fields of the text geometry and finish runs
             // after the geometry was recorded. Resolving both places is what makes
-            // `.style_name` work for text at all.
-            const named = if (o.style_name) |nm| self.styleByName(nm) else null;
-            const size: f32 = o.size orelse (o.style.size orelse (if (named) |n| n.size else null) orelse 14);
-            const weight: u16 = o.style.weight orelse (if (named) |n| n.weight else null) orelse 0;
+            // a named style work for text at all.
+            // Same order as `finish`, built once so the two cannot drift: the inline
+            // tuple's `.name`/`.class` supplies the base, its fields override it.
+            // Reported once here, not twice: `finish` would re-resolve the same names
+            // and raise the same miss again, and the band holds one line.
+            const merged = self.resolveStyle(o);
+            const size: f32 = o.size orelse (merged.size orelse 14);
+            const weight: u16 = merged.weight orelse 0;
             const e = self.mk(.{ .text = .{
                 .bytes = o.label,
                 .size = size,
@@ -3041,8 +3148,8 @@ pub fn Ui(comptime M: type) type {
             e.on_press = o.msg;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
-            e.hover_bg = .{ .solid = self.theme.hover };
-            e.press_bg = .{ .solid = self.theme.pressed };
+            e.hover = .{ .solid = self.theme.hover };
+            e.pressed = .{ .solid = self.theme.pressed };
             // The geometry's own look, then the caller's overlay.
             e.applyStyle(.{ .bg = .{ .solid = self.theme.control }, .color = .{ .solid = self.theme.text } });
             return self.finish(e, o);
@@ -3063,6 +3170,8 @@ pub fn Ui(comptime M: type) type {
             /// Whole pixels: at 1.5 density a 1px rule is already the thinnest line that
             /// draws without going soft.
             thickness: f32 = 1,
+            style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -3071,7 +3180,21 @@ pub fn Ui(comptime M: type) type {
 
         pub fn separator(self: *Self, o: SeparatorOpts) *Elem {
             const t = @max(1.0, o.thickness);
-            const e = self.rect(.{ .width = t, .height = t, .style = .{ .bg = .{ .solid = self.theme.border } } });
+            // `rect` resolves `.style` through `finish`, so the caller's
+            // style is forwarded rather than dropped. The border colour stays in as the
+            // DEFAULT fill, which is what an unstyled rule should be -- a caller who
+            // sets `.bg` overrides just that, and everything else (radius, halo, a
+            // named style) still arrives.
+            // The caller's style goes in WITH the default, in one tuple: `rect` merges
+            // the named style first and these fields over it, so a caller who sets
+            // `.bg` beats the theme border and one who does not still gets it.
+            var st = o.style;
+            if (st.bg == null) st.bg = .{ .solid = self.theme.border };
+            const e = self.rect(.{
+                .width = t,
+                .height = t,
+                .style = st,
+            });
             // The CROSS axis stretches. An unset extent is what both a column's
             // child and a row's child read as "fill the slot you were given", so
             // clearing one side here is the whole of the orientation.
@@ -3091,6 +3214,8 @@ pub fn Ui(comptime M: type) type {
             value: f32,
             width: ?f32 = null,
             height: f32 = 6,
+            style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
             margin_left: f32 = 0,
             margin_right: f32 = 0,
             margin_top: f32 = 0,
@@ -3102,7 +3227,14 @@ pub fn Ui(comptime M: type) type {
             // operand, so an unguarded clamp turns NaN into 1.0 and paints a
             // full bar for a value that has no answer. Guard the input.
             const v = if (std.math.isFinite(o.value)) std.math.clamp(o.value, 0.0, 1.0) else 0.0;
-            const e = self.bar(.{ .value = v, .width = o.width, .height = o.height });
+            // Forwarded, not dropped: `bar` resolves the style through `finish`, so a
+            // themed progress track reaches paint the same way a themed button does.
+            const e = self.bar(.{
+                .value = v,
+                .width = o.width,
+                .height = o.height,
+                .style = o.style,
+            });
             e.margin_left = o.margin_left;
             e.margin_right = o.margin_right;
             e.margin_top = o.margin_top;
@@ -5489,6 +5621,117 @@ test "modifier flags pack into one byte with no padding" {
     try std.testing.expect(Mods{ .ctrl = true } != Mods{ .shift = true });
 }
 
+test "a style is named once and inline fields still win" {
+    // The complaint this answers: a style could be named OR extended but not both,
+    // because the two went through different fields and neither composed.
+    const M = void;
+    var r: Ui(M) = .init(std.testing.allocator);
+    defer r.deinit();
+
+    // "heading" is built in. `pad` is set beside the name to prove the inline
+    // field survives the merge rather than being overwritten by it.
+    const named_only = r.text(.{ .label = "x", .style = .{ .name = "heading" } });
+    const via_name = r.text(.{ .label = "x", .style = .{ .name = "heading" } });
+    const via_class = r.text(.{ .label = "x", .style = .{ .class = "heading" } });
+    const both = r.text(.{ .label = "x", .style = .{ .name = "heading", .pad = 9 } });
+
+    // Assert on the GEOMETRY, not on `style()`: `size` and `weight` are baked into
+    // the text geometry before `finish` runs, so they never appear in a Style at
+    // all. Reading them off `style()` is the mistake this comment exists to stop
+    // someone repeating.
+    const a = named_only.geometry.text.size;
+    const b = via_name.geometry.text.size;
+    const c = via_class.geometry.text.size;
+    // The built-in `heading` style supplies a size, and `text` falls back to 14
+    // only when nothing did.
+    try std.testing.expect(a != 14);
+    try std.testing.expectEqual(a, b);
+    try std.testing.expectEqual(a, c);
+
+    // Inline wins where it is written, and the named style still fills the rest.
+    try std.testing.expectEqual(@as(f32, 9), both.pad);
+    try std.testing.expectEqual(a, both.geometry.text.size);
+}
+
+test "an unknown style name reports instead of painting the floor" {
+    // The bug class: a misspelled name resolved to null and merged nothing, so
+    // the element rendered with the compiled defaults and said nothing. A typo
+    // and a working name looked identical.
+    const M = void;
+    var r: Ui(M) = .init(std.testing.allocator);
+    defer r.deinit();
+
+    _ = r.text(.{ .label = "x", .style = .{ .name = "heding" } });
+    try std.testing.expect(r.failed);
+    try std.testing.expectEqual(FailKind.style, r.fail_kind);
+    // The band names the style AND which spelling was used.
+    const band = r.fail_buf[0..r.fail_len];
+    try std.testing.expect(std.mem.indexOf(u8, band, "heding") != null);
+    try std.testing.expect(std.mem.indexOf(u8, band, "style.name") != null);
+}
+
+test "a known style name raises no band" {
+    // The other half: reporting must not fire on success, or every themed app
+    // shows a permanent failure line.
+    const M = void;
+    var r: Ui(M) = .init(std.testing.allocator);
+    defer r.deinit();
+
+    _ = r.text(.{ .label = "x", .style = .{ .name = "heading" } });
+    try std.testing.expect(!r.failed);
+}
+
+test "name and class are the same slot, either spelling" {
+    // Both are aliases of one thing, so `refName` returns the name whichever
+    // field carried it. Two DIFFERENT values is caught by the assert inside
+    // `refName`, which a test cannot catch without a panic handler -- the
+    // agreeing case is the contract every caller relies on.
+    try std.testing.expectEqualStrings("heading", (Style{ .name = "heading" }).refName().?);
+    try std.testing.expectEqualStrings("heading", (Style{ .class = "heading" }).refName().?);
+    try std.testing.expectEqualStrings("heading", (Style{ .name = "heading", .class = "heading" }).refName().?);
+    // Neither set is not a reference at all.
+    try std.testing.expectEqual(@as(?[]const u8, null), (Style{}).refName());
+}
+
+test "a separator takes a caller style instead of always the theme border" {
+    // The bug: `separator` built its rect with a hardcoded border colour and never
+    // called `finish`, so `.style` parsed, sat on the opts struct,
+    // and reached nothing. Adding the fields without this test would have shipped
+    // two more decorative options.
+    const M = void;
+    var r: Ui(M) = .init(std.testing.allocator);
+    defer r.deinit();
+
+    // Default: the theme border, because that is what an unstyled rule should be.
+    const plain = r.separator(.{});
+    try std.testing.expect(plain.bg != null);
+
+    // Caller overrides the fill.
+    const red = Color.rgbHex(0xff0000);
+    const styled = r.separator(.{ .style = .{ .bg = .{ .solid = red } } });
+    try std.testing.expect(std.meta.eql(styled.bg.?.solid, red));
+
+    // And a named style reaches it too, not just an inline field.
+    _ = r.text(.{ .label = "x", .style = .{ .name = "heading" } });
+    const named = r.separator(.{ .style = .{ .name = "heading" } });
+    // `heading` supplies a size/face rather than a bg, so the border default stands
+    // -- what matters is that the lookup ran and did not raise a miss band.
+    try std.testing.expect(!r.failed);
+    try std.testing.expect(named.bg != null);
+}
+
+test "a progress bar takes a caller style" {
+    // Same shape as the separator: `progress` delegates to `bar` and used to drop
+    // the style on the way, so a themed track was unreachable.
+    const M = void;
+    var r: Ui(M) = .init(std.testing.allocator);
+    defer r.deinit();
+
+    const accent = Color.rgbHex(0x00ff00);
+    const e = r.progress(.{ .value = 0.5, .style = .{ .color = .{ .solid = accent } } });
+    try std.testing.expect(std.meta.eql(e.color.?.solid, accent));
+}
+
 test "every Style field is honoured by applyStyle and mergeStyle" {
     // A field-by-field merge is a list that a new field can be left off, and
     // the omission is invisible: the element simply keeps its default and
@@ -5514,6 +5757,8 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
             f32 => 7,
             u16 => 3,
             u8 => 2,
+            []const u8 => "probe",
+            bool => true,
             Halo => .{ .color = .{ .r = 9, .g = 10, .b = 11, .a = 12 }, .blur = 3, .spread = 1, .offset = .{ 1, 2 } },
             Frost => .{ .blur = 5 },
             else => @compileError("new Style field '" ++ f.name ++ "' of type " ++ @typeName(Child) ++
@@ -5536,6 +5781,11 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
         // on an Element to compare. Covered by the text tests instead.
         if (comptime std.mem.eql(u8, f.name, "size")) continue;
         if (comptime std.mem.eql(u8, f.name, "weight")) continue;
+        // `name` and `class` are REFERENCES to a theme style, resolved in
+        // `finish` before the merge. They name where values come from, so
+        // there is nothing of them to store on the Element.
+        if (comptime std.mem.eql(u8, f.name, "name")) continue;
+        if (comptime std.mem.eql(u8, f.name, "class")) continue;
         if (!is_opt2) {
             try std.testing.expectEqual(@field(full, f.name), @field(a, f.name));
         } else if (@typeInfo(f.type).optional.child == f32) {
@@ -5560,6 +5810,11 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
         if (comptime std.mem.eql(u8, f.name, "margin")) continue;
         if (comptime std.mem.eql(u8, f.name, "size")) continue;
         if (comptime std.mem.eql(u8, f.name, "weight")) continue;
+        // `name` and `class` are REFERENCES to a theme style, resolved in
+        // `finish` before the merge. They name where values come from, so
+        // there is nothing of them to store on the Element.
+        if (comptime std.mem.eql(u8, f.name, "name")) continue;
+        if (comptime std.mem.eql(u8, f.name, "class")) continue;
         if (!is_opt3) {
             try std.testing.expectEqual(@field(full, f.name), @field(m, f.name));
         } else if (@typeInfo(f.type).optional.child == f32) {

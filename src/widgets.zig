@@ -26,6 +26,16 @@ pub fn SliderOpts(comptime M: type) type {
         margin_top: f32 = 0,
         margin_bottom: f32 = 0,
         disabled: bool = false,
+        /// Three roles, three parts -- one Style, each field meaning a different one:
+        ///   `.color` -> the FILLED portion (defaults to the accent)
+        ///   `.bg`    -> the KNOB's fill (defaults to the theme background)
+        ///   `.hover` -> the knob's fill while hovered (defaults to `bg`)
+        /// `.radius` sets the pill radius on the fill, the obvious dial for
+        /// `thickness`. Everything else applies to nothing: a 6px track has no
+        /// padding, no stroke and no text, so those fields are inert here by design
+        /// rather than by omission. The track is deliberately unreachable -- it is
+        /// `theme.control` and nobody has needed otherwise.
+        style: elmz.Style = .{},
     };
 }
 
@@ -115,15 +125,31 @@ pub fn slider(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         .height = if (o.orientation == .horizontal) o.thickness else o.length,
         .style = .{ .bg = elmz.solid(ui.theme.control), .radius = o.thickness / 2 },
     });
+    // `.color` is the fill; the accent stays the default so an unstyled slider
+    // looks exactly as it did before the field existed.
     const fill = ui.rect(.{
         .width = if (o.orientation == .horizontal) along else o.thickness,
         .height = if (o.orientation == .horizontal) o.thickness else along,
-        .style = .{ .bg = elmz.solid(ui.theme.accent), .radius = o.thickness / 2 },
+        .style = .{
+            .bg = o.style.color orelse elmz.solid(ui.theme.accent),
+            .radius = o.style.radius orelse o.thickness / 2,
+        },
     });
+    // `.bg` is the knob's fill and `.hover` its fill while hovered. `.hover` alone
+    // with no `.bg` still works: it falls back to the knob default, which is what
+    // someone recolouring only the hover state means.
+    const knob_bg = o.style.bg orelse elmz.solid(ui.theme.bg);
     const knob = ui.rect(.{
         .width = d,
         .height = d,
-        .style = .{ .bg = elmz.solid(ui.theme.bg), .border = elmz.solid(ui.theme.border), .radius = d / 2 },
+        .style = .{
+            .bg = knob_bg,
+            .border = elmz.solid(ui.theme.border),
+            .radius = d / 2,
+            .hover = o.style.hover,
+            // A halo is a ring around the knob, so the knob is the part it belongs on.
+            .hover_halo = o.style.hover_halo,
+        },
     });
 
     switch (o.orientation) {
@@ -189,8 +215,8 @@ pub fn SelectOpts(comptime M: type) type {
         margin_top: f32 = 0,
         margin_bottom: f32 = 0,
         disabled: bool = false,
-        hover_bg: ?elmz.Fill = null,
-        press_bg: ?elmz.Fill = null,
+        hover: ?elmz.Fill = null,
+        pressed: ?elmz.Fill = null,
     };
 }
 
@@ -212,8 +238,8 @@ pub fn select(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         .margin_top = o.margin_top,
         .margin_bottom = o.margin_bottom,
         .disabled = o.disabled,
-        .hover_bg = o.hover_bg,
-        .press_bg = o.press_bg,
+        .hover = o.hover,
+        .pressed = o.pressed,
     });
     e.key = o.key;
     e.focusable = true;
@@ -244,8 +270,8 @@ pub fn MenuOpts(comptime M: type) type {
         margin_top: f32 = 0,
         margin_bottom: f32 = 0,
         disabled: bool = false,
-        hover_bg: ?elmz.Fill = null,
-        press_bg: ?elmz.Fill = null,
+        hover: ?elmz.Fill = null,
+        pressed: ?elmz.Fill = null,
     };
 }
 
@@ -263,8 +289,8 @@ pub fn menu(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         .margin_top = o.margin_top,
         .margin_bottom = o.margin_bottom,
         .disabled = o.disabled,
-        .hover_bg = o.hover_bg,
-        .press_bg = o.press_bg,
+        .hover = o.hover,
+        .pressed = o.pressed,
     });
     e.key = o.key;
     e.focusable = true;
@@ -532,7 +558,7 @@ pub fn tabs(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
                 .border = if (live) elmz.solid(th.accent) else null,
                 .pad = o.pad,
             },
-            .hover_bg = .{ .solid = th.hover },
+            .hover = .{ .solid = th.hover },
             .on_press = t.msg,
         });
         b.key = @TypeOf(ui.*).rovingKey(o.key, @intCast(i));
@@ -605,7 +631,7 @@ pub fn list(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
                 .bg = if (live) elmz.solid(th.selected) else null,
                 .pad = o.pad,
             },
-            .hover_bg = .{ .solid = th.hover },
+            .hover = .{ .solid = th.hover },
             .on_press = r.msg,
         });
         item.key = @TypeOf(ui.*).rovingKey(o.key, @intCast(i));
@@ -634,4 +660,47 @@ pub fn list(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     root.key = o.key;
     root.focusable = true;
     return root;
+}
+
+test "a slider maps .color to the fill and .bg/.hover to the knob" {
+    // The bug this answers: `style` on SliderOpts parsed and reached nothing, because
+    // the three parts hardcoded theme colours inline. Asserting on the child elements
+    // rather than on the opts struct is the point -- the struct being set proved
+    // nothing, which is how the field shipped unwired.
+    const M = void;
+    var ui: elmz.Ui(M) = .init(std.testing.allocator);
+    defer ui.deinit();
+
+    var v: f32 = 0.5;
+    const accent = elmz.Color.rgbHex(0x00ff00);
+    const knob_fill = elmz.Color.rgbHex(0x0000ff);
+    const knob_hot = elmz.Color.rgbHex(0xff00ff);
+
+    const s = ui.slider(.{
+        .key = 1,
+        .value = &v,
+        .msg = {},
+        .style = .{
+            .color = elmz.solid(accent),
+            .bg = elmz.solid(knob_fill),
+            .hover = elmz.solid(knob_hot),
+        },
+    });
+
+    // stack children: track, fill, knob, in that order.
+    const kids = s.geometry.stack.children;
+    try std.testing.expectEqual(@as(usize, 3), kids.len);
+    const track = kids[0];
+    const fill = kids[1];
+    const knob = kids[2];
+
+    // `.color` lands on the fill.
+    try std.testing.expect(std.meta.eql(fill.bg.?.solid, accent));
+    // `.bg`/`.hover` land on the knob, not on the fill.
+    try std.testing.expect(std.meta.eql(knob.bg.?.solid, knob_fill));
+    try std.testing.expect(std.meta.eql(knob.hover.?.solid, knob_hot));
+    try std.testing.expect(fill.hover == null);
+
+    // The track is deliberately unreachable: no field targets it.
+    try std.testing.expect(std.meta.eql(track.bg.?.solid, ui.theme.control));
 }
