@@ -297,6 +297,12 @@ pub const StyleEntry = struct {
         frost: ?FrostSpecEntry = null,
         /// Outline width in pixels; absent fills solid.
         stroke: ?u8 = null,
+        /// Layout, so a named style can set spacing.
+        margin: ?f32 = null,
+        margin_left: ?f32 = null,
+        margin_right: ?f32 = null,
+        margin_top: ?f32 = null,
+        margin_bottom: ?f32 = null,
     } = .{},
 };
 
@@ -1026,6 +1032,13 @@ pub fn Element(comptime M: type) type {
                 .hover = self.hover,
                 .hover_halo = self.hover_halo,
                 .pressed = self.pressed,
+                // Margins too, for the same reason: `applyStyle` writes them and
+                // this projection has to read them back, or a round trip through
+                // `style()` silently zeroes the element's spacing.
+                .margin_left = self.margin_left,
+                .margin_right = self.margin_right,
+                .margin_top = self.margin_top,
+                .margin_bottom = self.margin_bottom,
             };
         }
 
@@ -2320,6 +2333,11 @@ pub fn Ui(comptime M: type) type {
                 out.weight = entry.spec.weight;
                 if (entry.spec.frost) |f| out.frost = .{ .blur = f.blur };
                 out.stroke = entry.spec.stroke;
+                out.margin = entry.spec.margin;
+                out.margin_left = entry.spec.margin_left;
+                out.margin_right = entry.spec.margin_right;
+                out.margin_top = entry.spec.margin_top;
+                out.margin_bottom = entry.spec.margin_bottom;
                 if (entry.spec.halo) |h| out.halo = .{
                     .color = roleColor(self.theme, h.color),
                     .blur = h.blur,
@@ -2508,6 +2526,12 @@ pub fn Ui(comptime M: type) type {
                 .text => |*tx| tx.weight = v,
                 else => {},
             };
+            // A DEFAULT, not an override: `o.tone` used to be assigned before
+            // this merge ran, so any style or inline `.color` replaced it and a
+            // `.tone = .muted` element read as full-strength text.
+            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted and e.color == null) {
+                e.color = .{ .solid = self.theme.text_muted };
+            }
             return e;
         }
 
@@ -2713,7 +2737,6 @@ pub fn Ui(comptime M: type) type {
             e.wrap = o.wrap;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
-            if (o.tone == .muted) e.color = .{ .solid = self.theme.text_muted };
             return self.finish(e, o);
         }
 
@@ -7979,4 +8002,25 @@ test "a theme can write .color = .red and the builtin answers it" {
         }
     }
     try std.testing.expect(found);
+}
+
+test "tone is a default, so an explicit colour wins over it" {
+    const gpa = std.testing.allocator;
+    var ui = Ui(TMsg).init(gpa);
+    defer ui.deinit();
+    ui.reset();
+
+    const plain = ui.text(.{ .label = "x", .tone = .muted });
+    try std.testing.expect(plain.color != null);
+
+    const explicit = ui.text(.{
+        .label = "x",
+        .tone = .muted,
+        .style = .{ .color = .{ .solid = Color.rgbHex(0xff0000) } },
+    });
+    try std.testing.expect(explicit.color != null);
+    try std.testing.expect(std.meta.eql(explicit.color.?, Fill{ .solid = Color.rgbHex(0xff0000) }));
+
+    const normal = ui.text(.{ .label = "x" });
+    try std.testing.expect(normal.color == null);
 }
