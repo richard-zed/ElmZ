@@ -18,8 +18,19 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ matrix.zig }}
-      - run: zig fmt --check build.zig src test bench
+      - run: zig fmt --check build.zig src tests examples
       # `zig build test` never touches the configure phase or the examples,
       # which is exactly where an install-path break hid for a whole release.
       - run: zig build --summary all
       - run: zig build test --summary all
+
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      - run: test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+      - run: zig build bench -Doptimize=ReleaseFast -Dfont=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf

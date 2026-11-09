@@ -96,20 +96,22 @@ pub fn input(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     // The click itself dispatches through the ordinary press path, so the
     // caret move and the message cannot come from two different places.
     e.on_press = o.msg;
-    e.widget = ui.payload(.{ .input = .{
-        .edit = o.edit,
-        .display = display,
-        .size = o.size,
-        .mask = mask,
-        .placeholder = o.placeholder,
-        .pad = pad,
-        .msg = o.msg,
-        // A field with a fixed height overflows by construction, so it takes
-        // the same per-path scroll slot the containers use. Without this the
-        // element is granted no scroll key at all and the wheel writes into a
-        // slot nothing reads -- no bar, no movement, no error.
-        .scrolls = o.height != null,
-    } });
+    e.widget = ui.payload(.{
+        .input = .{
+            .edit = o.edit,
+            .display = display,
+            .size = o.size,
+            .mask = mask,
+            .placeholder = o.placeholder,
+            .pad = pad,
+            .msg = o.msg,
+            // A field with a fixed height overflows by construction, so it takes
+            // the same per-path scroll slot the containers use. Without this the
+            // element is granted no scroll key at all and the wheel writes into a
+            // slot nothing reads -- no bar, no movement, no error.
+            .scrolls = o.height != null,
+        },
+    });
     return e;
 }
 

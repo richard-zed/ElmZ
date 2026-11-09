@@ -30,31 +30,22 @@ fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 }
 
 fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-
     const base = ui.styleByName("base") orelse unreachable;
 
-    const inc = ui.button(.{ .label = "+",
+    const inc = ui.button(.{ .label = "+", .style = base, .msg = .inc, .width = 56 });
+    const dec = ui.button(.{ .label = "-", .style = base, .msg = .dec, .width = 56, .margin_left = 8 });
+    const reset = ui.button(.{
+        .label = "reset",
+        .msg = .reset,
+        .width = 92,
+        .margin_left = 8,
         .style = base,
-        .msg = .inc,
-        .width = 56 });
-    const dec = ui.button(.{ .label = "-",
-        .style = base,
-        .msg = .dec,
-        .width = 56,
-        .margin_left = 8
     });
-    const reset = ui.button(.{ .label = "reset", .msg = .reset, .width = 92, .margin_left = 8, .style = base,});
     return ui.column(.{ .children = &.{
         ui.text(.{ .label = "ELMZ", .style = base, .size = 22 }),
-        ui.text(.{ .label = "an elm-shaped runtime, zig 0.16",
-                    .style = base,
-                    .size = 12,
-                    .tone = .muted }),
-                    ui.text(.{ .label = ui.fmt("{d}", .{m.count}),
-                            .style = base,
-                    .margin_top = 10 }),
-                    ui.row(.{ .children = &.{ inc, dec, reset },
-                           .style = base, .margin_top = 8 }),
+        ui.text(.{ .label = "an elm-shaped runtime, zig 0.16", .style = base, .size = 12, .tone = .muted }),
+        ui.text(.{ .label = ui.fmt("{d}", .{m.count}), .style = base, .margin_top = 10 }),
+        ui.row(.{ .children = &.{ inc, dec, reset }, .style = base, .margin_top = 8 }),
         ui.bar(.{ .value = @as(f32, @floatFromInt(m.count + 3)) / 8.0, .margin_top = 16 }),
     }, .style = .{ .pad = 24 } });
 }
