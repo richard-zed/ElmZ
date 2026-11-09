@@ -2523,7 +2523,7 @@ pub fn Ui(comptime M: type) type {
             // `tone` is a DEFAULT, so an explicit colour wins over it. Applying
             // it before the merge let a style's `.color` overwrite it every time,
             // which made `.tone = .muted` look like it did nothing.
-            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted) {
+            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted and e.color == null) {
                 e.color = .{ .solid = self.theme.text_muted };
             }
             return e;

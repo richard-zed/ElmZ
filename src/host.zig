@@ -958,24 +958,28 @@ pub fn run(
             const app_name: ?[]const u8 = if (stem_owned) |st| st else null;
             candidates = themeCandidates(g, io_arg, app_name, opts.home, opts.xdg_config_home);
             // `opts.theme_path` names the app's own theme and outranks every
-            // default, so `theme.zon` beside the binary cannot shadow it. The
-            // list allocates each string, so splice in an owned duplicate.
+            // default, so `theme.zon` beside the binary cannot shadow it.
+            //
+            // `themePathBesideExe` returns a SENTINEL slice (len+1 bytes); the
+            // list holds plain ones and the teardown frees each by its own
+            // length. Copying it in unsentinelled made every free a length
+            // mismatch, which the debug allocator panics on -- the crash looked
+            // like the theme failing to load.
             if (opts.theme_path) |tp| {
-                if (themePathBesideExe(g, io_arg, tp)) |own| {
-                    if (candidates) |list| {
-                        const spliced = g.alloc([]const u8, list.len + 1) catch null;
+                if (themePathBesideExe(g, io_arg, tp)) |z| {
+                    defer g.free(z);
+                    const own: ?[]const u8 = g.dupe(u8, z) catch null;
+                    if (own) |o| {
+                        const n = if (candidates) |list| list.len else 0;
+                        const spliced = g.alloc([]const u8, n + 1) catch null;
                         if (spliced) |sp| {
-                            sp[0] = own;
-                            @memcpy(sp[1..], list);
-                            g.free(list);
+                            sp[0] = o;
+                            if (candidates) |list| {
+                                @memcpy(sp[1..], list);
+                                g.free(list);
+                            }
                             candidates = sp;
-                        } else g.free(own);
-                    } else {
-                        const one = g.alloc([]const u8, 1) catch null;
-                        if (one) |o| {
-                            o[0] = own;
-                            candidates = o;
-                        } else g.free(own);
+                        } else g.free(o);
                     }
                 }
             }
