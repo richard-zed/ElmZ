@@ -2526,10 +2526,11 @@ pub fn Ui(comptime M: type) type {
                 .text => |*tx| tx.weight = v,
                 else => {},
             };
-            // A DEFAULT, not an override: `o.tone` used to be assigned before
-            // this merge ran, so any style or inline `.color` replaced it and a
-            // `.tone = .muted` element read as full-strength text.
-            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted and e.color == null) {
+            // Tone is the caller's explicit choice and outranks a style colour:
+            // it is narrower and set at the call site. Assigned AFTER the merge
+            // so no theme `.color` can replace it -- the original bug was the
+            // assignment happening before the merge, which let a style win.
+            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted) {
                 e.color = .{ .solid = self.theme.text_muted };
             }
             return e;
@@ -8013,13 +8014,15 @@ test "tone is a default, so an explicit colour wins over it" {
     const plain = ui.text(.{ .label = "x", .tone = .muted });
     try std.testing.expect(plain.color != null);
 
-    const explicit = ui.text(.{
+    // A style colour must NOT beat an explicit tone: the tone is narrower and
+    // set at the call site, so it wins.
+    const over = ui.text(.{
         .label = "x",
         .tone = .muted,
         .style = .{ .color = .{ .solid = Color.rgbHex(0xff0000) } },
     });
-    try std.testing.expect(explicit.color != null);
-    try std.testing.expect(std.meta.eql(explicit.color.?, Fill{ .solid = Color.rgbHex(0xff0000) }));
+    try std.testing.expect(over.color != null);
+    try std.testing.expect(std.meta.eql(over.color.?, Fill{ .solid = ui.theme.text_muted }));
 
     const normal = ui.text(.{ .label = "x" });
     try std.testing.expect(normal.color == null);
