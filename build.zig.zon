@@ -5,13 +5,16 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .inkwell = .{
-            .path = "deps-cedar",
+            .url = "https://github.com/richard-zed/Inkwell/archive/refs/tags/v0.6.1.tar.gz",
+            .hash = "inkwell-0.6.0--16WKEiNDADqAa5k9Inrr5ntXapvwhoBSztosYF3OPza",
         },
         .magnolia = .{
-            .path = "../magnolia",
+            .url = "https://github.com/richard-zed/Magnolia/archive/refs/tags/v0.1.1.tar.gz",
+            .hash = "magnolia-0.1.0-QMR2WeIgAwAks9RFjryu6ZIwDvK39HThSjmGcgdxmbv-",
         },
         .sakura = .{
-            .path = "../sakura",
+            .url = "https://github.com/richard-zed/Sakura/archive/refs/tags/v0.1.1.tar.gz",
+            .hash = "sakura-0.1.0-7sw1osh50wCe5dosxt5xypK1zncC-deATHxEKL1AfDBQ",
         },
     },
     .paths = .{
