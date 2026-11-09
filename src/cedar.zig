@@ -1230,14 +1230,35 @@ fn anyFace(bytes_out: []u8) ?[]const u8 {
     return null;
 }
 
+// Windows gives a thread a 1 MB stack, so a 16 MB face buffer on the stack is a
+// hard stack overflow there and fine on Linux -- the suite has to run on both.
+const FaceBuf = struct {
+    const size = 16 * 1024 * 1024;
+    buf: []u8,
+    bytes: []const u8,
+    fn read(gpa: std.mem.Allocator) !?FaceBuf {
+        const buf = try gpa.alloc(u8, size);
+        errdefer gpa.free(buf);
+        const bytes = anyFace(buf) orelse {
+            gpa.free(buf);
+            return null;
+        };
+        return .{ .buf = buf, .bytes = bytes };
+    }
+    fn deinit(self: FaceBuf, gpa: std.mem.Allocator) void {
+        gpa.free(self.buf);
+    }
+};
+
 test "two faces of one collection do not share a cache key" {
     // The bug this guards: the cache key was the byte pointer alone, so two
     // faces of a `.ttc` differed by nothing and a cache served one's glyphs
     // for the other's -- silently, forever. Built from real faces because the
     // property is about what `instanceKey` is computed FROM, and fabricating a
     // `Font` would let the field drop out and still pass.
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
 
     var a = Font.initIndex(bytes, 0);
     try testing.expect(a.available());
@@ -1263,8 +1284,9 @@ test "a face with no storage answers no axes and no colour" {
 }
 
 test "initIndex on a non-collection reads face zero rather than refusing" {
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     const zero = Font.initIndex(bytes, 0);
     try testing.expect(zero.available());
     // A plain .ttf has one face; asking for face 7 must not hand back a valid
@@ -1274,8 +1296,9 @@ test "initIndex on a non-collection reads face zero rather than refusing" {
 }
 
 test "a static face reports no axes and atCoords returns it unchanged" {
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     const f = Font.init(bytes);
     try testing.expect(f.available());
     // DejaVuSans and Roboto-Regular are both static; if this machine's first
@@ -1289,8 +1312,9 @@ test "a static face reports no axes and atCoords returns it unchanged" {
 }
 
 test "atCoords drops the attached caches instead of sharing them" {
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     var f = Font.init(bytes);
     try testing.expect(f.available());
     f.cache_ok = true;
@@ -1305,8 +1329,9 @@ test "atCoords drops the attached caches instead of sharing them" {
 }
 
 test "a monochrome face has no colour, and asking costs no error" {
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     const f = Font.init(bytes);
     try testing.expect(f.available());
     // Every desktop font is monochrome; an emoji face is not, so a machine that
@@ -1341,8 +1366,9 @@ test "wrap breaks at legal opportunities and never exceeds the width" {
     // Real advances, because the whole question is arithmetic over them: a
     // fabricated advance table would let the scale factor drop out and still
     // pass, which is how an overflow check becomes decorative.
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     const f = Font.init(bytes);
     if (!f.ok) return error.SkipZigTest;
 
@@ -1370,8 +1396,9 @@ test "wrap breaks at legal opportunities and never exceeds the width" {
 }
 
 test "wrap prefers the last opportunity that fits, not the first past the edge" {
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     const f = Font.init(bytes);
     if (!f.ok) return error.SkipZigTest;
 
@@ -1393,8 +1420,9 @@ test "wrap prefers the last opportunity that fits, not the first past the edge" 
 }
 
 test "wrap honours a hard newline and drops the separator" {
-    var buf: [16 * 1024 * 1024]u8 = undefined;
-    const bytes = anyFace(&buf) orelse return error.SkipZigTest;
+    const face = (try FaceBuf.read(testing.allocator)) orelse return error.SkipZigTest;
+    defer face.deinit(testing.allocator);
+    const bytes = face.bytes;
     const f = Font.init(bytes);
     if (!f.ok) return error.SkipZigTest;
 
