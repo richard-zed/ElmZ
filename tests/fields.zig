@@ -81,7 +81,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
     return ui.column(.{
         .children = &.{
             ui.text(.{ .label = "NAME", .size = 11, .tone = .muted }),
-            ui.textInput(.{
+            ui.input(.{
                 .key = key_name,
                 .edit = &m.name,
                 .size = 16,
@@ -92,7 +92,7 @@ pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
             ui.text(.{ .label = "PASSPHRASE", .size = 11, .tone = .muted, .margin_top = 12 }),
             // `mask` builds a display string of one `?` per codepoint in the
             // BUILDER, so the caret is placed and drawn in the same units.
-            ui.textInput(.{
+            ui.input(.{
                 .key = key_pass,
                 .edit = &m.pass,
                 .size = 16,

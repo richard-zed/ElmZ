@@ -172,9 +172,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    // ui.textInput does not exist yet, so this test cannot compile. Not a 0.17
-    // break: the builder was never written. Left unbuilt until text entry lands.
-    _ = fields;
+    const fields_install = b.addInstallArtifact(fields, .{});
+    b.getInstallStep().dependOn(&fields_install.step);
+    b.step("fields", "type into a form headlessly").dependOn(&fields_install.step);
 
     const fonts = b.addExecutable(.{
         .name = "fonts",
