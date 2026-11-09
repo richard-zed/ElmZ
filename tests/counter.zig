@@ -82,20 +82,16 @@ pub fn main(init: std.process.Init) !void {
     var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
 
-    var canvas = try software.Canvas.init(gpa, W, H);
-
-    // Caller-owned bytes: the canvas holds a slice into them, so the
-    // free is registered first and therefore runs after the teardown.
-    // By NAME, the way an app names a face in its theme: whichever face this
-    // machine has, or none. With no fonts installed every example still runs and
-    // the text falls back to the built-in bitmap face.
-    const font_bytes = software.loadFontByName(gpa, init.io, "DejaVu Sans", &.{}) catch null;
-    defer if (font_bytes) |fb| gpa.free(fb);
-    if (font_bytes) |fb| canvas.setFont(fb);
-    defer canvas.deinit();
-
-    var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
-    defer rt.deinit();
+    // One call for what used to be five: canvas, typeface, runtime, and the
+    // free ordering that keeps the borrowed font bytes alive.
+    var prog = try elmz.init(Model, Msg, gpa, io, .{
+        .size = .{ .w = W, .h = H },
+        .font = "DejaVu Sans",
+        .initial = .{},
+        .update = update,
+        .view = view,
+    });
+    defer prog.deinit();
 
     const script = [_]Script{
         .{ .click_msg = .inc },
@@ -107,11 +103,11 @@ pub fn main(init: std.process.Init) !void {
     };
 
     for (script, 0..) |step, i| {
-        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try prog.paint();
         defer frame.deinit();
 
         try out.print("frame {d}: state=count {d}  prims={d}  hits={d}\n", .{
-            i, rt.state.count, frame.primitiveCount(), frame.hits.len,
+            i, prog.rt.state.count, frame.primitiveCount(), frame.hits.len,
         });
 
         const point: [2]f32 = switch (step) {
@@ -127,9 +123,9 @@ pub fn main(init: std.process.Init) !void {
             .click_at => |p| p,
         };
 
-        rt.press.down(&frame, point);
-        if (rt.press.up(point)) |m| {
-            _ = rt.dispatch(m);
+        prog.rt.press.down(&frame, point);
+        if (prog.rt.press.up(point)) |m| {
+            _ = prog.rt.dispatch(m);
             try out.print("  click @({d:.0},{d:.0}) -> .{s}\n", .{ point[0], point[1], @tagName(m) });
         } else {
             try out.print("  click @({d:.0},{d:.0}) -> (no hit)\n", .{ point[0], point[1] });
@@ -137,13 +133,13 @@ pub fn main(init: std.process.Init) !void {
 
         var name_buf: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "frame_{d}.png", .{i});
-        try canvas.writePng(io, gpa, name);
+        try prog.canvas.writePng(io, gpa, name);
     }
 
-    try out.print("\nfinal state: count={d} presses={d}\n", .{ rt.state.count, rt.state.presses });
+    try out.print("\nfinal state: count={d} presses={d}\n", .{ prog.rt.state.count, prog.rt.state.presses });
 
     // dump the primitive stream for frame 0's shape
-    var f = try rt.frame(.{ .w = @floatFromInt(W), .h = @floatFromInt(H) }, canvas.renderer());
+    var f = try prog.rt.frame(.{ .w = @floatFromInt(W), .h = @floatFromInt(H) }, prog.canvas.renderer());
     defer f.deinit();
     try out.print("last frame: {d} primitives\n", .{f.primitiveCount()});
     for (f.prims, 0..) |p, i| {

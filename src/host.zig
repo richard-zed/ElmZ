@@ -3840,3 +3840,105 @@ test "a press on an option chooses it, rather than dismissing the list" {
     try std.testing.expectEqual(@as(u32, 1), rt.state.toggles);
     try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
 }
+
+// ---------------------------------------------------------------------------
+// elmz.init -- the handle
+// ---------------------------------------------------------------------------
+
+/// What `elmz.init` needs to stand a program up. Everything here was previously
+/// assembled by hand in every example's `main`, in the same order, with the
+/// same free-order comment.
+pub fn Config(comptime S: type, comptime M: type) type {
+    return struct {
+        /// Logical size of the surface.
+        size: struct { w: u32, h: u32 },
+        /// Face to measure and draw with. Omitted or missing falls back to the
+        /// built-in bitmap face, which is what makes an example run on a
+        /// machine with no fonts installed.
+        font: ?[]const u8 = null,
+        /// Extra directories for `font` to be searched in.
+        font_dirs: []const []const u8 = &.{},
+        /// The app: initial model, update, view.
+        initial: S,
+        update: *const fn (*S, M) elmz.Action(M),
+        view: *const fn (*S, *elmz.Ui(M)) *elmz.Element(M),
+    };
+}
+
+/// An owned, started program: canvas, typeface, runtime. Frees in the right
+/// order on `deinit`, which is the point -- the canvas BORROWS the font bytes,
+/// so the bytes must outlive it. That ordering used to be a comment in every
+/// example's `main`, and getting it backwards is a use-after-free.
+pub fn Instance(comptime S: type, comptime M: type) type {
+    return struct {
+        const Self = @This();
+
+        gpa: std.mem.Allocator,
+        canvas: software.Canvas,
+        /// Caller-owned bytes the canvas points into. Freed after the canvas.
+        font_bytes: ?[]u8,
+        rt: elmz.Runtime(S, M),
+        /// True once `canvas` holds a face; false means the built-in fallback.
+        has_font: bool,
+
+        pub fn deinit(self: *Self) void {
+            // Order matters: the canvas holds a slice into font_bytes.
+            self.rt.deinit();
+            self.canvas.deinit();
+            if (self.font_bytes) |fb| self.gpa.free(fb);
+        }
+
+        /// Paint one frame and hand back its primitives. The caller owns the
+        /// frame and must `deinit` it -- `paintOnce` when the pixels are all
+        /// that is wanted.
+        pub fn paint(self: *Self) !elmz.Frame(M) {
+            return elmz.paintInto(S, M, &self.rt, &self.canvas);
+        }
+
+        /// Paint and drop the frame. The common case for a headless app: it
+        /// wants the PNG, not the primitives.
+        pub fn paintOnceFrame(self: *Self) !void {
+            return elmz.paintOnce(S, M, &self.rt, &self.canvas);
+        }
+
+        /// Dispatch a message through `update`. Returns the resulting action.
+        pub fn dispatch(self: *Self, msg: M) elmz.Action(M) {
+            return self.rt.dispatch(msg);
+        }
+
+        /// The model, for a caller that asserts on it between frames.
+        pub fn model(self: *Self) *S {
+            return &self.rt.state;
+        }
+    };
+}
+
+/// Stand a program up: canvas, typeface, runtime, in the one order that keeps
+/// the borrowed font bytes alive for as long as the canvas needs them.
+///
+/// `io` is required, not optional. `Canvas.init` takes no `io` and that silent
+/// omission is what made icons and images vanish with no error.
+pub fn init(
+    comptime S: type,
+    comptime M: type,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    config: Config(S, M),
+) !Instance(S, M) {
+    var canvas = try software.Canvas.initIo(gpa, config.size.w, config.size.h, io);
+    errdefer canvas.deinit();
+
+    var font_bytes: ?[]u8 = null;
+    if (config.font) |name| {
+        font_bytes = software.loadFontByName(gpa, io, name, config.font_dirs) catch null;
+        if (font_bytes) |fb| canvas.setFont(fb);
+    }
+
+    return .{
+        .gpa = gpa,
+        .canvas = canvas,
+        .font_bytes = font_bytes,
+        .rt = elmz.Runtime(S, M).init(gpa, config.initial, config.update, config.view),
+        .has_font = font_bytes != null,
+    };
+}
