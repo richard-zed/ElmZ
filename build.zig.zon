@@ -7,6 +7,12 @@
         .inkwell = .{
             .path = "deps-cedar",
         },
+        .magnolia = .{
+            .path = "../magnolia",
+        },
+        .sakura = .{
+            .path = "../sakura",
+        },
     },
     .paths = .{
         "build.zig",

@@ -85,6 +85,14 @@ pub fn build(b: *std.Build) void {
     const cedar_dep = b.dependency("inkwell", .{ .target = target, .optimize = optimize });
     const cedar_mod = cedar_dep.module("inkwell");
 
+    // Providers. Icons come from Magnolia (SVG -> edges -> coverage), images
+    // from Sakura (PNG -> RGBA). Both hand back a flat `[]u8`, which is the
+    // shape the blit seam takes, so neither needs an adapter here.
+    const mag_dep = b.dependency("magnolia", .{ .target = target, .optimize = optimize });
+    const mag_mod = mag_dep.module("magnolia");
+    const sak_dep = b.dependency("sakura", .{ .target = target, .optimize = optimize });
+    const sak_mod = sak_dep.module("sakura");
+
     const software_mod = b.addModule("software", .{
         .root_source_file = b.path("src/software.zig"),
         .target = target,
@@ -95,6 +103,8 @@ pub fn build(b: *std.Build) void {
     // No C in the font path any more: Cedar is Zig, so nothing is compiled
     // from a translation unit and nothing is included from src/.
     software_mod.addImport("inkwell", cedar_mod);
+    software_mod.addImport("magnolia", mag_mod);
+    software_mod.addImport("sakura", sak_mod);
 
     // the loop: needs elmz + software, knows no platform
     const runner_mod = b.addModule("runner", .{
@@ -106,7 +116,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "software", .module = software_mod },
         },
     });
-
 
     // ---------------------------------------------------------------------
     // the -sdl3 variants. Only built when asked for, so a machine without
@@ -497,6 +506,8 @@ pub fn build(b: *std.Build) void {
                 // failed to compile, which is why the seam looked green while
                 // its own tests had never run.
                 .{ .name = "inkwell", .module = cedar_mod },
+                .{ .name = "magnolia", .module = mag_mod },
+                .{ .name = "sakura", .module = sak_mod },
             },
         }),
     });

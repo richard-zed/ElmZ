@@ -2028,6 +2028,25 @@ fn checkFrame(f: anytype, size: elmz.Size) !void {
             try std.testing.expect(t.x >= -0.01 and t.y >= -0.01);
             try std.testing.expect(t.x <= size.w and t.y <= size.h);
         },
+        .blit => |b| {
+            try std.testing.expect(std.math.isFinite(b.rect.x + b.rect.y + b.rect.w + b.rect.h));
+            try std.testing.expect(b.rect.w >= 0 and b.rect.h >= 0);
+            try std.testing.expect(b.pixels.len >= @as(usize, b.src_w) * @as(usize, b.src_h) * 4);
+        },
+        // An icon carries a PATH, so there is no buffer to bound here. What can
+        // be asserted is that the box it was given is sane; whether the path
+        // rasterises at all is the renderer's answer, tested in software.zig.
+        .icon => |i| {
+            try std.testing.expect(std.math.isFinite(i.rect.x + i.rect.y + i.rect.w + i.rect.h));
+            try std.testing.expect(i.rect.w >= 0 and i.rect.h >= 0);
+            try std.testing.expect(i.path.len > 0);
+        },
+        // Same as an icon: a path, a box, and nothing to bound in a buffer.
+        .image => |i| {
+            try std.testing.expect(std.math.isFinite(i.rect.x + i.rect.y + i.rect.w + i.rect.h));
+            try std.testing.expect(i.rect.w >= 0 and i.rect.h >= 0);
+            try std.testing.expect(i.path.len > 0);
+        },
     };
     for (f.hits) |h| {
         try std.testing.expect(h.rect.w > 0 and h.rect.h > 0);
@@ -2080,6 +2099,9 @@ test "no frame escapes the canvas: finite, non-negative, in bounds" {
         .text => |t| try std.testing.expect(std.math.isFinite(t.x + t.y)),
         .halo => |h| try std.testing.expect(std.math.isFinite(h.rect.x + h.halo.blur)),
         .frost => |f3| try std.testing.expect(std.math.isFinite(f3.blur)),
+        .blit => |b| try std.testing.expect(std.math.isFinite(b.rect.x + b.rect.y + b.rect.w + b.rect.h)),
+        .icon => |i| try std.testing.expect(std.math.isFinite(i.rect.x + i.rect.y + i.rect.w + i.rect.h)),
+        .image => |i| try std.testing.expect(std.math.isFinite(i.rect.x + i.rect.y + i.rect.w + i.rect.h)),
     };
     small.paintFrame(g.prims);
     var lit: usize = 0;
@@ -2490,6 +2512,13 @@ test "a clipping container confines every primitive to its own box" {
             .halo => {},
             // A frost rewrites pixels inside its rect; it adds no ink.
             .frost => {},
+            // A blit draws a provider's pixels; like a frost it asserts nothing
+            // about the element's own rect.
+            .blit => {},
+            // Nor does an icon: it is rasterised at the rect it is given.
+            .icon => {},
+            // An image likewise draws exactly the rect it is handed.
+            .image => {},
             .quad => |q| {
                 saw_quad = true;
                 try std.testing.expect(!q.rect.intersect(c).isEmpty());
@@ -2684,6 +2713,9 @@ test "a button paints exactly one fill and one label" {
         .text => texts += 1,
         .halo => {},
         .frost => {},
+        .blit => {},
+        .icon => {},
+        .image => {},
     };
     // One fill, one label. Two quads means something upstream is drawing the
     // same rect twice, which is invisible on screen and wrong everywhere else.
@@ -2709,6 +2741,9 @@ test "a bar paints a track and a value fill, and nothing twice" {
         .text => {},
         .halo => {},
         .frost => {},
+        .blit => {},
+        .icon => {},
+        .image => {},
     };
     try std.testing.expectEqual(@as(usize, 2), quads);
     try std.testing.expectEqual(@as(usize, 2), f.prims.len);

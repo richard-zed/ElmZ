@@ -249,6 +249,14 @@ pub const Fill = union(enum) {
     }
 };
 
+/// How an image occupies its box.
+///
+/// `.fit` preserves the source aspect; `.stretch` fills the box exactly, even
+/// when that distorts. In practice layout has already given an image the right
+/// shape (see `Elem.measure`), so `.fit` only does work when a caller forced
+/// both width and height.
+pub const ImageFit = enum { fit, stretch };
+
 pub const Rect = struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -404,6 +412,21 @@ pub const Primitive = union(enum) {
     /// Blurs what is already on the canvas under `rect`. A backdrop effect, so it is
     /// recorded BEFORE the element's fill and reads the destination.
     frost: struct { rect: Rect, radius: f32, blur: f32, clip: Rect },
+    /// A provider's pixels. BORROWED, and the borrow is the whole contract:
+    /// the slice is whatever the caller handed `Renderer.blit`, it must outlive
+    /// the frame that recorded it, and nothing here copies or frees it.
+    blit: struct { rect: Rect, pixels: []const u8, src_w: u32, src_h: u32, clip: Rect },
+
+    /// An SVG to rasterise INTO the target. The SOURCE is recorded, not pixels:
+    /// the renderer owns a cache keyed on (path, size, density, colour) and
+    /// reads each file once, so recording a raster here would throw that away
+    /// and re-rasterise per frame -- the cost the cache exists to remove.
+    icon: struct { rect: Rect, path: []const u8, col: [3]u8, clip: Rect },
+
+    /// A raster image to draw. SOURCE, not pixels, for the same reason `icon`
+    /// records a path: the renderer owns a pixel cache keyed on the path and
+    /// reads each file once.
+    image: struct { rect: Rect, path: []const u8, fit: ImageFit, clip: Rect },
 
     /// `clip` is repeated in each prong because a Zig union has no common fields.
     pub fn clipOf(self: Primitive) Rect {
@@ -413,6 +436,9 @@ pub const Primitive = union(enum) {
             .text => |t| t.clip,
             .halo => |h| h.clip,
             .frost => |f| f.clip,
+            .blit => |b| b.clip,
+            .icon => |i| i.clip,
+            .image => |i| i.clip,
         };
     }
 };
@@ -523,12 +549,97 @@ pub const Renderer = struct {
         hit_text: *const fn (ptr: *anyopaque, bytes: []const u8, size: f32, x: f32) usize,
         /// Fills a closed outline at (x, y).
         path: *const fn (ptr: *anyopaque, x: f32, y: f32, p: Path, fill: Fill, clip: Rect) void,
+        /// Draws a straight-alpha RGBA8 buffer into `rect`, scaling it to fit.
+        /// `pixels.len` must be `src_w * src_h * 4`; a short or empty buffer is
+        /// ignored rather than reading past the end.
+        ///
+        /// No scaling filter is promised: a backend may sample the nearest
+        /// source pixel, and an icon drawn at its natural size -- which is what
+        /// a provider should hand over -- never needs more.
+        blit: *const fn (
+            ptr: *anyopaque,
+            rect: Rect,
+            pixels: []const u8,
+            src_w: u32,
+            src_h: u32,
+            clip: Rect,
+        ) void,
+
+        /// Draw the SVG file at `path` into `rect`, rasterised to fit at the
+        /// current density and tinted `col`.
+        ///
+        /// Separate from `blit` rather than a variant of it: `blit` takes
+        /// finished pixels and cannot cache, because it cannot tell two sources
+        /// apart. This one can, so the renderer reads and parses each file once
+        /// per (path, size, density, colour) instead of once per frame.
+        ///
+        /// A backend with no SVG support omits it and gets nothing drawn --
+        /// the same contract as any other optional capability here.
+        /// Intrinsic size of the image at `path`, or null if it cannot be
+        /// read. Header only, never a decode: this is called from `measure`,
+        /// and layout must not depend on whether a pixel cache happens to be
+        /// warm. That is precisely what keeps a miss from changing layout.
+        measure_image: *const fn (ptr: *anyopaque, path: []const u8) ?[2]u32,
+
+        /// How an image fills the box it was given. `.fit` letterboxes (keeps
+        /// the source aspect, centres, leaves the box alone); `.stretch` fills
+        /// it exactly.
+        blit_image: *const fn (
+            ptr: *anyopaque,
+            rect: Rect,
+            path: []const u8,
+            fit: ImageFit,
+            clip: Rect,
+        ) void,
+
+        blit_svg: *const fn (
+            ptr: *anyopaque,
+            rect: Rect,
+            path: []const u8,
+            col: [3]u8,
+            clip: Rect,
+        ) void,
     };
 
     /// `clip` is required, not defaulted: every draw call names the rect it is confined to.
     pub fn quad(self: Renderer, rect: Rect, fill: Fill, clip: Rect) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         self.vtable.quad(self.ptr, rect, fill, clip);
+    }
+
+    /// Draw a provider's pixels into `rect`. The size check lives here so every
+    /// backend inherits it: a caller that passes a mismatched buffer is a bug in
+    /// the widget, not something each backend should rediscover.
+    pub fn blit(
+        self: Renderer,
+        rect: Rect,
+        pixels: []const u8,
+        src_w: u32,
+        src_h: u32,
+        clip: Rect,
+    ) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        if (src_w == 0 or src_h == 0) return;
+        const need = @as(usize, src_w) * @as(usize, src_h) * 4;
+        if (pixels.len < need) return;
+        const c = clip.intersect(rect);
+        if (c.isEmpty()) return;
+        self.vtable.blit(self.ptr, rect, pixels[0..need], src_w, src_h, c);
+    }
+
+    /// Draw the SVG at `path` into `rect`, tinted `col`. The backend reads and
+    /// rasterises it ONCE per (path, size, density, colour) and reuses the
+    /// result, so a caller may call this every frame.
+    ///
+    /// The emptiness check is here for the same reason `blit`'s buffer check is:
+    /// a degenerate rect or an empty path is the widget's bug, not something
+    /// each backend should rediscover.
+    pub fn blitSvg(self: Renderer, rect: Rect, svg_path: []const u8, col: [3]u8, clip: Rect) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        if (svg_path.len == 0) return;
+        const c = clip.intersect(rect);
+        if (c.isEmpty()) return;
+        self.vtable.blit_svg(self.ptr, rect, svg_path, col, c);
     }
 
     pub fn roundedRect(self: Renderer, rect: Rect, radius: f32, fill: Fill, stroke: ?u8, clip: Rect) void {
@@ -597,6 +708,18 @@ pub const Renderer = struct {
 
     pub fn measureText(self: Renderer, bytes: []const u8, size: f32) TextMetrics {
         return self.vtable.measure_text(self.ptr, bytes, size);
+    }
+
+    /// Draw the raster image at `src` into `rect`. See `VTable.blit_image`.
+    pub fn blitImage(self: Renderer, rect: Rect, src: []const u8, fit: ImageFit, clip: Rect) void {
+        self.vtable.blit_image(self.ptr, rect, src, fit, clip);
+    }
+
+    /// Intrinsic size of an image for layout. See `VTable.measure_image`.
+    /// `src` rather than `path`: `Renderer.path` is the outline call, and a
+    /// parameter of that name shadows it.
+    pub fn imageSize(self: Renderer, src: []const u8) ?[2]u32 {
+        return self.vtable.measure_image(self.ptr, src);
     }
 
     /// Metrics on the face `bytes` will actually be DRAWN with.
@@ -1502,6 +1625,19 @@ pub fn Element(comptime M: type) type {
             stack: struct { children: []const *Self },
             /// a plain sized box; the only geometry with no intrinsic size
             rect: void,
+            /// An SVG icon, drawn into whatever rect this element occupies.
+            ///
+            /// `path` is where the file LIVES, not its bytes: the renderer owns
+            /// a cache keyed on the path, the size, the density and the tint,
+            /// and reads the file once. Handing over bytes would put the
+            /// lifetime of the source on the app.
+            icon: struct { path: []const u8, col: [3]u8 },
+            /// A raster image, drawn as decoded. No tint, so no colour here.
+            ///
+            /// `path` is where the file LIVES. `measure` reads its header for
+            /// the aspect and paint blits the decoded pixels, so neither side
+            /// has to know the file's contents at the other's expense.
+            image: struct { path: []const u8, fit: ImageFit },
         };
 
         /// This element's appearance, read out as one value.
@@ -1650,6 +1786,8 @@ pub fn Element(comptime M: type) type {
         fn textBaseline(self: *const Self, r: Renderer, w: f32, h: f32) ?f32 {
             switch (self.geometry) {
                 .text => |t| return self.pad + r.measureTextFace(t.bytes, t.size, t.face).ascent,
+                // An image has no text, so no baseline.
+                .image => return null,
                 .button => |b| {
                     const ts = r.measureText(b.label, b.size);
                     return (h - ts.height) * 0.5 + ts.ascent;
@@ -1675,7 +1813,7 @@ pub fn Element(comptime M: type) type {
                     }
                     return null;
                 },
-                .bar, .rect, .stack, .scroll => return null,
+                .bar, .rect, .stack, .scroll, .icon => return null,
             }
         }
 
@@ -1712,6 +1850,32 @@ pub fn Element(comptime M: type) type {
                     break :blk .{ .w = bw, .h = ts.height + 16, .min_w = bw };
                 },
                 .bar => .{ .w = 0, .h = 10, .min_w = 0 },
+                // Square by default: an icon has no intrinsic text to measure,
+                // and a viewBox-derived aspect would be a lie for an SVG that
+                // has none. A caller wanting another shape sets width/height.
+                .icon => .{ .w = 24, .h = 24, .min_w = 0 },
+                // Shrink to the image's aspect, like text shrinks to its
+                // intrinsic width. The aspect comes from a HEADER read, not a
+                // decode, so this is stable whether or not the raster is
+                // resident -- which is the whole reason a miss cannot change
+                // layout.
+                //
+                // An unreadable image falls back to square rather than failing:
+                // one broken file should not take out a layout pass, and a
+                // square is the honest default for "we do not know".
+                .image => |im| blk: {
+                    const natural = r.imageSize(im.path) orelse
+                        break :blk .{ .w = 24, .h = 24, .min_w = 0 };
+                    const asp: f32 = @as(f32, @floatFromInt(natural[0])) / @as(f32, @floatFromInt(natural[1]));
+                    // Width is whatever the parent offers (or an explicit
+                    // width); height follows the aspect. `.stretch` has no
+                    // opinion, so it takes the same box and lets paint fill it.
+                    const w = self.width orelse avail_w;
+                    if (!std.math.isFinite(w) or w <= 0) {
+                        break :blk .{ .w = 24, .h = 24 / asp, .min_w = 0 };
+                    }
+                    break :blk .{ .w = w, .h = (w - 2 * self.pad) / asp + 2 * self.pad, .min_w = 0 };
+                },
                 .rect => .{ .w = 0, .h = 0, .min_w = 0 },
                 .column => |c| blk: {
                     const inner_avail = (self.width orelse avail_w) - 2 * self.pad;
@@ -2365,6 +2529,20 @@ pub fn Element(comptime M: type) type {
                 },
 
                 .rect => {},
+
+                .icon => |ic| {
+                    // No opacity or hover response of its own: an icon is
+                    // decoration inside whatever draws it, and a disabled one is
+                    // dimmed by the caller choosing a different `col`.
+                    r.vtable.blit_svg(r.ptr, rect, ic.path, ic.col, clip);
+                },
+
+                .image => |im| {
+                    // No opacity or hover either, and no tint: an image is drawn
+                    // as decoded. The box is already the right shape -- `measure`
+                    // used the header-derived aspect -- so paint only blits.
+                    r.vtable.blit_image(r.ptr, rect, im.path, im.fit, clip);
+                },
 
                 .column => |c| {
                     if (child_clip.isEmpty()) return;
@@ -3197,6 +3375,88 @@ pub fn Ui(comptime M: type) type {
             return self.finish(e, o);
         }
 
+        pub const ImageOpts = struct {
+            /// Where the encoded image lives. Read once and cached by path; a
+            /// path that does not decode draws nothing rather than failing the
+            /// frame.
+            path: []const u8,
+            /// `.fit` keeps the source aspect (the element is already shaped
+            /// correctly by `measure`, so this is normally a plain fill);
+            /// `.stretch` fills the box even when that distorts.
+            fit: ImageFit = .fit,
+            /// Both null means "take the available width, height from the
+            /// aspect". Set `height` with a width to force a box, which `.fit`
+            /// will then letterbox inside.
+            width: ?f32 = null,
+            height: ?f32 = null,
+            on_press: ?M = null,
+        };
+
+        pub const IconOpts = struct {
+            /// Where the SVG file lives. Read once per (path, size, density,
+            /// colour) and cached after; a path that does not read draws
+            /// nothing rather than failing the frame.
+            path: []const u8,
+            /// Tint. Every path in the file is filled this colour, so an icon
+            /// is one colour -- a multi-colour logo will come out flat.
+            color: Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255 } },
+            /// null means the square 24x24 default. Set these for a different
+            /// aspect; there is no intrinsic size to fall back on.
+            width: ?f32 = null,
+            height: ?f32 = null,
+            on_press: ?M = null,
+            hover: ?Fill = null,
+            pressed: ?Fill = null,
+            /// halo drawn INSTEAD of `style.halo` while the pointer is over the element.
+            hover_halo: ?Halo = null,
+            style: Style = .{},
+            /// A NAMED style from the theme's `.styles` table, resolved UNDER `style`.
+            margin_left: f32 = 0,
+            margin_right: f32 = 0,
+            margin_top: f32 = 0,
+            margin_bottom: f32 = 0,
+            key: ?u64 = null,
+            disabled: bool = false,
+            clips: bool = false,
+        };
+
+        /// A raster image, drawn as decoded.
+        ///
+        /// Takes its SHAPE from the file: `measure` reads the header and gives
+        /// the element the image's aspect, so a portrait photo is tall without
+        /// the caller knowing. Set `width` to pin the width; height follows.
+        ///
+        /// An unreadable path measures square and paints nothing. That is
+        /// deliberate -- a broken image should not fail a layout pass.
+        pub fn image(self: *Self, o: ImageOpts) *Elem {
+            const e = self.mk(.{ .image = .{ .path = o.path, .fit = o.fit } });
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
+            e.on_press = o.on_press;
+            return self.finish(e, o);
+        }
+
+        pub fn icon(self: *Self, o: IconOpts) *Elem {
+            // The tint is flattened HERE, at build time. The cache keys on RGB,
+            // so resolving a fill per frame would mean comparing colours the
+            // widget layer never settles on; a gradient or a role collapses to
+            // its representative colour once and stays put.
+            // A GRADIENT IS FLATTENED, not refused: the raster is tinted one
+            // colour, and taking the first stop means an icon styled from the
+            // same `Fill` as a button does not have to be special-cased by the
+            // caller. The alternative -- silently drawing black -- is worse.
+            const rgb: Color = switch (o.color) {
+                .solid => |c| c,
+                .linear => |l| l.stops.colors[0],
+                .radial => |r| r.stops.colors[0],
+            };
+            const e = self.mk(.{ .icon = .{ .path = o.path, .col = .{ rgb.r, rgb.g, rgb.b } } });
+            if (o.width) |v| e.width = v;
+            if (o.height) |v| e.height = v;
+            e.on_press = o.on_press;
+            return self.finish(e, o);
+        }
+
         /// A rule between things: decoration, so no key, no message and no focus. Anything
         /// clickable is a control, not this.
         pub const SeparatorOpts = struct {
@@ -3634,6 +3894,21 @@ pub fn Collector(comptime M: type) type {
         /// `vtTextHalo` and cleared by whatever text call consumes it, so a
         /// glow and its letters are one prim and the canvas owns the order.
         pending_halo: ?Halo = null,
+        /// Image dimensions the test DECLARED. The collector has no filesystem,
+        /// so a test that lays out an image must say how big it is; `measure`
+        /// then behaves exactly as it does against a real header, and the
+        /// aspect is stable across frames by construction.
+        image_dims: std.StringArrayHashMapUnmanaged([2]u32) = .empty,
+
+        pub fn deinit(self: *Self) void {
+            self.prims.deinit(self.gpa);
+            self.image_dims.deinit(self.gpa);
+        }
+
+        /// Declare the intrinsic size of `path` for layout in this test.
+        pub fn setImageSize(self: *Self, path: []const u8, w: u32, h: u32) !void {
+            try self.image_dims.put(self.gpa, path, .{ w, h });
+        }
 
         pub fn renderer(self: *Self) Renderer {
             return .{ .ptr = @ptrCast(self), .vtable = &vtable };
@@ -3655,7 +3930,70 @@ pub fn Collector(comptime M: type) type {
             .wrap_text = vtWrap,
             .advance_text = vtAdvanceText,
             .hit_text = vtHitText,
+            .blit = vtBlit,
+            .blit_svg = vtBlitSvg,
+            .blit_image = vtBlitImage,
+            .measure_image = vtMeasureImage,
         };
+
+        fn vtBlit(
+            ptr: *anyopaque,
+            rect: Rect,
+            pixels: []const u8,
+            src_w: u32,
+            src_h: u32,
+            clip: Rect,
+        ) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // A blit is a real prim, not an effect on a neighbouring one: it has
+            // its own pixels and its own place in the paint order.
+            self.prims.append(self.gpa, .{ .blit = .{
+                .rect = rect,
+                .pixels = pixels,
+                .src_w = src_w,
+                .src_h = src_h,
+                .clip = clip,
+            } }) catch {
+                self.failed = true;
+            };
+        }
+
+        fn vtBlitSvg(ptr: *anyopaque, rect: Rect, path: []const u8, col: [3]u8, clip: Rect) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // Recorded as SOURCE, never rasterised: this collector exists to say
+            // what the widget layer ASKED FOR. Whether the renderer then serves
+            // it from cache is the renderer's business and is tested there.
+            self.prims.append(self.gpa, .{ .icon = .{
+                .rect = rect,
+                .path = path,
+                .col = col,
+                .clip = clip,
+            } }) catch {
+                self.failed = true;
+            };
+        }
+
+        fn vtBlitImage(ptr: *anyopaque, rect: Rect, path: []const u8, fit: ImageFit, clip: Rect) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // Source, like `vtBlitSvg`: what the widget ASKED FOR. Whether the
+            // renderer serves it from cache is tested there, not here.
+            self.prims.append(self.gpa, .{ .image = .{
+                .rect = rect,
+                .path = path,
+                .fit = fit,
+                .clip = clip,
+            } }) catch {
+                self.failed = true;
+            };
+        }
+
+        fn vtMeasureImage(ptr: *anyopaque, path: []const u8) ?[2]u32 {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // The collector has no file access and must not gain any: a probe
+            // here would make layout depend on the real filesystem, which is
+            // exactly the coupling `measure` is supposed to avoid in a test.
+            return self.image_dims.get(path);
+        }
 
         fn vtMeasureFace(ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) TextMetrics {
             const self: *Self = @ptrCast(@alignCast(ptr));
@@ -3886,8 +4224,27 @@ pub fn nominalRenderer() Renderer {
         .wrap_text = nominalWrap,
         .advance_text = nominalAdvance,
         .hit_text = nominalHit,
+        .blit = nominalBlit,
+        .blit_svg = nominalBlitSvg,
+        .blit_image = nominalBlitImage,
+        .measure_image = nominalMeasureImage,
     } };
 }
+
+/// Metrics-only: an icon contributes no metrics, so it rasterises nothing.
+fn nominalBlitSvg(_: *anyopaque, _: Rect, _: []const u8, _: [3]u8, _: Rect) void {}
+
+/// Metrics-only: an image draws nothing.
+fn nominalBlitImage(_: *anyopaque, _: Rect, _: []const u8, _: ImageFit, _: Rect) void {}
+
+/// Metrics-only: no filesystem, so no image is measurable. Square is the
+/// documented fallback, and `measure` already applies it to a null.
+fn nominalMeasureImage(_: *anyopaque, _: []const u8) ?[2]u32 {
+    return null;
+}
+
+/// Metrics-only: an icon contributes no metrics, so it draws nothing.
+fn nominalBlit(_: *anyopaque, _: Rect, _: []const u8, _: u32, _: u32, _: Rect) void {}
 
 /// Metrics-only: a frost has no shape and no metrics, so it draws nothing.
 fn nominalFrost(_: *anyopaque, _: Rect, _: f32, _: f32, _: Rect) void {}
@@ -4532,7 +4889,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                     e.scroll_offset = self.scrollAtKey(path);
                     e.scroll_offset_x = self.scrollAtKeyX(path);
                 },
-                .text, .button, .bar, .rect => {},
+                .text, .button, .bar, .rect, .icon, .image => {},
             }
             switch (e.geometry) {
                 .column => |c| for (c.children, 0..) |ch, i| self.injectScrollOffsets(ch, pathChild(path, i)),
@@ -4543,7 +4900,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                 // an overlay never receives its offset -- it renders as if it
                 // could not scroll, with a thumb that is there and inert.
                 .stack => |c| for (c.children, 0..) |ch, i| self.injectScrollOffsets(ch, pathChild(path, i)),
-                .text, .button, .bar, .rect => {},
+                .text, .button, .bar, .rect, .icon, .image => {},
             }
         }
 
@@ -5608,6 +5965,13 @@ test "a gradient override paints instead of the flat colour" {
         // A halo has one flat colour by design; it is a ramp in ALPHA, not a
         // gradient fill, so it must not count toward the gradient census.
         .halo => {},
+        // A blit carries pixels, not a fill, so it is not a gradient either.
+        .blit => {},
+        // An icon's tint was flattened to one RGB at build time, so whatever
+        // fill the caller passed has already been spent.
+        .icon => {},
+        // An image carries no fill at all; it is drawn as decoded.
+        .image => {},
     };
     try std.testing.expect(grads >= 3);
 
@@ -5622,6 +5986,9 @@ test "a gradient override paints instead of the flat colour" {
         .text => |t| try std.testing.expect(t.fill.isSolid()),
         .halo => {},
         .frost => {},
+        .blit => {},
+        .icon => {},
+        .image => {},
     };
 }
 

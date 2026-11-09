@@ -7,6 +7,7 @@ const cedar = @import("cedar.zig");
 const ramps = @import("ramp.zig");
 const gamma = @import("gamma.zig");
 const elmfont = @import("elmfont.zig");
+const sakura = @import("sakura");
 
 /// Cache identity of the built-in face.
 const elmfont_face_key: usize = 0xe1f0_0000;
@@ -746,8 +747,32 @@ pub const Canvas = struct {
     h: u32,
     px: []u8, // RGBA8
 
+    /// Where file reads go through (icons, fonts). A Canvas built without one
+    /// still draws: anything that needs a file simply has nothing to read and
+    /// is counted as a failure, which is the same outcome as a missing file.
+    io: ?std.Io = null,
+
     /// A baked halo is a stencil: coverage per pixel for one silhouette, tinted at blit.
     masks: std.ArrayListUnmanaged(Mask) = .empty,
+
+    /// Rasterised provider pixels, keyed by the SOURCE they came from plus the
+    /// size they were baked at. A provider hands `blit` an SVG or an image and
+    /// re-rasterising it every frame is the whole cost this avoids.
+    ///
+    /// The key is the source bytes, not a name or a pointer: a name has to be
+    /// resolved by someone and a pointer is reused the moment a buffer is freed,
+    /// so two different icons would collide on the same address. Hashing the
+    /// bytes is what makes a cache hit mean the same picture.
+    icons: std.ArrayListUnmanaged(IconEntry) = .empty,
+    /// How many icon rasters have failed to bake. A counter rather than a
+    /// per-frame report: a bad source fails on every frame it is drawn and one
+    /// line per failure would bury every other diagnostic.
+    icon_failures: u32 = 0,
+
+    images: std.ArrayListUnmanaged(ImageEntry) = .empty,
+    image_sizes: std.ArrayListUnmanaged(ImageSize) = .empty,
+    /// Decode failures, counted the same way and for the same reason as icons.
+    image_failures: u32 = 0,
 
     /// Flattened outline for the current path call, and the crossings for one scanline.
     poly: std.ArrayListUnmanaged([2]f32) = .empty,
@@ -824,6 +849,50 @@ pub const Canvas = struct {
         rw: u32,
         rh: u32,
         px: []u8 = &.{}, // coverage, one byte per pixel; set by `admit`
+    };
+
+    /// A cached icon raster. `px` is RGBA8 at `rw` x `rh` DEVICE pixels -- the
+    /// size it was asked to occupy on screen, so the blit does no scaling.
+    ///
+    /// The key is (path, rw, rh, scale, col). Colour is in it because the
+    /// raster is tinted at paint time and a tint baked into the pixels cannot
+    /// be changed afterwards -- so two colours are two rasters, not one raster
+    /// drawn twice. A miss costs exactly what the no-cache path cost, so a
+    /// colour-heavy UI degrades to the old behaviour rather than to something
+    /// worse.
+    /// A decoded raster image. Separate from `IconEntry`: an image has no
+    /// colour in its key (it is not tinted), it is far larger per entry, and its
+    /// eviction budget is counted differently. Sharing one list would make a
+    /// photo evict twenty-four icons.
+    const ImageEntry = struct {
+        path: []u8,
+        /// Size of the DECODED raster. The box it is drawn into is the caller's
+        /// and is not stored -- one raster serves every draw size.
+        src_w: u32,
+        src_h: u32,
+        px: []u8 = &.{},
+    };
+
+    /// Header-derived intrinsic size, separate from the pixel cache above.
+    ///
+    /// Cheap and permanent. Layout reads this on every pass, so it must not be
+    /// tied to the pixel cache's sixteen-entry budget -- evicting a size because
+    /// pixels were reallocated would make an image resize itself mid-scroll.
+    /// `w == 0` records a known-bad path so it is not re-read every frame.
+    const ImageSize = struct { path: []u8, w: u32, h: u32 };
+
+    const IconEntry = struct {
+        /// Owned: a path outlives the frame that named it, and comparing it is
+        /// how a hit is found.
+        path: []u8,
+        rw: u32,
+        rh: u32,
+        /// Scale this was baked for. Part of the key, not a detail: the same
+        /// icon at 1.0 and 2.0 is two different rasters and reusing one for the
+        /// other is a blurry icon on one of the two displays.
+        scale: f32,
+        col: [3]u8,
+        px: []u8 = &.{},
     };
 
     /// Distinct strings held before the cache empties itself.
@@ -948,11 +1017,16 @@ pub const Canvas = struct {
     }
 
     pub fn init(gpa: Allocator, w: u32, h: u32) !Self {
+        return initIo(gpa, w, h, null);
+    }
+
+    /// Same, with the `io` an icon needs to read its file.
+    pub fn initIo(gpa: Allocator, w: u32, h: u32, io: ?std.Io) !Self {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
         @memset(px, 0);
         const mem = try gpa.create(FontMem);
         const scratch = try gpa.alloc(u8, @as(usize, w) * h);
-        return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem, .stroke_scratch = scratch };
+        return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem, .stroke_scratch = scratch, .io = io };
     }
 
     /// Re-point the pixel buffer at `w` x `h`.
@@ -974,6 +1048,18 @@ pub const Canvas = struct {
     pub fn deinit(self: *Self) void {
         for (self.masks.items) |m| self.gpa.free(m.px);
         self.masks.deinit(self.gpa);
+        for (self.icons.items) |i| {
+            self.gpa.free(i.path);
+            self.gpa.free(i.px);
+        }
+        self.icons.deinit(self.gpa);
+        for (self.images.items) |i| {
+            self.gpa.free(i.path);
+            self.gpa.free(i.px);
+        }
+        self.images.deinit(self.gpa);
+        for (self.image_sizes.items) |e| self.gpa.free(e.path);
+        self.image_sizes.deinit(self.gpa);
         self.poly.deinit(self.gpa);
         self.sub_starts.deinit(self.gpa);
         self.xs.deinit(self.gpa);
@@ -2073,6 +2159,15 @@ pub const Canvas = struct {
             .halo => |q| r.halo(q.rect, q.corner, q.halo, q.clip),
             .frost => |q| r.frost(q.rect, q.radius, q.blur, q.clip),
             .rrect => |q| r.roundedRect(q.rect, q.radius, q.fill, q.stroke, q.clip),
+            .blit => |q| r.blit(q.rect, q.pixels, q.src_w, q.src_h, q.clip),
+            // Rasterised through the cache, not straight to pixels: the source
+            // is what travelled here, and the cache is what makes a per-frame
+            // icon cheap. Goes through the vtable like every other prim, because
+            // `r` is the Renderer and the cache lives on the Canvas behind it.
+            .icon => |q| r.blitSvg(q.rect, q.path, q.col, q.clip),
+            // Same reasoning as the icon above: the source travelled here, and
+            // the pixel cache lives on the Canvas behind the Renderer.
+            .image => |q| r.blitImage(q.rect, q.path, q.fit, q.clip),
             .text => |t| {
                 const face_idx: u16 = t.face;
                 // An INNER glow lives inside the letterform, so painting the fill
@@ -2466,7 +2561,407 @@ pub const Canvas = struct {
         .wrap_text = vtWrap,
         .advance_text = vtAdvanceText,
         .hit_text = vtHitText,
+        .blit = vtBlit,
+        .blit_svg = vtBlitSvg,
+        .blit_image = vtBlitImage,
+        .measure_image = vtMeasureImage,
     };
+
+    fn vtBlitImage(ptr: *anyopaque, rect: elmz.Rect, path: []const u8, fit: elmz.ImageFit, clip: elmz.Rect) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.blitImage(rect, path, fit, clip);
+    }
+
+    fn vtMeasureImage(ptr: *anyopaque, path: []const u8) ?[2]u32 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.imageSize(path);
+    }
+
+    fn vtBlitSvg(
+        ptr: *anyopaque,
+        rect: elmz.Rect,
+        path: []const u8,
+        col: [3]u8,
+        clip: elmz.Rect,
+    ) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.blitSvg(rect, path, col, clip);
+    }
+
+    fn vtBlit(
+        ptr: *anyopaque,
+        rect: elmz.Rect,
+        pixels: []const u8,
+        src_w: u32,
+        src_h: u32,
+        clip: elmz.Rect,
+    ) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.blitRgba(rect, pixels, src_w, src_h, clip);
+    }
+
+    /// Cache an icon raster, evicting the eldest when full.
+    ///
+    /// Same policy as `admit` for masks, for the same reason: a fixed ceiling
+    /// with eldest-first eviction keeps a long-lived renderer from growing
+    /// without bound, and an icon that scrolls off a list is exactly as good a
+    /// candidate as any other to be the one that goes. The ceiling is higher
+    /// than the mask cache's because a raster is much larger than a stencil,
+    /// not because more of them are live.
+    /// Draw the SVG file at `path` into `rect`, tinted `col`.
+    ///
+    /// Reads the file once per (path, size, density, colour); every later frame
+    /// that names the same combination hits the cache and does no I/O at all.
+    ///
+    /// Nothing here fails loudly. A path that will not read, an SVG that will
+    /// not parse, or an allocation that fails all draw nothing for this frame
+    /// and leave no entry -- an icon is decoration, and a broken one should be
+    /// missing, not fatal. Failures are counted so a bad path is visible in a
+    /// diagnostic rather than as a silently empty rect.
+    pub fn blitSvg(self: *Self, rect: elmz.Rect, path: []const u8, col: [3]u8, clip: elmz.Rect) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        const dr = self.scaledRect(rect);
+        const pw: u32 = @intFromFloat(@max(@round(dr.w), 1));
+        const ph: u32 = @intFromFloat(@max(@round(dr.h), 1));
+        // An absurd target is dropped rather than allocated: a huge rect would
+        // be the one allocation that takes the frame out.
+        if (@as(u64, pw) * @as(u64, ph) > 4_000_000) return;
+
+        for (self.icons.items) |*e| {
+            if (e.rw == pw and e.rh == ph and e.scale == self.scale and
+                e.col[0] == col[0] and e.col[1] == col[1] and e.col[2] == col[2] and
+                std.mem.eql(u8, e.path, path))
+            {
+                self.blitRgba(rect, e.px, e.rw, e.rh, clip);
+                return;
+            }
+        }
+
+        // No io means no file can be read, which is the same outcome as a path
+        // that is missing: nothing drawn, one failure counted. Better than
+        // requiring every Canvas to carry an io just to stay constructible.
+        const io = self.io orelse {
+            self.icon_failures += 1;
+            return;
+        };
+        const src = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(4 * 1024 * 1024)) catch {
+            self.icon_failures += 1;
+            return;
+        };
+        defer self.gpa.free(src);
+
+        const mag = @import("magnolia");
+        var icon = mag.parseIconSized(self.gpa, src, @floatFromInt(pw), @floatFromInt(ph)) catch {
+            self.icon_failures += 1;
+            return;
+        };
+        defer icon.deinit(self.gpa);
+
+        // AN EMPTY ICON IS A FAILED ONE. Magnolia parses garbage leniently: a
+        // file that is not an SVG at all comes back as an Icon with no edges
+        // rather than an error. Caching that would hold a slot for something
+        // that can never paint, and every frame would hit the cache, draw
+        // nothing, and look correct doing it.
+        if (icon.edges.items.len == 0) {
+            self.icon_failures += 1;
+            return;
+        }
+
+        const px = self.gpa.alloc(u8, @as(usize, pw) * ph * 4) catch {
+            self.icon_failures += 1;
+            return;
+        };
+        @memset(px, 0);
+        const acc = self.gpa.alloc(f32, pw) catch {
+            self.gpa.free(px);
+            self.icon_failures += 1;
+            return;
+        };
+        var ras = mag.Raster{ .gpa = self.gpa, .w = @intCast(pw), .h = @intCast(ph), .px = px, .acc = acc };
+        defer ras.xs.deinit(self.gpa);
+        icon.draw(&ras, col);
+        // `acc` is one scanline of span coverage, borrowed by the raster and
+        // touched only inside `draw`. Scratch: freed once the fill is done.
+        self.gpa.free(acc);
+
+        const owned_path = self.gpa.dupe(u8, path) catch {
+            self.gpa.free(px);
+            self.icon_failures += 1;
+            return;
+        };
+        const e = self.admitIcon(owned_path, pw, ph, self.scale, col, px) orelse {
+            self.icon_failures += 1;
+            return;
+        };
+        self.blitRgba(rect, e.px, e.rw, e.rh, clip);
+    }
+
+    fn admitIcon(self: *Self, path: []u8, rw: u32, rh: u32, scale: f32, col: [3]u8, px: []u8) ?*IconEntry {
+        if (self.icons.items.len >= 64) {
+            const old = self.icons.orderedRemove(0);
+            self.gpa.free(old.path);
+            self.gpa.free(old.px);
+        }
+        self.icons.append(self.gpa, .{
+            .path = path,
+            .rw = rw,
+            .rh = rh,
+            .scale = scale,
+            .col = col,
+            .px = px,
+        }) catch {
+            self.gpa.free(path);
+            self.gpa.free(px);
+            return null;
+        };
+        return &self.icons.items[self.icons.items.len - 1];
+    }
+
+    /// Draw a straight-alpha RGBA8 buffer into `rect`, which is in LOGICAL
+    /// units; the destination is scaled to device pixels here.
+    ///
+    /// Nearest-neighbour on purpose. A provider is expected to hand over an
+    /// icon at the size it will be drawn, and resampling costs a sample per
+    /// output pixel for a source that is usually already the right size. The
+    /// scaling that does happen -- by the display density -- is an integer-ish
+    /// step where a filter would buy nothing and blur the outline.
+    pub fn blitRgba(self: *Self, rect: elmz.Rect, pixels: []const u8, src_w: u32, src_h: u32, clip: elmz.Rect) void {
+        if (src_w == 0 or src_h == 0) return;
+        const dr = self.scaledRect(rect);
+        const x0: i32 = @intFromFloat(@round(dr.x));
+        const y0: i32 = @intFromFloat(@round(dr.y));
+        const dw: i32 = @intFromFloat(@round(dr.w));
+        const dh: i32 = @intFromFloat(@round(dr.h));
+        if (dw <= 0 or dh <= 0) return;
+
+        // Destination box, clamped to the canvas and then to the clip.
+        const cr = self.scaledRect(clip);
+        const cx0: i32 = @max(x0, @as(i32, @intFromFloat(@round(cr.x))));
+        const cy0: i32 = @max(y0, @as(i32, @intFromFloat(@round(cr.y))));
+        const cx1: i32 = @min(x0 + dw, @as(i32, @intFromFloat(@round(cr.x + cr.w))));
+        const cy1: i32 = @min(y0 + dh, @as(i32, @intFromFloat(@round(cr.y + cr.h))));
+        if (cx1 <= cx0 or cy1 <= cy0) return;
+        const bx1: i32 = @min(cx1, @as(i32, @intCast(self.w)));
+        const by1: i32 = @min(cy1, @as(i32, @intCast(self.h)));
+        const bx0: i32 = @max(cx0, 0);
+        const by0: i32 = @max(cy0, 0);
+        if (bx1 <= bx0 or by1 <= by0) return;
+
+        const sw: usize = src_w;
+        const sh: usize = src_h;
+        // Scale factor in source pixels per destination pixel, as a ratio of
+        // integers so the sample never drifts across a row.
+        const dw_u: usize = @intCast(dw);
+        const dh_u: usize = @intCast(dh);
+
+        var y: i32 = by0;
+        while (y < by1) : (y += 1) {
+            const sy_d: usize = @intCast(y - y0);
+            const sy: usize = @min(sy_d * sh / dh_u, sh - 1);
+            var x: i32 = bx0;
+            while (x < bx1) : (x += 1) {
+                const sx_d: usize = @intCast(x - x0);
+                const sx: usize = @min(sx_d * sw / dw_u, sw - 1);
+                const si = (sy * sw + sx) * 4;
+                const sp = pixels[si..][0..4];
+                if (sp[3] == 0) continue; // invisible: leave the destination alone
+                const di = ((@as(usize, @intCast(y)) * self.w) + @as(usize, @intCast(x))) * 4;
+                const dp = self.px[di..][0..4];
+                if (sp[3] == 255) {
+                    dp.* = .{ sp[0], sp[1], sp[2], 255 };
+                } else {
+                    composite(dp, sp);
+                }
+            }
+        }
+    }
+
+    /// Intrinsic size of the image at `path`, for LAYOUT.
+    ///
+    /// Reads the header only -- never decodes pixels -- and caches the result in
+    /// `image_sizes`, which is deliberately SEPARATE from the pixel cache and
+    /// never evicts against it. The two have nothing in common: a size entry is
+    /// a few dozen bytes and every one of them is worth keeping forever, while a
+    /// pixel entry is megabytes and wants a budget of sixteen.
+    ///
+    /// This exists so `measure` can ask what an image looks like without
+    /// decoding it. That is what stops a cache miss from changing layout: the
+    /// aspect comes from a header, which is deterministic and independent of
+    /// whether the raster happens to be resident.
+    ///
+    /// `null` means unreadable -- a missing file, or a format Sakura cannot size
+    /// yet (JPEG today). Callers should fall back to a square rather than treat
+    /// it as an error; one unreadable image should not take out a layout pass.
+    pub fn imageSize(self: *Self, path: []const u8) ?[2]u32 {
+        for (self.image_sizes.items) |e| {
+            if (std.mem.eql(u8, e.path, path)) {
+                return if (e.w == 0 or e.h == 0) null else .{ e.w, e.h };
+            }
+        }
+        const io = self.io orelse return null;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(32 * 1024 * 1024)) catch return null;
+        defer self.gpa.free(bytes);
+        // Sakura's documented probe. It applies EXIF orientation, so a rotated
+        // photo reports the dimensions it will actually decode to.
+        const info = sakura.imageSize(bytes, .rgba8) catch return null;
+        // A size we could not read is cached too, as 0x0. Retrying a broken or
+        // unsupported file on every layout pass is the alternative, and a
+        // scrollable list of broken images would re-read every one every frame.
+        const owned = self.gpa.dupe(u8, path) catch return null;
+        self.image_sizes.append(self.gpa, .{ .path = owned, .w = info.width, .h = info.height }) catch {
+            self.gpa.free(owned);
+            return null;
+        };
+        if (info.width == 0 or info.height == 0) return null;
+        return .{ info.width, info.height };
+    }
+
+    /// Draw the raster image at `path` into `rect`.
+    ///
+    /// The PIXEL half of the image path, and it knows nothing about layout:
+    /// `rect` is already the box the element took, with the aspect worked out
+    /// during `measure`. `.fit` therefore has nothing left to do here -- it was
+    /// settled upstream -- and this only distinguishes a fill from the
+    /// remaining case of a forced non-aspect box.
+    ///
+    /// The cache is keyed on the path alone. Not on the draw size: one source
+    /// raster serves every size, and a resize is a different blit of the same
+    /// pixels rather than a second decode.
+    pub fn blitImage(self: *Self, rect: elmz.Rect, path: []const u8, fit: elmz.ImageFit, clip: elmz.Rect) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+
+        for (self.images.items) |*e| {
+            if (std.mem.eql(u8, e.path, path)) {
+                self.drawImageEntry(e, rect, fit, clip);
+                return;
+            }
+        }
+
+        const io = self.io orelse {
+            self.image_failures += 1;
+            return;
+        };
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(32 * 1024 * 1024)) catch {
+            self.image_failures += 1;
+            return;
+        };
+        defer self.gpa.free(bytes);
+
+        // Dimensions BEFORE decode: `decode` writes into caller-sized buffers,
+        // so there is no way to ask it how big the result is without already
+        // knowing.
+        const info = sakura.imageSize(bytes, .rgba8) catch {
+            self.image_failures += 1;
+            return;
+        };
+        const src_w = info.width;
+        const src_h = info.height;
+        if (src_w == 0 or src_h == 0) {
+            self.image_failures += 1;
+            return;
+        }
+        // A ceiling on ONE image, checked against the source rather than the
+        // draw size: this bounds what the cache can ever hold, which the draw
+        // rect does not.
+        const out_len = std.math.mul(usize, @as(usize, src_w) * @as(usize, src_h), 4) catch {
+            self.image_failures += 1;
+            return;
+        };
+        if (out_len > 64 * 1024 * 1024) {
+            self.image_failures += 1;
+            return;
+        }
+
+        const out = self.gpa.alloc(u8, out_len) catch {
+            self.image_failures += 1;
+            return;
+        };
+        @memset(out, 0);
+        // Sakura also says how big its own working buffer must be. A guessed
+        // scratch size is short exactly on the image that needed unfiltering.
+        const scratch_len = sakura.scratchSize(bytes, .rgba8) catch {
+            self.gpa.free(out);
+            self.image_failures += 1;
+            return;
+        };
+        const scratch = self.gpa.alloc(u8, @max(scratch_len, 1)) catch {
+            self.gpa.free(out);
+            self.image_failures += 1;
+            return;
+        };
+        defer self.gpa.free(scratch);
+
+        const dec = sakura.decode(bytes, .rgba8, .lenient, out, scratch) catch {
+            self.gpa.free(out);
+            self.image_failures += 1;
+            return;
+        };
+        // A mismatch means the buffer was not what the header promised.
+        if (dec.image.byteLen() > out_len or dec.image.width != src_w or dec.image.height != src_h) {
+            self.gpa.free(out);
+            self.image_failures += 1;
+            return;
+        }
+
+        const path_owned = self.gpa.dupe(u8, path) catch {
+            self.gpa.free(out);
+            self.image_failures += 1;
+            return;
+        };
+        const entry = self.admitImage(path_owned, src_w, src_h, out) orelse {
+            self.gpa.free(path_owned);
+            self.gpa.free(out);
+            self.image_failures += 1;
+            return;
+        };
+        self.drawImageEntry(entry, rect, fit, clip);
+    }
+
+    /// Blit a cached raster into an already-sized box.
+    fn drawImageEntry(self: *Self, e: *const ImageEntry, rect: elmz.Rect, fit: elmz.ImageFit, clip: elmz.Rect) void {
+        switch (fit) {
+            // `.fit` on a box that layout already gave the image's aspect is a
+            // plain fill: there is no letterbox to compute, because `measure`
+            // did not leave one. The branch is kept so a caller that sets an
+            // explicit width AND height still renders predictably.
+            .stretch, .fit => {
+                const s_asp: f32 = @as(f32, @floatFromInt(e.src_w)) / @as(f32, @floatFromInt(e.src_h));
+                const b_asp: f32 = rect.w / rect.h;
+                if (fit == .fit and @abs(s_asp - b_asp) > 0.001) {
+                    // Forced into a box of a different shape: contain it.
+                    var out = rect;
+                    if (s_asp > b_asp) {
+                        out.h = rect.w / s_asp;
+                        out.y = rect.y + (rect.h - out.h) * 0.5;
+                    } else {
+                        out.w = rect.h * s_asp;
+                        out.x = rect.x + (rect.w - out.w) * 0.5;
+                    }
+                    self.blitRgba(out, e.px, e.src_w, e.src_h, clip);
+                    return;
+                }
+                self.blitRgba(rect, e.px, e.src_w, e.src_h, clip);
+            },
+        }
+    }
+
+    fn admitImage(self: *Self, path: []u8, src_w: u32, src_h: u32, px: []u8) ?*ImageEntry {
+        // SIXTEEN. An icon entry is a few KB; a photo is megabytes, so the
+        // budget is counted in pictures a screen can show at once, not in
+        // entries a cache can hold.
+        if (self.images.items.len >= 16) {
+            const old = self.images.orderedRemove(0);
+            self.gpa.free(old.path);
+            self.gpa.free(old.px);
+        }
+        self.images.append(self.gpa, .{
+            .path = path,
+            .src_w = src_w,
+            .src_h = src_h,
+            .px = px,
+        }) catch return null;
+        return &self.images.items[self.images.items.len - 1];
+    }
 
     fn vtFrost(ptr: *anyopaque, rect: elmz.Rect, radius: f32, blur: f32, clip: elmz.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
@@ -3379,6 +3874,433 @@ test "text takes a gradient fill, not just a solid colour" {
     // The ramp must actually run ACROSS the run, not restart per glyph.
     try std.testing.expect(left_red > right_red + 20);
     try std.testing.expect(right_blue > left_blue + 20);
+}
+
+test "an SVG icon reaches the canvas through the blit seam" {
+    // The whole point of the seam: Magnolia's raster is a flat RGBA buffer with
+    // the same layout the vtable takes, so there is no adapter between an SVG
+    // and a painted pixel. If this test ever needs a conversion step, the two
+    // have drifted apart and every icon pays for it.
+    const mag = @import("magnolia");
+    const gpa = std.testing.allocator;
+
+    // A 16x16 square, filled. Simple enough that "did it paint" is the only
+    // question -- shape fidelity is Magnolia's suite, not this one.
+    const svg =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+        \\  <rect x="0" y="0" width="16" height="16" fill="#ff0000"/>
+        \\</svg>
+    ;
+
+    var icon = try mag.parseIconSized(gpa, svg, 16, 16);
+    defer icon.deinit(gpa);
+
+    const px = try gpa.alloc(u8, 16 * 16 * 4);
+    defer gpa.free(px);
+    @memset(px, 0);
+    const acc = try gpa.alloc(f32, 16);
+    defer gpa.free(acc);
+    var ras = mag.Raster{ .gpa = gpa, .w = 16, .h = 16, .px = px, .acc = acc };
+    defer ras.xs.deinit(gpa);
+    icon.draw(&ras, .{ 255, 0, 0 });
+
+    var dst = try testCanvas(gpa, 16, 16);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 255 });
+
+    const r = dst.renderer();
+    r.blit(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, px, 16, 16, .{ .x = 0, .y = 0, .w = 16, .h = 16 });
+
+    // Centre pixel: opaque red, over a blue backdrop. Anything still blue means
+    // the icon never arrived; anything partly blue means alpha was ignored.
+    const o = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o + 1]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o + 2]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o + 3]);
+}
+
+test "an SVG icon bakes once and the second draw reuses the raster" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A real file, because the cache is keyed on the PATH and reads it itself.
+    // Handing the test a buffer would test a path that no widget uses.
+    const svg =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
+        \\  <rect x="0" y="0" width="8" height="8" fill="#ff0000"/>
+        \\</svg>
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "icon.svg", .data = svg });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/icon.svg", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 8, 8, std.testing.io);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const red = [3]u8{ 255, 0, 0 };
+
+    try std.testing.expectEqual(@as(usize, 0), dst.icons.items.len);
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, red, clip);
+    try std.testing.expectEqual(@as(usize, 1), dst.icons.items.len);
+    try std.testing.expectEqual(@as(u32, 0), dst.icon_failures);
+
+    // Did it actually paint, or just cache nothing? The tint is what landed:
+    // the source says #ff0000 and so does the tint, so a green canvas with a
+    // red pixel proves the fill came from `col`, not from the file.
+    const o = (4 * 8 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o + 1]);
+
+    // Same path, same size, same colour: a hit. The count staying at 1 is the
+    // whole assertion -- a re-bake is invisible in the pixels but is exactly
+    // the cost the cache exists to remove.
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, red, clip);
+    try std.testing.expectEqual(@as(usize, 1), dst.icons.items.len);
+
+    // A different SIZE is a different raster: reusing an 8x8 bake for a 4x4
+    // draw is the blurry icon the size-in-key exists to prevent.
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 4, .h = 4 }, path, red, clip);
+    try std.testing.expectEqual(@as(usize, 2), dst.icons.items.len);
+}
+
+test "an icon tinted a second colour gets its own raster" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // NO fill attribute: the tint is a DEFAULT, not an override, so an edge
+    // naming its own colour ignores `col` entirely (`ecl orelse col`). A themed
+    // icon set leaves it off or uses currentColor; a hard-coded white would be
+    // immune to tinting by design.
+    const svg =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
+        \\  <rect x="0" y="0" width="8" height="8"/>
+        \\</svg>
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "icon.svg", .data = svg });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/icon.svg", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 8, 8, std.testing.io);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, .{ 255, 0, 0 }, clip);
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, .{ 0, 255, 0 }, clip);
+
+    // Two entries, not one: the tint is baked into the pixels, so a second
+    // colour cannot reuse the first raster. Serving it anyway would paint the
+    // first colour silently, which is the failure this key exists to stop.
+    try std.testing.expectEqual(@as(usize, 2), dst.icons.items.len);
+
+    // And the SECOND colour is what is on screen, proving the second bake ran.
+    const o = (4 * 8 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o + 1]);
+}
+
+test "a second identical icon call is served from cache, not re-read" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const svg =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
+        \\  <rect x="0" y="0" width="8" height="8"/>
+        \\</svg>
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "icon.svg", .data = svg });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/icon.svg", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 8, 8, std.testing.io);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const rect = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+
+    dst.blitSvg(rect, path, .{ 255, 0, 0 }, clip);
+    try std.testing.expectEqual(@as(usize, 1), dst.icons.items.len);
+    try std.testing.expectEqual(@as(u32, 0), dst.icon_failures);
+
+    // DELETE THE FILE, then ask again. A cache that merely de-duplicates entries
+    // but re-reads would now fail; a real hit needs no file at all. Counting
+    // entries cannot tell those apart -- which is the whole point of this test.
+    try tmp.dir.deleteFile(std.testing.io, "icon.svg");
+    dst.blitSvg(rect, path, .{ 255, 0, 0 }, clip);
+
+    try std.testing.expectEqual(@as(u32, 0), dst.icon_failures);
+    try std.testing.expectEqual(@as(usize, 1), dst.icons.items.len);
+
+    // And it still paints red: the served pixels are the cached raster.
+    const o = (4 * 8 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o + 1]);
+}
+
+/// Build a minimal valid PNG: RGBA, every pixel one colour, deflate STORED
+/// blocks so no compression is needed to construct the fixture. Mirrors what
+/// `decodeStoredPng` reads.
+fn pngFixture(buf: []u8, w: u32, h: u32, col: [4]u8) []u8 {
+    var n: usize = 0;
+
+    const putChunk = struct {
+        fn put(out: []u8, at: *usize, tag: []const u8, data: []const u8) void {
+            std.mem.writeInt(u32, out[at.*..][0..4], @intCast(data.len), .big);
+            at.* += 4;
+            @memcpy(out[at.*..][0..4], tag);
+            at.* += 4;
+            @memcpy(out[at.*..][0..data.len], data);
+            at.* += data.len;
+            var crc = std.hash.Crc32.init();
+            crc.update(tag);
+            crc.update(data);
+            std.mem.writeInt(u32, out[at.*..][0..4], crc.final(), .big);
+            at.* += 4;
+        }
+    }.put;
+
+    const sig = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    @memcpy(buf[0..8], &sig);
+    n = 8;
+
+    var ihdr: [13]u8 = undefined;
+    std.mem.writeInt(u32, ihdr[0..4], w, .big);
+    std.mem.writeInt(u32, ihdr[4..8], h, .big);
+    ihdr[8] = 8; // bit depth
+    ihdr[9] = 6; // colour type: RGBA
+    ihdr[10] = 0; // deflate
+    ihdr[11] = 0; // adaptive filtering
+    ihdr[12] = 0; // no interlace
+    putChunk(buf, &n, "IHDR", &ihdr);
+
+    // Raw scanlines: one filter byte (0 = none) then RGBA per pixel.
+    var raw: [4096]u8 = undefined;
+    var rn: usize = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        raw[rn] = 0;
+        rn += 1;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            @memcpy(raw[rn..][0..4], &col);
+            rn += 4;
+        }
+    }
+
+    // zlib stream of stored blocks.
+    var z: [8192]u8 = undefined;
+    var zn: usize = 0;
+    z[zn] = 0x78;
+    z[zn + 1] = 0x01;
+    zn += 2;
+    var off: usize = 0;
+    while (off < rn) {
+        const take = @min(@as(usize, 65535), rn - off);
+        z[zn] = if (off + take >= rn) 1 else 0;
+        zn += 1;
+        std.mem.writeInt(u16, z[zn..][0..2], @intCast(take), .little);
+        zn += 2;
+        std.mem.writeInt(u16, z[zn..][0..2], @intCast(~@as(u16, @intCast(take))), .little);
+        zn += 2;
+        @memcpy(z[zn..][0..take], raw[off..][0..take]);
+        zn += take;
+        off += take;
+    }
+    var a: u32 = 1;
+    var b: u32 = 0;
+    for (raw[0..rn]) |byte| {
+        a = (a + byte) % 65521;
+        b = (b + a) % 65521;
+    }
+    std.mem.writeInt(u32, z[zn..][0..4], (b << 16) | a, .big);
+    zn += 4;
+
+    putChunk(buf, &n, "IDAT", z[0..zn]);
+    putChunk(buf, &n, "IEND", &.{});
+    return buf[0..n];
+}
+
+test "an image paints its decoded pixels" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var png_buf: [4096]u8 = undefined;
+    const png = pngFixture(&png_buf, 8, 4, .{ 255, 0, 0, 255 });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pic.png", .data = png });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/pic.png", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 8, 4, std.testing.io);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
+
+    dst.blitImage(.{ .x = 0, .y = 0, .w = 8, .h = 4 }, path, .fit, clip);
+    try std.testing.expectEqual(@as(u32, 0), dst.image_failures);
+    try std.testing.expectEqual(@as(usize, 1), dst.images.items.len);
+    // The decode actually reached the canvas.
+    const o = (1 * 8 + 1) * 4;
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o + 1]);
+}
+
+test "an image is served from cache after its file is gone" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var png_buf: [4096]u8 = undefined;
+    const png = pngFixture(&png_buf, 8, 4, .{ 0, 0, 255, 255 });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pic.png", .data = png });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/pic.png", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 8, 4, std.testing.io);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
+    const rect = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
+
+    dst.blitImage(rect, path, .fit, clip);
+    try std.testing.expectEqual(@as(usize, 1), dst.images.items.len);
+
+    // Delete, then ask again: a real hit reads no file.
+    try tmp.dir.deleteFile(std.testing.io, "pic.png");
+    dst.clear(.{ .r = 0, .g = 0, .b = 0 });
+    dst.blitImage(rect, path, .fit, clip);
+
+    try std.testing.expectEqual(@as(u32, 0), dst.image_failures);
+    try std.testing.expectEqual(@as(usize, 1), dst.images.items.len);
+    const o = (1 * 8 + 1) * 4;
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o + 2]);
+}
+
+test "imageSize reports the header size, so layout need not decode" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var png_buf: [4096]u8 = undefined;
+    const png = pngFixture(&png_buf, 12, 3, .{ 10, 20, 30, 255 });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wide.png", .data = png });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/wide.png", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 4, 4, std.testing.io);
+    defer dst.deinit();
+
+    // Header only: no pixel cache entry is created by asking.
+    try std.testing.expectEqual([2]u32{ 12, 3 }, dst.imageSize(path).?);
+    try std.testing.expectEqual(@as(usize, 0), dst.images.items.len);
+    try std.testing.expectEqual(@as(usize, 1), dst.image_sizes.items.len);
+
+    // And it is remembered, so the second ask reads nothing.
+    try std.testing.expectEqual([2]u32{ 12, 3 }, dst.imageSize(path).?);
+    try std.testing.expectEqual(@as(usize, 1), dst.image_sizes.items.len);
+
+    // A path that does not exist yields null and is NOT remembered: there is no
+    // header to cache, and a file that appears later -- a download finishing --
+    // must then be picked up rather than staying invisible until restart.
+    try std.testing.expectEqual(@as(?[2]u32, null), dst.imageSize("/nonexistent/x.png"));
+    try std.testing.expectEqual(@as(usize, 1), dst.image_sizes.items.len);
+}
+
+test "an unreadable icon path counts a failure and caches nothing" {
+    const gpa = std.testing.allocator;
+    var dst = try testCanvas(gpa, 8, 8);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 255, .b = 0 });
+
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, "/nonexistent/icon.svg", .{ 255, 0, 0 }, clip);
+
+    // Invisible, not fatal: the canvas is exactly as it was, no entry exists,
+    // and the failure is counted rather than raised per frame.
+    try std.testing.expectEqual(@as(usize, 0), dst.icons.items.len);
+    try std.testing.expectEqual(@as(u32, 1), dst.icon_failures);
+    const o = (4 * 8 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o + 1]);
+}
+
+test "a file that is not an SVG counts a failure and caches nothing" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "junk.svg", .data = "not an svg at all" });
+    var pb: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/junk.svg", .{tmp.sub_path});
+
+    var dst = try Canvas.initIo(gpa, 8, 8, std.testing.io);
+    defer dst.deinit();
+    dst.clear(.{ .r = 0, .g = 255, .b = 0 });
+
+    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, .{ 255, 0, 0 }, clip);
+
+    // THE EMPTY-EDGE CASE. Magnolia does not reject the text -- it parses it to
+    // an Icon with no edges. Without the guard this test sees one cached entry
+    // for an icon that can never paint, occupying a slot forever.
+    try std.testing.expectEqual(@as(usize, 0), dst.icons.items.len);
+    try std.testing.expectEqual(@as(u32, 1), dst.icon_failures);
+    const o = (4 * 8 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 0), dst.px[o]);
+    try std.testing.expectEqual(@as(u8, 255), dst.px[o + 1]);
+}
+
+test "a provider's buffer blits through the vtable, scaled into its rect" {
+    const gpa = std.testing.allocator;
+    var dst = try testCanvas(gpa, 4, 4);
+    defer dst.deinit();
+    dst.clear(.{ .r = 255, .g = 255, .b = 255 });
+
+    // 2x2 source: one opaque red, three transparent. The transparent ones must
+    // leave the white destination alone, so the count of red pixels is also the
+    // proof that the mapping stretched rather than copied.
+    const src = [_]u8{
+        255, 0, 0, 255, // opaque red
+        0, 0, 0, 0, // transparent
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+    };
+
+    const r = dst.renderer();
+    // A 4x4 device rect over a 2x2 source: each source pixel covers 2x2 here.
+    r.blit(.{ .x = 0, .y = 0, .w = 4, .h = 4 }, &src, 2, 2, .{ .x = 0, .y = 0, .w = 4, .h = 4 });
+
+    var red: usize = 0;
+    var white: usize = 0;
+    var i: usize = 0;
+    while (i < dst.px.len) : (i += 4) {
+        if (dst.px[i] == 255 and dst.px[i + 1] == 0 and dst.px[i + 2] == 0) red += 1;
+        if (dst.px[i] == 255 and dst.px[i + 1] == 255 and dst.px[i + 2] == 255) white += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), red);
+    try std.testing.expectEqual(@as(usize, 12), white);
+}
+
+test "a mismatched buffer is ignored rather than read past" {
+    const gpa = std.testing.allocator;
+    var dst = try testCanvas(gpa, 4, 4);
+    defer dst.deinit();
+    dst.clear(.{ .r = 255, .g = 255, .b = 255 });
+
+    // Claims 4x4 (64 bytes) but carries 8. The wrapper's length check is the
+    // thing under test: without it this reads three quarters of the way off the
+    // end of a stack array.
+    const src = [_]u8{ 1, 2, 3, 255, 4, 5, 6, 255 };
+    const r = dst.renderer();
+    r.blit(.{ .x = 0, .y = 0, .w = 4, .h = 4 }, &src, 4, 4, .{ .x = 0, .y = 0, .w = 4, .h = 4 });
+
+    for (dst.px) |b| try std.testing.expectEqual(@as(u8, 255), b);
 }
 
 test "a blit composites by source alpha instead of stamping it" {
