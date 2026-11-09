@@ -154,9 +154,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // SDL3, so NOT in the default install: a runner without libsdl3-dev must
+    // still get a working `zig build`. Ask for it by name.
     const e_counter_install = b.addInstallArtifact(examples_counter, .{});
-    b.getInstallStep().dependOn(&e_counter_install.step);
-    b.step("e-counter", "build the headless counter").dependOn(&e_counter_install.step);
+    b.step("e-counter", "build the windowed counter example (needs libsdl3-dev)").dependOn(&e_counter_install.step);
 
     // the caller `ui.textInput` did not have: a form, typed into headlessly
     const fields = b.addExecutable(.{

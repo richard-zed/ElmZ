@@ -2,7 +2,7 @@
     .name = .elmz,
     .version = "0.1.0",
     .fingerprint = 0xcf267a1fad5393f,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .inkwell = .{
             .url = "https://github.com/richard-zed/Inkwell/archive/refs/tags/v0.6.1.tar.gz",
