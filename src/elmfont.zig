@@ -112,7 +112,7 @@ pub fn slot(cp: u32) ?usize {
 
 /// The rows to draw, with unknown codepoints resolved to `?`.
 pub fn glyphFor(cp: u32) [glyph_h]u8 {
-    if (cp == '\n' or cp == '\t' or cp == '\r') return .{0} ** glyph_h;
+    if (cp == '\n' or cp == '\t' or cp == '\r') return @as([glyph_h]u8, @splat(0));
     return glyphs[slot(cp) orelse 47];
 }
 
@@ -269,7 +269,7 @@ test "uppercase folds and unsupported codepoints become a question mark" {
     try testing.expectEqual(glyphFor('Q'), glyphFor('q'));
     try testing.expectEqual(glyphFor('?'), glyphFor(0x4e2d));
     try testing.expect(!spells(0x4e2d));
-    try testing.expectEqual(glyphFor(' '), .{0} ** glyph_h);
+    try testing.expectEqual(glyphFor(' '), @as([glyph_h]u8, @splat(0)));
 }
 
 test "widths are whole multiples of the advance, and the tail gap is not ink" {

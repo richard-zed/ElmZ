@@ -238,12 +238,12 @@ pub fn main(init: std.process.Init) !void {
     base_owned = elmz.themePathBesideExe(gpa, io, "theme.defaults.zon");
     user_owned = elmz.themePathBesideExe(gpa, io, "theme.zon");
 
-    const chain = elmz.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
+    const chain = elmz.resolveChain(Tokens, gpa, io, .{}, &.{ base_owned orelse "", user_owned orelse "" });
     rt.ui.theme = chain.theme;
     rt.ui.gradients = chain.gradients;
     rt.state.title_size = chain.app.title_size;
 
-    const name: []const u8 = if (chain.user_from_file) "theme.zon" else if (chain.base_from_file) "theme.defaults.zon" else "compiled defaults";
+    const name: []const u8 = if (chain.from_file) "theme.zon" else "compiled defaults";
 
     var baked_rect: ?elmz.Rect = null;
     var rest_halos: usize = 0;

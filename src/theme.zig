@@ -61,7 +61,7 @@ const Collision = struct {
 /// The first pair of same-family roles sharing a colour, or null when the palette is legal.
 /// Returned rather than printed.
 pub fn firstCollision(t: Theme) ?Collision {
-    const fields = @typeInfo(Theme).@"struct".fields;
+    const fields = elmz.structFields(Theme);
     inline for (fields, 0..) |f, i| {
         if (comptime std.mem.eql(u8, f.name, "custom")) continue;
         // `if`-capture, not `orelse continue`: `continue` inside an inline for
@@ -81,7 +81,7 @@ pub fn firstCollision(t: Theme) ?Collision {
 
 /// Two roles may share a colour only if they belong to DIFFERENT families.
 fn checkPalette(t: Theme) !void {
-    const fields = @typeInfo(Theme).@"struct".fields;
+    const fields = elmz.structFields(Theme);
     inline for (fields) |f| {
         // `custom` is the side table for names a file invented; it is a slice,
         // not a role, and has no family to file under.
@@ -197,7 +197,7 @@ pub const ColorsSpec = struct {
     /// `base` supplies whatever the spec leaves null.
     pub fn overlay(self: ColorsSpec, base: Theme) Theme {
         var t = base;
-        inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+        inline for (elmz.structFields(ColorsSpec)) |f| {
             if (comptime std.mem.eql(u8, f.name, "roles")) continue;
             if (@field(self, f.name).resolve()) |c| {
                 @field(t, f.name) = c;
@@ -219,7 +219,7 @@ pub const ColorValue = struct {
     };
 
     /// Read a node as a colour. `zoir` is the untyped tree the ZON parse produced.
-    pub fn read(ast: std.zig.Ast, zoir: std.zig.Zoir, node: std.zig.Zoir.Node.Index) Error!Color {
+    pub fn read(ast: std.zig.Ast, zoir: *const std.zig.Zoir, node: std.zig.Zoir.Node.Index) Error!Color {
         _ = ast;
         return switch (node.get(zoir)) {
             .int_literal => |v| hexFromInt(v),
@@ -245,7 +245,7 @@ pub const ColorValue = struct {
         }
     }
 
-    fn fromArray(zoir: std.zig.Zoir, range: std.zig.Zoir.Node.Index.Range) Error!Color {
+    fn fromArray(zoir: *const std.zig.Zoir, range: std.zig.Zoir.Node.Index.Range) Error!Color {
         const n = range.len;
         if (n != 3 and n != 4) return error.ColourElementCount;
 
@@ -400,7 +400,7 @@ pub const Gradients = struct {
     pub const CustomFill = struct { name: []const u8, fill: elmz.Fill };
 
     pub fn any(self: Gradients) bool {
-        inline for (@typeInfo(Gradients).@"struct".fields) |f| {
+        inline for (elmz.structFields(Gradients)) |f| {
             if (comptime std.mem.eql(u8, f.name, "custom")) continue;
             if (@field(self, f.name) != null) return true;
         }
@@ -410,7 +410,7 @@ pub const Gradients = struct {
     /// The gradient for a role by name, or null. Lets an app say
     /// `ui.gradients.get("accent")` without knowing the whole shape.
     pub fn get(self: Gradients, name: []const u8) ?elmz.Fill {
-        inline for (@typeInfo(Gradients).@"struct".fields) |f| {
+        inline for (elmz.structFields(Gradients)) |f| {
             if (comptime std.mem.eql(u8, f.name, "custom")) continue;
             if (std.mem.eql(u8, name, f.name)) return @field(self, f.name);
         }
@@ -445,7 +445,7 @@ pub const ThemeSpec = struct {
     /// its colour.
     pub fn resolveGradients(self: ThemeSpec, theme: Theme) Gradients {
         var out: Gradients = .{};
-        inline for (@typeInfo(GradientsSpec).@"struct".fields) |f| {
+        inline for (elmz.structFields(GradientsSpec)) |f| {
             if (comptime std.mem.eql(u8, f.name, "roles")) continue;
             if (@field(self.gradients, f.name)) |spec| {
                 @field(out, f.name) = spec.resolve(@field(theme, f.name));
@@ -557,10 +557,9 @@ pub const ThemeLoadError = error{ Parse, Version, Palette, Style, OutOfMemory };
 /// First diagnostic, rendered as `name line:col: reason` -- the shape that tells an author
 /// where to look.
 fn diagFrom(diag: *ThemeDiag, name: []const u8, d: *std.zon.parse.Diagnostics, fallback: []const u8) void {
-    var errors = d.iterateErrors();
-    if (errors.next()) |err| {
-        const loc = err.getLocation(d);
-        diag.set("{s} {d}:{d}: {f}", .{ name, loc.line + 1, loc.column + 1, err.fmtMessage(d) });
+    if (d.errors.len > 0) {
+        const err = d.errors[0];
+        diag.set("{s} {d}:{d}: {s}", .{ name, err.loc.line + 1, err.loc.column + 1, err.msg });
         return;
     }
     diag.set("{s}: {s}", .{ name, fallback });
@@ -613,7 +612,7 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
         // Runtime name, so `inline for` cannot decide the branch at comptime:
         // the field set is unrolled but the match is a runtime compare.
         var matched = false;
-        inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+        inline for (elmz.structFields(ColorsSpec)) |f| {
             if (!comptime std.mem.eql(u8, f.name, "roles")) {
                 if (std.mem.eql(u8, f.name, c.name)) {
                     @field(out.theme.colors, f.name) = spec;
@@ -636,7 +635,7 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
     defer cgrads.deinit();
     for (t.gradients) |g| {
         var matched = false;
-        inline for (@typeInfo(GradientsSpec).@"struct".fields) |f| {
+        inline for (elmz.structFields(GradientsSpec)) |f| {
             if (!comptime std.mem.eql(u8, f.name, "roles")) {
                 if (std.mem.eql(u8, f.name, g.name)) {
                     @field(out.theme.gradients, f.name) = specFromLit(g.value) orelse {
@@ -700,9 +699,11 @@ pub fn loadTheme(
     // to judge the rest of the keys against.
     {
         const Probe = struct { version: u32 };
-        var d: std.zon.parse.Diagnostics = .{};
-        defer d.deinit(gpa);
-        const probe = std.zon.parse.fromSlice(Probe, gpa, src, &d, .{ .ignore_unknown_fields = true }) catch |e| switch (e) {
+        // Written by the parser; only meaningful once a parse has failed.
+        var d: std.zon.parse.Diagnostics = undefined;
+        var probe_arena: std.heap.ArenaAllocator = .init(gpa);
+        defer probe_arena.deinit();
+        const probe = std.zon.parse.fromSlice(Probe, .{ .gpa = gpa, .arena = probe_arena.allocator(), .source = src, .diagnostics = &d, .ignore_unknown_fields = true }) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ParseZon => {
                 diagFrom(diag, name, &d, "not a theme file");
@@ -730,14 +731,16 @@ pub fn loadTheme(
 
     // `.vars` is still typed: `App` is a struct the APP declares, so it is the
     // one section with a schema to check against.
-    var d: std.zon.parse.Diagnostics = .{};
-    defer d.deinit(gpa);
+    // Written by the parser; only meaningful once a parse has failed.
+    var d: std.zon.parse.Diagnostics = undefined;
     // `.vars` sits INSIDE `.theme`, not at the root. Probing the root found
     // nothing, so the app tier was always the default and every `.weight` /
     // `.font` reference resolved to null -- the file looked loaded and every
     // var-driven style looked ignored.
     const AppOnly = struct { theme: struct { vars: App = .{} } = .{} };
-    const app_tier = std.zon.parse.fromSliceAlloc(AppOnly, gpa, src, &d, .{ .ignore_unknown_fields = true }) catch |e| switch (e) {
+    var tier_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer tier_arena.deinit();
+    const app_tier = std.zon.parse.fromSlice(AppOnly, .{ .gpa = gpa, .arena = tier_arena.allocator(), .source = src, .diagnostics = &d, .ignore_unknown_fields = true }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ParseZon => {
             diagFrom(diag, name, &d, "bad theme file");
@@ -756,7 +759,6 @@ pub fn loadTheme(
     // what made `loaded.vars.latin_font` read back as junk.
     var vars_transferred = false;
     defer if (!vars_transferred) freeVars(App, gpa, &vars_owned);
-    defer std.zon.parse.free(gpa, app_tier);
 
     // Walker output, reshaped into the one struct the rest of this function
     // reads. The FILE format is free-form; the handoff is not.
@@ -995,7 +997,7 @@ pub fn freeLoaded(comptime App: type, gpa: Allocator, loaded: *Loaded(App)) void
 fn dupeVars(comptime App: type, gpa: Allocator, vars: *App) ThemeLoadError!void {
     const info = @typeInfo(App);
     if (info != .@"struct") return;
-    inline for (info.@"struct".fields) |f| {
+    inline for (elmz.structFields(App)) |f| {
         switch (f.type) {
             []const u8 => @field(vars, f.name) = try gpa.dupe(u8, @field(vars, f.name)),
             ?[]const u8 => if (@field(vars, f.name)) |s| {
@@ -1010,7 +1012,7 @@ fn dupeVars(comptime App: type, gpa: Allocator, vars: *App) ThemeLoadError!void 
 pub fn freeVars(comptime App: type, gpa: Allocator, vars: *App) void {
     const info = @typeInfo(App);
     if (info != .@"struct") return;
-    inline for (info.@"struct".fields) |f| {
+    inline for (elmz.structFields(App)) |f| {
         switch (f.type) {
             []const u8 => gpa.free(@field(vars, f.name)),
             ?[]const u8 => if (@field(vars, f.name)) |s| gpa.free(s),
@@ -1144,7 +1146,7 @@ pub const OpenTables = struct {
 /// Read `.colors` and `.gradients` from the token stream. Returns names owned by `gpa`.
 /// Caller frees with `freeOpenTables`.
 pub fn readOpenTables(gpa: Allocator, src: [:0]const u8, diag: *ThemeDiag) ThemeLoadError!OpenTables {
-    var ast = std.zig.Ast.parse(gpa, src, .zon) catch return error.OutOfMemory;
+    var ast = std.zig.Ast.parse(gpa, src, .{ .mode = .zon }) catch return error.OutOfMemory;
     defer ast.deinit(gpa);
     if (ast.errors.len > 0) {
         // The typed reader reports syntax errors with a better message; this
@@ -2027,7 +2029,7 @@ pub fn freeOpenTables(gpa: Allocator, t: *OpenTables) void {
 
 /// Is `ref` one of the palette's role names?
 fn isRole(ref: []const u8, extra: []const Theme.CustomColor) bool {
-    inline for (@typeInfo(ColorsSpec).@"struct".fields) |f| {
+    inline for (elmz.structFields(ColorsSpec)) |f| {
         if (comptime std.mem.eql(u8, f.name, "roles")) continue;
         if (std.mem.eql(u8, ref, f.name)) return true;
     }
@@ -2111,7 +2113,7 @@ test "the palette guard is family-scoped" {
     flat_page.panel = flat_page.bg;
     try std.testing.expectError(error.DuplicateRole, checkPalette(flat_page));
 
-    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+    inline for (elmz.structFields(Theme)) |f| {
         if (comptime std.mem.eql(u8, f.name, "custom")) continue;
         try std.testing.expect(familyOf(f.name) != null);
     }
@@ -2125,7 +2127,7 @@ test "the shipped defaults list every role" {
     // A role added to `Theme` and forgotten in the file would leave the
     // compiled literal showing through, which is the one way the file stops
     // being the source of default values.
-    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+    inline for (elmz.structFields(Theme)) |f| {
         if (comptime std.mem.eql(u8, f.name, "custom")) continue;
         try std.testing.expect(@hasField(ColorsSpec, f.name));
         try std.testing.expect(@hasField(GradientsSpec, f.name));
@@ -2348,22 +2350,22 @@ test "colour values: every free-form spelling" {
     };
     const gpa = std.testing.allocator;
     inline for (cases) |c| {
-        var ast = try std.zig.Ast.parse(gpa, c.src ++ "", .zon);
+        var ast = try std.zig.Ast.parse(gpa, c.src ++ "", .{ .mode = .zon });
         defer ast.deinit(gpa);
         var zoir = try std.zig.ZonGen.generate(gpa, ast, .{ .parse_str_lits = false });
         defer zoir.deinit(gpa);
-        const got = try ColorValue.read(ast, zoir, .root);
+        const got = try ColorValue.read(ast, &zoir, .root);
         try std.testing.expectEqual(c.want, @as(u32, got.r) << 24 | @as(u32, got.g) << 16 | @as(u32, got.b) << 8 | got.a);
     }
 }
 
 test "colour values: mixed floats are refused, not guessed" {
     const gpa = std.testing.allocator;
-    var ast = try std.zig.Ast.parse(gpa, ".{ 1.0, 0.5, 200 }" ++ "", .zon);
+    var ast = try std.zig.Ast.parse(gpa, ".{ 1.0, 0.5, 200 }" ++ "", .{ .mode = .zon });
     defer ast.deinit(gpa);
     var zoir = try std.zig.ZonGen.generate(gpa, ast, .{ .parse_str_lits = false });
     defer zoir.deinit(gpa);
-    try std.testing.expectError(error.ColourMixedFloats, ColorValue.read(ast, zoir, .root));
+    try std.testing.expectError(error.ColourMixedFloats, ColorValue.read(ast, &zoir, .root));
 }
 
 const user_file_src =

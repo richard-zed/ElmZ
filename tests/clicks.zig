@@ -286,6 +286,9 @@ fn lowestEdge(prims: []const elmz.Primitive) f32 {
         .halo => {},
         // A frost does not move ink either: it recolours what is already there.
         .frost => {},
+        .blit => |b| maxy = @max(maxy, b.rect.y + b.rect.h),
+        .icon => |i| maxy = @max(maxy, i.rect.y + i.rect.h),
+        .image => |g| maxy = @max(maxy, g.rect.y + g.rect.h),
     };
     return maxy;
 }

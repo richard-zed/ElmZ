@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         weight: ?u16 = null,
         latin_font: ?[]const u8 = null,
     };
-    var chain = elmz.resolveChain(App, gpa, io, rt.ui.theme, base, user);
+    var chain = elmz.resolveChain(App, gpa, io, rt.ui.theme, &.{ base orelse "", user orelse "" });
     defer chain.deinit(gpa);
     rt.ui.theme = chain.theme;
     rt.ui.gradients = chain.gradients;

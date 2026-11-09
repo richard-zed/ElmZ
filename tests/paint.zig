@@ -17,7 +17,8 @@ pub const app = .{
 const W = app.size.w;
 const H = app.size.h;
 
-pub const Msg = enum {};
+/// Never dispatched; a non-empty enum because 0.17 cannot align an empty one.
+const Msg = enum { none };
 pub const Model = struct {};
 
 pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
@@ -109,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .halo => {},
         .frost => {},
+        .blit, .icon, .image => {},
         .rrect => |q| {
             if (!q.fill.isSolid()) grads += 1;
         },

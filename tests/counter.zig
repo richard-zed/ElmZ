@@ -160,6 +160,9 @@ pub fn main(init: std.process.Init) !void {
                 q.rect.x, q.rect.y, q.rect.w, q.rect.h, q.radius, fillDesc(q.fill, &dbuf),
             }),
             .text => |t| try out.print("  text  [{d:.0},{d:.0}] {d:.0}px \"{s}\"\n", .{ t.x, t.y, t.size, t.bytes }),
+            .blit => |b| try out.print("  blit  [{d:.0},{d:.0} {d:.0}x{d:.0}]\n", .{ b.rect.x, b.rect.y, b.rect.w, b.rect.h }),
+            .icon => |c| try out.print("  icon  [{d:.0},{d:.0} {d:.0}x{d:.0}]\n", .{ c.rect.x, c.rect.y, c.rect.w, c.rect.h }),
+            .image => |g| try out.print("  image [{d:.0},{d:.0} {d:.0}x{d:.0}] {s}\n", .{ g.rect.x, g.rect.y, g.rect.w, g.rect.h, g.path }),
         }
     }
     try out.flush();

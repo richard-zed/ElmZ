@@ -197,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
     base_owned = elmz.themePathBesideExe(gpa, io, "theme.defaults.zon");
     user_owned = elmz.themePathBesideExe(gpa, io, "theme.zon");
 
-    const chain = elmz.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
+    const chain = elmz.resolveChain(Tokens, gpa, io, .{}, &.{ base_owned orelse "", user_owned orelse "" });
     rt.ui.theme = chain.theme;
     // Both halves of a loaded theme, or a file's `.gradients` would be parsed
     // and then dropped on the one path that draws a picture of it.
@@ -205,16 +205,15 @@ pub fn main(init: std.process.Init) !void {
     // The tier the file declared, now a typed value. A `theme.zon` that sets
     // `title_size = 34` puts this visibly in effect, not merely parsed.
     rt.state.title_size = chain.app.title_size;
-    if (chain.base_from_file) theme_name = "theme.defaults.zon";
-    if (chain.user_from_file) theme_name = "theme.zon";
-    if (chain.user_rejected) theme_name = "base (theme.zon rejected)";
+    if (chain.from_file) theme_name = "theme.zon";
+    if (chain.rejected) theme_name = "base (theme.zon rejected)";
     if (chain.message()) |m| {
         // The file is present and wrong. Keep the last good palette on screen
         // and raise the band -- this is the only path that draws it, because a
         // band with nothing to report is just a red stripe.
         rt.ui.failExternal(.theme, "{s}", .{m});
         theme_failed = true;
-        theme_name = if (chain.user_rejected)
+        theme_name = if (chain.rejected)
             "base (theme.zon rejected)"
         else
             "compiled (theme.defaults.zon rejected)";

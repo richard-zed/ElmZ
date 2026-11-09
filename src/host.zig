@@ -302,7 +302,7 @@ pub fn ChainOf(comptime App: type) type {
 fn readZ(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
     const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024));
     defer gpa.free(src);
-    return gpa.dupeZ(u8, src);
+    return gpa.dupeSentinel(u8, src, 0);
 }
 
 /// Resolve every theme file over `floor`, lowest priority first.
@@ -395,7 +395,7 @@ pub fn exeStem(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
 /// Resolve an app's `theme_path` against the directory the executable lives in. That is
 /// where the theme file ships, so that is where it is read from.
 pub fn themePathBesideExe(gpa: std.mem.Allocator, io: std.Io, given: []const u8) ?[:0]u8 {
-    if (std.fs.path.isAbsolute(given)) return gpa.dupeZ(u8, given) catch null;
+    if (std.fs.path.isAbsolute(given)) return gpa.dupeSentinel(u8, given, 0) catch null;
     const exe = std.process.executablePathAlloc(io, gpa) catch return null;
     defer gpa.free(exe);
     const dir = std.fs.path.dirname(exe) orelse return null;
@@ -2846,7 +2846,7 @@ test "a relative theme path resolves beside the executable, not the cwd" {
 
 /// A `tmpDir` path in the cwd-relative form the binary under test runs in.
 fn tmpPath(buf: []u8, dir: std.testing.TmpDir, name: []const u8) ![:0]u8 {
-    return std.fmt.bufPrintZ(buf, ".zig-cache/tmp/{s}/{s}", .{ dir.sub_path, name });
+    return std.fmt.bufPrintSentinel(buf, ".zig-cache/tmp/{s}/{s}", .{ dir.sub_path, name }, 0);
 }
 
 test "a defaults file that will not load keeps the floor and says so" {

@@ -23,6 +23,27 @@ pub const solid = types.solid;
 pub const RowAlign = types.RowAlign;
 pub const TextMetrics = types.TextMetrics;
 pub const Renderer = types.Renderer;
+const instance = @import("instance.zig");
+const instance_deps: instance.Deps = .{
+    .RuntimeFn = Runtime,
+    .Action = Action,
+    .Ui = Ui,
+    .Element = Element,
+};
+pub fn Instance(comptime S: type, comptime M: type) type {
+    return instance.Instance(S, M, instance_deps);
+}
+pub fn init(
+    comptime S: type,
+    comptime M: type,
+    gpa: Allocator,
+    io: std.Io,
+    opts: Instance(S, M).Options,
+) !Instance(S, M) {
+    return instance.init(S, M, instance_deps, gpa, io, opts);
+}
+pub const structFields = types.structFields;
+pub const StructField = types.StructField;
 pub const PathOp = types.PathOp;
 pub const Path = types.Path;
 pub const FillRule = types.FillRule;
@@ -227,7 +248,7 @@ pub fn roleColor(pal: Theme, name: []const u8) Color {
     // look ignored rather than wrong. A duplicate NAME is a parse error, so
     // there is no ambiguity to resolve here, only precedence to get right.
     if (pal.customColor(name)) |c| return c;
-    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+    inline for (types.structFields(Theme)) |f| {
         if (comptime !std.mem.eql(u8, f.name, "custom")) {
             if (std.mem.eql(u8, name, f.name)) return @field(pal, f.name);
         }
@@ -818,7 +839,7 @@ pub const Style = struct {
     /// kept. The same rule `Elem.mergeStyle` applies, but between two styles, so a
     /// builder can resolve a chain before the Element exists.
     pub fn merge(self: *Style, s: Style) void {
-        inline for (@typeInfo(Style).@"struct".fields) |f| {
+        inline for (types.structFields(Style)) |f| {
             // The reference keys are not values; they were followed already.
             if (comptime std.mem.eql(u8, f.name, "name")) continue;
             if (comptime std.mem.eql(u8, f.name, "class")) continue;
@@ -5510,7 +5531,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     // Iterating the fields makes the next one fail to compile instead.
     const S = Style;
     var full: S = .{};
-    inline for (@typeInfo(S).@"struct".fields) |f| {
+    inline for (types.structFields(S)) |f| {
         // `bool` fields are not optional -- `stroke` is a plain flag, not a
         // tri-state -- so the unwrap has to be conditional or the whole test
         // fails to compile with "access of union field 'optional' while field
@@ -5540,7 +5561,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     // applyStyle: a wholesale set
     var a: Element(void) = .{ .geometry = .{ .rect = {} } };
     a.applyStyle(full);
-    inline for (@typeInfo(S).@"struct".fields) |f| {
+    inline for (types.structFields(S)) |f| {
         const is_opt2 = @typeInfo(f.type) == .optional;
         // `margin` is a RESOLVER, not a stored field: applyStyle fans it out
         // into the four sides, and an Element has no `margin` to compare with.
@@ -5573,7 +5594,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
     // mergeStyle: only the fields the caller set, all of which are set here
     var m: Element(void) = .{ .geometry = .{ .rect = {} } };
     m.mergeStyle(full);
-    inline for (@typeInfo(S).@"struct".fields) |f| {
+    inline for (types.structFields(S)) |f| {
         const is_opt3 = @typeInfo(f.type) == .optional;
         // Same three non-stored fields as above: none of them lands on an
         // Element, so there is nothing here to compare.

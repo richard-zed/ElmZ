@@ -16,7 +16,10 @@ pub fn build(b: *std.Build) void {
     const runExample = struct {
         fn f(bld: *std.Build, artifact: *std.Build.Step.Compile) *std.Build.Step.Run {
             const install = bld.addInstallArtifact(artifact, .{});
-            const r = bld.addSystemCommand(&.{bld.getInstallPath(.bin, artifact.name)});
+            // Run the INSTALLED copy: addRunArtifact uses the cache dir, where
+            // theme lookup finds nothing. .install_bin is resolved at make time.
+            const r = std.Build.Step.Run.create(bld, bld.fmt("run {s}", .{artifact.name}));
+            r.addFileArg(bld.graph.path(.install_bin, artifact.name));
             r.step.dependOn(&install.step);
             r.setCwd(bld.path("."));
             return r;
@@ -27,41 +30,10 @@ pub fn build(b: *std.Build) void {
     // resolved against the executable's directory -- so a copy of the app reads
     // the copy's own theme, and the cwd cannot change how it looks.
     //
-    // Seeded at configure time, refreshed from master on every configure.
-    {
-        const io = b.graph.io;
-        const cwd = std.Io.Dir.cwd();
-        // REFRESH FROM MASTER, every configure.
-        //
-        // This used to be an exclusive create, on the theory that "seed it"
-        // and "never revert an edit" should be one operation. It is not: the
-        // developer edits `src/theme.defaults.zon`, rebuilds, and the app
-        // keeps rendering the copy that was seeded the first time. Two files
-        // with different palettes, no error, and every edit looks ignored.
-        //
-        // `src/` is the single source of truth for the house palette. A
-        // per-app palette does not live in `theme.defaults.zon`; it lives in
-        // the app's own `theme.zon`, which this never touches. So there is no
-        // edit here worth preserving, and copying over is the honest
-        // behaviour.
-        // Write via a temp file and RENAME. A truncate-then-write leaves a
-        // ZERO-LENGTH theme.defaults.zon if the build stops between the two
-        // calls, and an empty file is not a missing file: the app reads it,
-        // gets no palette, and renders the compiled floor while reporting
-        // nothing. Rename is atomic, so the destination is either the old
-        // contents or the new ones, never neither.
-        if (cwd.readFileAlloc(io, "src/theme.defaults.zon", b.allocator, .limited(64 * 1024))) |data| {
-            defer b.allocator.free(data);
-            const dst = b.getInstallPath(.bin, "theme.defaults.zon");
-            if (std.fs.path.dirname(dst)) |d| cwd.createDirPath(io, d) catch {};
-            const tmp = b.fmt("{s}.tmp", .{dst});
-            if (cwd.createFile(io, tmp, .{ .truncate = true })) |file| {
-                file.writeStreamingAll(io, data) catch {};
-                file.close(io);
-                cwd.rename(tmp, cwd, dst, io) catch {};
-            } else |_| {}
-        } else |_| {}
-    }
+    // Installed at make time via addInstallFileWithDir, below. Zig 0.17 has no
+    // configure-time install path (getInstallPath is gone), and install dirs
+    // are only known during the make phase. The install step is atomic and
+    // overwrites unconditionally, which is what "refresh from master" needs.
 
     const theme_step = b.step("theme", "restore theme.defaults.zon beside the binary");
     theme_step.dependOn(&b.addInstallFileWithDir(
@@ -69,6 +41,8 @@ pub fn build(b: *std.Build) void {
         .bin,
         "theme.defaults.zon",
     ).step);
+    // Beside every binary on a normal install, not only on `zig build theme`.
+    b.getInstallStep().dependOn(theme_step);
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -130,12 +104,24 @@ pub fn build(b: *std.Build) void {
     // SDL3 still gets a working `zig build` for everything else. Each one is the
     // SAME app as its headless example, in a window: counter -> counter-sdl3.
     // ---------------------------------------------------------------------
+    // 0.17 dropped @cImport; the headers come through translate-c instead.
+    const sdl_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/sdl_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sdl_c.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    const sdl_bindings = sdl_c.createModule();
+
     const sdl_mod = b.createModule(.{
         .root_source_file = b.path("src/platform_sdl3.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "elmz", .module = elmz_mod }},
+        .imports = &.{
+            .{ .name = "elmz", .module = elmz_mod },
+            .{ .name = "sdl", .module = sdl_bindings },
+        },
     });
     sdl_mod.linkSystemLibrary("SDL3", .{});
 
@@ -186,9 +172,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const fields_install = b.addInstallArtifact(fields, .{});
-    b.getInstallStep().dependOn(&fields_install.step);
-    b.step("fields", "build the headless text-field form").dependOn(&fields_install.step);
+    // ui.textInput does not exist yet, so this test cannot compile. Not a 0.17
+    // break: the builder was never written. Left unbuilt until text entry lands.
+    _ = fields;
 
     const fonts = b.addExecutable(.{
         .name = "fonts",
@@ -461,7 +447,7 @@ pub fn build(b: *std.Build) void {
     );
 
     const run = runExample(b, exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run-counter", "run the headless counter (writes frame_*.png)").dependOn(&run.step);
 
     // ---------------------------------------------------------------------

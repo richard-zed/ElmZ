@@ -3,9 +3,7 @@
 const std = @import("std");
 const elmz = @import("elmz");
 
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const c = @import("sdl");
 
 /// The keys elmz names, resolved from SCANCODE rather than keycode.
 fn namedKey(sc: c.SDL_Scancode) ?elmz.Named {

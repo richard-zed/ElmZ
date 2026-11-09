@@ -762,3 +762,19 @@ pub const Path = struct {
     points: []const [2]f32,
     rule: FillRule = .nonzero,
 };
+
+/// Zig 0.17 split `Struct.fields` into parallel arrays and dropped
+/// StructField. This rebuilds a {name, type} view for `inline for`.
+pub const StructField = struct {
+    name: [:0]const u8,
+    type: type,
+};
+
+pub fn structFields(comptime T: type) [@typeInfo(T).@"struct".field_names.len]StructField {
+    const info = @typeInfo(T).@"struct";
+    var out: [info.field_names.len]StructField = undefined;
+    inline for (info.field_names, info.field_types, 0..) |n, t, i| {
+        out[i] = .{ .name = n, .type = t };
+    }
+    return out;
+}

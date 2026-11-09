@@ -6,7 +6,8 @@ const elmz = @import("elmz");
 const software = @import("software");
 
 const Model = struct {};
-const Msg = enum {};
+/// Never dispatched; a non-empty enum because 0.17 cannot align an empty one.
+const Msg = enum { none };
 
 fn update(_: *Model, _: Msg) elmz.Action(Msg) {
     return .{};
