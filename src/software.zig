@@ -2,7 +2,7 @@
 //! `elmfont`.
 
 const std = @import("std");
-const elmz = @import("elmz");
+const types = @import("types");
 const cedar = @import("cedar.zig");
 const ramps = @import("ramp.zig");
 const gamma = @import("gamma.zig");
@@ -473,7 +473,7 @@ pub const testing_font = struct {
     pub fn get() @This() {
         return .{};
     }
-    pub fn measure(_: @This(), bytes: []const u8, size: f32) elmz.TextMetrics {
+    pub fn measure(_: @This(), bytes: []const u8, size: f32) types.TextMetrics {
         return elmfont.measure(bytes, size);
     }
     pub fn wrapLines(_: @This(), bytes: []const u8, dev: f32, max_w: f32, out: [][]const u8) usize {
@@ -563,7 +563,7 @@ fn lightWidth(blur: f32, px: f32, py: f32, hx: f32, hy: f32, cast: [2]f32) f32 {
 
 /// The one ramp, for every mode: coverage is opaque well inside the silhouette, half at the
 /// edge, gone well outside.
-fn ramp(mode: elmz.Halo.Mode, d: f32, blur: f32, core: f32) f32 {
+fn ramp(mode: types.Halo.Mode, d: f32, blur: f32, core: f32) f32 {
     if (blur <= 0) return 1;
     return switch (mode) {
         // Both halves. `.outer_glow` is the same ramp: what makes it outer is
@@ -645,7 +645,7 @@ fn ellipseDistance(px: f32, py: f32, a: f32, b: f32) f32 {
 
 /// How far a ramp reaches from the silhouette, in pixels, WITHOUT the extra pixel that
 /// covers the antialiased edge.
-fn falloffReach(mode: elmz.Halo.Mode, blur: f32, lit: bool) f32 {
+fn falloffReach(mode: types.Halo.Mode, blur: f32, lit: bool) f32 {
     if (mode == .inner_glow) return blur;
     return blur * (if (lit) @as(f32, 1.0) else 0.5);
 }
@@ -808,7 +808,7 @@ pub const Canvas = struct {
     dbg_faces: bool = true,
 
     /// Measured strings, keyed on the BYTES THEMSELVES and not a hash of them.
-    measure_cache: std.HashMapUnmanaged(MeasureKey, elmz.TextMetrics, MeasureCtx, 80) = .empty,
+    measure_cache: std.HashMapUnmanaged(MeasureKey, types.TextMetrics, MeasureCtx, 80) = .empty,
     /// Hit and miss counts. Nothing in the renderer reads them: they exist so a benchmark
     /// and a test can tell a cached answer from a computed one.
     measure_hits: usize = 0,
@@ -838,7 +838,7 @@ pub const Canvas = struct {
         blur: f32,
         /// Which side of the silhouette this stencil carries. Part of the key, because the
         /// same geometry bakes to three different pictures.
-        mode: elmz.Halo.Mode = .glow,
+        mode: types.Halo.Mode = .glow,
         /// Template only: width of the corner band, in pixels.
         corner: u32 = 0,
         /// Tiled entry: `sh` is a REAL height, `rw` spans only the corner band plus one
@@ -1075,7 +1075,7 @@ pub const Canvas = struct {
         self.gpa.free(self.px);
     }
 
-    pub fn clear(self: *Self, color: elmz.Color) void {
+    pub fn clear(self: *Self, color: types.Color) void {
         var i: usize = 0;
         while (i < self.px.len) : (i += 4) {
             self.px[i + 0] = color.r;
@@ -1086,7 +1086,7 @@ pub const Canvas = struct {
     }
 
     /// Logical rect -> device rect.
-    fn scaledRect(self: *const Self, r: elmz.Rect) elmz.Rect {
+    fn scaledRect(self: *const Self, r: types.Rect) types.Rect {
         if (self.scale == 1.0) return r;
         return .{
             .x = r.x * self.scale,
@@ -1096,7 +1096,7 @@ pub const Canvas = struct {
         };
     }
 
-    fn blendPixel(self: *Self, x: i64, y: i64, color: elmz.Color) void {
+    fn blendPixel(self: *Self, x: i64, y: i64, color: types.Color) void {
         if (x < 0 or y < 0) return;
         const ux: u32 = @intCast(x);
         const uy: u32 = @intCast(y);
@@ -1132,7 +1132,7 @@ pub const Canvas = struct {
     }
 
     /// One scanline in one colour.
-    fn fillRow(self: *Self, x0: i64, x1: i64, y: u32, color: elmz.Color) void {
+    fn fillRow(self: *Self, x0: i64, x1: i64, y: u32, color: types.Color) void {
         if (color.a == 0) return;
         const row = @as(usize, y) * self.w;
         var x: usize = @intCast(x0);
@@ -1163,7 +1163,7 @@ pub const Canvas = struct {
     const Span = struct { x0: i64, y0: i64, x1: i64, y1: i64 };
 
     /// Integer pixel span of `rect` after clipping, or null when nothing is left.
-    fn clipSpan(self: *Self, rect: elmz.Rect, clip: elmz.Rect) ?Span {
+    fn clipSpan(self: *Self, rect: types.Rect, clip: types.Rect) ?Span {
         // Non-finite geometry is refused here, BEFORE the max/min below. Those
         // follow fmax/fmin and silently DROP a NaN, so a NaN coordinate became
         // the clip's own edge and the span covered every pixel the clip allowed
@@ -1195,11 +1195,11 @@ pub const Canvas = struct {
         return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
     }
 
-    pub fn fillRect(self: *Self, rect: elmz.Rect, fill: elmz.Fill) void {
-        self.fillRectClip(rect, fill, elmz.Rect.unbounded);
+    pub fn fillRect(self: *Self, rect: types.Rect, fill: types.Fill) void {
+        self.fillRectClip(rect, fill, types.Rect.unbounded);
     }
 
-    pub fn fillRectClip(self: *Self, rect: elmz.Rect, fill: elmz.Fill, clip: elmz.Rect) void {
+    pub fn fillRectClip(self: *Self, rect: types.Rect, fill: types.Fill, clip: types.Rect) void {
         const sp = self.clipSpan(rect, clip) orelse return;
         switch (fill) {
             // The solid case hoists the colour out of the loop entirely: this
@@ -1241,7 +1241,7 @@ pub const Canvas = struct {
                     while (xs < sp.x1) {
                         const xe = @min(sp.x1, xs + band);
                         const n: usize = @intCast(xe - xs);
-                        var lut: [512]elmz.Color = undefined;
+                        var lut: [512]types.Color = undefined;
                         var tt = ((@as(f32, @floatFromInt(xs)) + 0.5 - ax) * dx) * inv;
                         var i: usize = 0;
                         while (i < n) : (i += 1) {
@@ -1413,17 +1413,17 @@ pub const Canvas = struct {
 
     /// True when a gradient is the shape almost every UI gradient is: exactly two stops,
     /// pinned at the two ends, both fully opaque.
-    fn twoOpaque(s: elmz.Stops) bool {
+    fn twoOpaque(s: types.Stops) bool {
         return s.n == 2 and s.colors[0].a == 255 and s.colors[1].a == 255;
     }
 
     /// One scanline of a two-opaque-stop ramp starting at `t0` and advancing by `step` per
     /// pixel. Split into three runs.
-    fn rampRow(self: *Self, sp: Span, y: i64, t0: f32, step: f32, a: elmz.Color, b: elmz.Color) void {
+    fn rampRow(self: *Self, sp: Span, y: i64, t0: f32, step: f32, a: types.Color, b: types.Color) void {
         const n: i64 = sp.x1 - sp.x0;
         if (n <= 0) return;
         if (!(step > 0 or step < 0)) {
-            self.fillRow(sp.x0, sp.x1, @intCast(y), elmz.Stops.two(a, b).atFast(t0));
+            self.fillRow(sp.x0, sp.x1, @intCast(y), types.Stops.two(a, b).atFast(t0));
             return;
         }
         const nf: f32 = @floatFromInt(n);
@@ -1483,26 +1483,26 @@ pub const Canvas = struct {
     }
 
     /// TrueType text, drawn by the same font that measured it.
-    pub fn drawText(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8) void {
-        self.drawTextClip(x, y, size, fill, bytes, elmz.Rect.unbounded);
+    pub fn drawText(self: *Self, x: f32, y: f32, size: f32, fill: types.Fill, bytes: []const u8) void {
+        self.drawTextClip(x, y, size, fill, bytes, types.Rect.unbounded);
     }
 
-    pub fn drawTextClip(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+    pub fn drawTextClip(self: *Self, x: f32, y: f32, size: f32, fill: types.Fill, bytes: []const u8, clip: types.Rect) void {
         self.drawTextFace(&self.font, x, y, size, fill, bytes, clip);
     }
 
     /// Text in a SPECIFIC face, rather than whatever the canvas is pointed at. The face is
     /// passed, not swapped in.
-    pub fn drawTextFace(self: *Self, face: *const Face, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+    pub fn drawTextFace(self: *Self, face: *const Face, x: f32, y: f32, size: f32, fill: types.Fill, bytes: []const u8, clip: types.Rect) void {
         if (!face.available()) return self.drawTextBitmap(x, y, size, fill, bytes, clip);
         face.drawText(self.px, self.w, self.h, x, y, size, fill, bytes, clip);
     }
 
     /// Text in the built-in face, for a canvas with no typeface attached.
-    fn drawTextBitmap(self: *Self, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+    fn drawTextBitmap(self: *Self, x: f32, y: f32, size: f32, fill: types.Fill, bytes: []const u8, clip: types.Rect) void {
         const s = elmfont.scaleFor(size);
         const cell: f32 = @floatFromInt(s);
-        const solid: ?elmz.Color = switch (fill) {
+        const solid: ?types.Color = switch (fill) {
             .solid => |c| c,
             else => null,
         };
@@ -1513,7 +1513,7 @@ pub const Canvas = struct {
             !std.math.isFinite(clip.x) or !std.math.isFinite(clip.y) or
             !std.math.isFinite(clip.w) or !std.math.isFinite(clip.h))
             return;
-        var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
+        var box: types.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
         if (solid == null) {
             const tm = elmfont.measure(bytes, size);
             box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
@@ -1567,7 +1567,7 @@ pub const Canvas = struct {
         }
     }
 
-    fn blendCoverage(self: *Self, x: i64, y: i64, color: elmz.Color, cov: f32) void {
+    fn blendCoverage(self: *Self, x: i64, y: i64, color: types.Color, cov: f32) void {
         const a = cov * (@as(f32, @floatFromInt(color.a)) / 255.0);
         if (a <= 0) return;
         const i = (@as(usize, @intCast(y)) * self.w + @as(u32, @intCast(x))) * 4;
@@ -1593,17 +1593,17 @@ pub const Canvas = struct {
 
     /// Rounded rect by signed distance: the coverage of a pixel is derived from its
     /// distance to the rounded outline, which antialiases the curve and.
-    pub fn roundRect(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: ?u8) void {
-        self.roundRectClip(rect, radius, fill, stroke, elmz.Rect.unbounded);
+    pub fn roundRect(self: *Self, rect: types.Rect, radius: f32, fill: types.Fill, stroke: ?u8) void {
+        self.roundRectClip(rect, radius, fill, stroke, types.Rect.unbounded);
     }
 
-    fn vtPath(ptr: *anyopaque, x: f32, y: f32, p: elmz.Path, fill: elmz.Fill, clip: elmz.Rect) void {
+    fn vtPath(ptr: *anyopaque, x: f32, y: f32, p: types.Path, fill: types.Fill, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.pathClip(x * self.scale, y * self.scale, p, fill, self.scaledRect(clip));
     }
 
     /// Flatten, then fill.
-    pub fn pathClip(self: *Self, ox: f32, oy: f32, p: elmz.Path, fill: elmz.Fill, clip: elmz.Rect) void {
+    pub fn pathClip(self: *Self, ox: f32, oy: f32, p: types.Path, fill: types.Fill, clip: types.Rect) void {
         self.poly.clearRetainingCapacity();
         self.sub_starts.clearRetainingCapacity();
         self.pending_break = true;
@@ -1718,7 +1718,7 @@ pub const Canvas = struct {
 
     /// Each pixel row is sampled four times vertically, and horizontally each span
     /// contributes its exact overlap.
-    pub fn fillPolygonClip(self: *Self, pts: []const [2]f32, starts: []const usize, rule: elmz.FillRule, fill: elmz.Fill, clip: elmz.Rect) void {
+    pub fn fillPolygonClip(self: *Self, pts: []const [2]f32, starts: []const usize, rule: types.FillRule, fill: types.Fill, clip: types.Rect) void {
         if (pts.len < 3) return;
         var minx = pts[0][0];
         var maxx = pts[0][0];
@@ -1730,7 +1730,7 @@ pub const Canvas = struct {
             miny = @min(miny, p[1]);
             maxy = @max(maxy, p[1]);
         }
-        const box = elmz.Rect{ .x = minx, .y = miny, .w = maxx - minx, .h = maxy - miny };
+        const box = types.Rect{ .x = minx, .y = miny, .w = maxx - minx, .h = maxy - miny };
         const sp = self.clipSpan(box, clip) orelse return;
         const x0i: i64 = @max(sp.x0, @as(i64, @intFromFloat(@floor(minx))));
         const x1i: i64 = @min(sp.x1, @as(i64, @intFromFloat(@ceil(maxx))));
@@ -1830,7 +1830,7 @@ pub const Canvas = struct {
         }
     }
 
-    pub fn roundRectClip(self: *Self, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: ?u8, clip: elmz.Rect) void {
+    pub fn roundRectClip(self: *Self, rect: types.Rect, radius: f32, fill: types.Fill, stroke: ?u8, clip: types.Rect) void {
         // The corner geometry comes from the unclipped rect on purpose: a clip
         // is a window over the shape, never a change to the shape.
         const r = @min(radius, @min(rect.w, rect.h) * 0.5);
@@ -1873,7 +1873,7 @@ pub const Canvas = struct {
 
     /// A glow or shadow: the same signed distance the rounded rect is built from, with the
     /// coverage term swapped for a falloff that straddles the edge.
-    pub fn halo(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+    pub fn halo(self: *Self, rect: types.Rect, corner: f32, h: types.Halo, clip: types.Rect) void {
         if (h.color.a == 0) return;
         // Explicit beats the default. A quality setting the library can
         // second-guess is not an escape hatch, so `.sdf` is honoured even where
@@ -1916,7 +1916,7 @@ pub const Canvas = struct {
         self.haloBaked(rect, corner, h, clip);
     }
 
-    fn haloSdf(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+    fn haloSdf(self: *Self, rect: types.Rect, corner: f32, h: types.Halo, clip: types.Rect) void {
         const blur = @max(h.blur, 0);
         // The silhouette the ramp runs away from, after spread and offset.
         // An inner glow never moves its silhouette. Shrinking it for `spread`
@@ -1927,7 +1927,7 @@ pub const Canvas = struct {
         // says -- a flat core -- by holding the ramp at full brightness for that
         // many pixels before it begins to decay.
         const spread = if (h.mode == .inner_glow) 0 else h.spread;
-        const shape = elmz.Rect{
+        const shape = types.Rect{
             .x = rect.x + h.offset[0] - spread,
             .y = rect.y + h.offset[1] - spread,
             .w = rect.w + spread * 2,
@@ -1961,7 +1961,7 @@ pub const Canvas = struct {
         // Ring bounds: the shape grown by the falloff, plus one pixel for the
         // antialiased edge itself. A lit ramp reaches further on the cast side.
         const grow: f32 = falloffReach(h.mode, blur, h.light != null) + 1;
-        const ring = elmz.Rect{
+        const ring = types.Rect{
             .x = shape.x - grow,
             .y = shape.y - grow,
             .w = shape.w + grow * 2,
@@ -2075,7 +2075,7 @@ pub const Canvas = struct {
 
     /// Blur the destination under `rect`, in place, then blend the result back through the
     /// rounded-rect coverage so a frosted card keeps its corners.
-    pub fn frost(self: *Self, rect: elmz.Rect, radius: f32, blur: f32, clip: elmz.Rect) void {
+    pub fn frost(self: *Self, rect: types.Rect, radius: f32, blur: f32, clip: types.Rect) void {
         if (blur <= 0) return;
         const region = rect.intersect(clip);
         if (region.isEmpty()) return;
@@ -2148,7 +2148,7 @@ pub const Canvas = struct {
 
     /// Replay a recorded frame onto the pixels. `Runtime.frame` only records primitives;
     /// nothing is rasterised until this runs.
-    pub fn paintFrame(self: *Self, prims: []const elmz.Primitive) void {
+    pub fn paintFrame(self: *Self, prims: []const types.Primitive) void {
         const r = self.renderer();
         // The prim carries the face, so paint does not need sticky state across
         // a frame boundary -- but a prim that names one still has to set it
@@ -2241,11 +2241,11 @@ pub const Canvas = struct {
     }
 
     /// Baked path: same ramp, sampled from a stencil instead of computed.
-    fn haloBaked(self: *Self, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+    fn haloBaked(self: *Self, rect: types.Rect, corner: f32, h: types.Halo, clip: types.Rect) void {
         const blur = @max(h.blur, 0);
         // Insets for an inner glow; see `haloSdf`.
         const spread = if (h.mode == .inner_glow) 0 else h.spread;
-        const shape = elmz.Rect{
+        const shape = types.Rect{
             .x = rect.x + h.offset[0] - spread,
             .y = rect.y + h.offset[1] - spread,
             .w = rect.w + spread * 2,
@@ -2275,7 +2275,7 @@ pub const Canvas = struct {
 
         const ox: i64 = @intFromFloat(@round(shape.x - grow));
         const oy: i64 = @intFromFloat(@round(shape.y - grow));
-        const ring = elmz.Rect{
+        const ring = types.Rect{
             .x = @floatFromInt(ox),
             .y = @floatFromInt(oy),
             .w = @floatFromInt(rw),
@@ -2332,7 +2332,7 @@ pub const Canvas = struct {
 
     /// The stencil for one silhouette, built on first use and kept. Large silhouettes get a
     /// 9-SLICE TEMPLATE instead of a full mask.
-    fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32, mode: elmz.Halo.Mode, spread: f32) ?*Mask {
+    fn maskFor(self: *Self, sw: i32, sh: i32, r: f32, blur: f32, mode: types.Halo.Mode, spread: f32) ?*Mask {
         if (sw <= 0 or sh <= 0) return null;
         const grow = falloffReach(mode, blur, false) + 1;
         // The corner band has to reach PAST the ramp, not just past the arc.
@@ -2440,7 +2440,7 @@ pub const Canvas = struct {
 
     /// Coverage of one rounded-rect silhouette grown by `grow` on every side, into a `rw` x
     /// `rh` buffer.
-    fn bakeStencil(px: []u8, rw: u32, rh: u32, sw: i32, sh: i32, r: f32, blur: f32, grow: f32, mode: elmz.Halo.Mode, core: f32) void {
+    fn bakeStencil(px: []u8, rw: u32, rh: u32, sw: i32, sh: i32, r: f32, blur: f32, grow: f32, mode: types.Halo.Mode, core: f32) void {
         // An inner rim is the one mode whose field is not local to the edge: it
         // runs a full `blur` in, and past `blur` in from every side the metric
         // stops being the shape's distance and becomes the inscribed ellipse.
@@ -2539,13 +2539,13 @@ pub const Canvas = struct {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = name, .data = png });
     }
 
-    // -- the elmz.Renderer vtable -------------------------------------------
+    // -- the types.Renderer vtable -------------------------------------------
 
-    pub fn renderer(self: *Self) elmz.Renderer {
+    pub fn renderer(self: *Self) types.Renderer {
         return .{ .ptr = @ptrCast(self), .vtable = &vtable };
     }
 
-    const vtable = elmz.Renderer.VTable{
+    const vtable = types.Renderer.VTable{
         .quad = vtQuad,
         .path = vtPath,
         .rrect = vtRrect,
@@ -2567,7 +2567,7 @@ pub const Canvas = struct {
         .measure_image = vtMeasureImage,
     };
 
-    fn vtBlitImage(ptr: *anyopaque, rect: elmz.Rect, path: []const u8, fit: elmz.ImageFit, clip: elmz.Rect) void {
+    fn vtBlitImage(ptr: *anyopaque, rect: types.Rect, path: []const u8, fit: types.ImageFit, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.blitImage(rect, path, fit, clip);
     }
@@ -2579,10 +2579,10 @@ pub const Canvas = struct {
 
     fn vtBlitSvg(
         ptr: *anyopaque,
-        rect: elmz.Rect,
+        rect: types.Rect,
         path: []const u8,
         col: [3]u8,
-        clip: elmz.Rect,
+        clip: types.Rect,
     ) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.blitSvg(rect, path, col, clip);
@@ -2590,11 +2590,11 @@ pub const Canvas = struct {
 
     fn vtBlit(
         ptr: *anyopaque,
-        rect: elmz.Rect,
+        rect: types.Rect,
         pixels: []const u8,
         src_w: u32,
         src_h: u32,
-        clip: elmz.Rect,
+        clip: types.Rect,
     ) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.blitRgba(rect, pixels, src_w, src_h, clip);
@@ -2618,7 +2618,7 @@ pub const Canvas = struct {
     /// and leave no entry -- an icon is decoration, and a broken one should be
     /// missing, not fatal. Failures are counted so a bad path is visible in a
     /// diagnostic rather than as a silently empty rect.
-    pub fn blitSvg(self: *Self, rect: elmz.Rect, path: []const u8, col: [3]u8, clip: elmz.Rect) void {
+    pub fn blitSvg(self: *Self, rect: types.Rect, path: []const u8, col: [3]u8, clip: types.Rect) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         const dr = self.scaledRect(rect);
         const pw: u32 = @intFromFloat(@max(@round(dr.w), 1));
@@ -2725,7 +2725,7 @@ pub const Canvas = struct {
     /// output pixel for a source that is usually already the right size. The
     /// scaling that does happen -- by the display density -- is an integer-ish
     /// step where a filter would buy nothing and blur the outline.
-    pub fn blitRgba(self: *Self, rect: elmz.Rect, pixels: []const u8, src_w: u32, src_h: u32, clip: elmz.Rect) void {
+    pub fn blitRgba(self: *Self, rect: types.Rect, pixels: []const u8, src_w: u32, src_h: u32, clip: types.Rect) void {
         if (src_w == 0 or src_h == 0) return;
         const dr = self.scaledRect(rect);
         const x0: i32 = @intFromFloat(@round(dr.x));
@@ -2827,7 +2827,7 @@ pub const Canvas = struct {
     /// The cache is keyed on the path alone. Not on the draw size: one source
     /// raster serves every size, and a resize is a different blit of the same
     /// pixels rather than a second decode.
-    pub fn blitImage(self: *Self, rect: elmz.Rect, path: []const u8, fit: elmz.ImageFit, clip: elmz.Rect) void {
+    pub fn blitImage(self: *Self, rect: types.Rect, path: []const u8, fit: types.ImageFit, clip: types.Rect) void {
         if (rect.w <= 0 or rect.h <= 0) return;
 
         for (self.images.items) |*e| {
@@ -2918,7 +2918,7 @@ pub const Canvas = struct {
     }
 
     /// Blit a cached raster into an already-sized box.
-    fn drawImageEntry(self: *Self, e: *const ImageEntry, rect: elmz.Rect, fit: elmz.ImageFit, clip: elmz.Rect) void {
+    fn drawImageEntry(self: *Self, e: *const ImageEntry, rect: types.Rect, fit: types.ImageFit, clip: types.Rect) void {
         switch (fit) {
             // `.fit` on a box that layout already gave the image's aspect is a
             // plain fill: there is no letterbox to compute, because `measure`
@@ -2963,7 +2963,7 @@ pub const Canvas = struct {
         return &self.images.items[self.images.items.len - 1];
     }
 
-    fn vtFrost(ptr: *anyopaque, rect: elmz.Rect, radius: f32, blur: f32, clip: elmz.Rect) void {
+    fn vtFrost(ptr: *anyopaque, rect: types.Rect, radius: f32, blur: f32, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.frost(
             self.scaledRect(rect),
@@ -2973,7 +2973,7 @@ pub const Canvas = struct {
         );
     }
 
-    fn vtHalo(ptr: *anyopaque, rect: elmz.Rect, corner: f32, h: elmz.Halo, clip: elmz.Rect) void {
+    fn vtHalo(ptr: *anyopaque, rect: types.Rect, corner: f32, h: types.Halo, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         var d = h;
         if (self.scale != 1.0) {
@@ -2984,12 +2984,12 @@ pub const Canvas = struct {
         self.halo(self.scaledRect(rect), corner * self.scale, d, self.scaledRect(clip));
     }
 
-    fn vtQuad(ptr: *anyopaque, rect: elmz.Rect, fill: elmz.Fill, clip: elmz.Rect) void {
+    fn vtQuad(ptr: *anyopaque, rect: types.Rect, fill: types.Fill, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.fillRectClip(self.scaledRect(rect), fill, self.scaledRect(clip));
     }
 
-    fn vtRrect(ptr: *anyopaque, rect: elmz.Rect, radius: f32, fill: elmz.Fill, stroke: ?u8, clip: elmz.Rect) void {
+    fn vtRrect(ptr: *anyopaque, rect: types.Rect, radius: f32, fill: types.Fill, stroke: ?u8, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.roundRectClip(
             self.scaledRect(rect),
@@ -3088,7 +3088,7 @@ pub const Canvas = struct {
         }
     }
 
-    fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, width: u8, clip: elmz.Rect, kind: u8) void {
+    fn vtStrokedText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: types.Fill, bytes: []const u8, width: u8, clip: types.Rect, kind: u8) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const f = self.facePtrAt(self.cur_face);
         const sx = x * self.scale;
@@ -3120,11 +3120,11 @@ pub const Canvas = struct {
     /// The vtable slot is never reached in this canvas: a halo is carried on the
     /// text prim and painted by `drawTextHalo` below. Kept so the interface is
     /// total, and so a backend that prefers a separate call can use it.
-    fn vtTextHaloNoop(_: *anyopaque, _: f32, _: f32, _: f32, _: elmz.Halo, _: []const u8, _: elmz.Rect) void {}
+    fn vtTextHaloNoop(_: *anyopaque, _: f32, _: f32, _: f32, _: types.Halo, _: []const u8, _: types.Rect) void {}
 
     /// Paint the glow around a run's glyphs. Device pixels in, like every other
     /// draw here: callers multiply by `self.scale` before arriving.
-    fn drawTextHalo(self: *Self, f: cedar.Font, x: f32, y: f32, size: f32, h: elmz.Halo, bytes: []const u8, clip: elmz.Rect) void {
+    fn drawTextHalo(self: *Self, f: cedar.Font, x: f32, y: f32, size: f32, h: types.Halo, bytes: []const u8, clip: types.Rect) void {
         if (self.stroke_scratch.len == 0) return;
         // LOGICAL radius scaled like every other length, then clamped to the
         // field's baked reach: past it `haloText` returns false and the glow
@@ -3150,7 +3150,7 @@ pub const Canvas = struct {
         _ = f.haloText(self.px, self.w, self.h, x, y, size, h.color, bytes, r_dev, 1.0, mode, spread_dev, offset_dev, clip, self.stroke_scratch);
     }
 
-    fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: elmz.Fill, bytes: []const u8, clip: elmz.Rect) void {
+    fn vtText(ptr: *anyopaque, x: f32, y: f32, size: f32, fill: types.Fill, bytes: []const u8, clip: types.Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.drawTextFace(
             self.facePtrAt(self.cur_face),
@@ -3177,11 +3177,11 @@ pub const Canvas = struct {
     }
 
     /// Font metrics for one string, cached.
-    fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) elmz.TextMetrics {
+    fn cachedMeasure(self: *Self, bytes: []const u8, dev: f32) types.TextMetrics {
         return self.cachedMeasureFace(bytes, dev, 0);
     }
 
-    fn cachedMeasureFace(self: *Self, bytes: []const u8, dev: f32, face_index: usize) elmz.TextMetrics {
+    fn cachedMeasureFace(self: *Self, bytes: []const u8, dev: f32, face_index: usize) types.TextMetrics {
         // The key must name the face the number CAME FROM, not the face that
         // was asked for. When no typeface is attached the measurement is
         // answered by `elmfont`, but `instanceKey()` on a dead face is 0 --
@@ -3264,7 +3264,7 @@ pub const Canvas = struct {
     }
 
     /// Measured at the DEVICE size and divided back, never "measure logical and hope".
-    fn vtMeasureFace(ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) elmz.TextMetrics {
+    fn vtMeasureFace(ptr: *anyopaque, bytes: []const u8, size: f32, face: u16) types.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const m = self.cachedMeasureFace(bytes, size * self.scale, face);
         if (self.scale == 1.0) return m;
@@ -3278,7 +3278,7 @@ pub const Canvas = struct {
         };
     }
 
-    fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) elmz.TextMetrics {
+    fn vtMeasure(ptr: *anyopaque, bytes: []const u8, size: f32) types.TextMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const m = self.cachedMeasure(bytes, size * self.scale);
         if (self.scale == 1.0) return m;
@@ -3421,7 +3421,7 @@ test "three disjoint squares stay disjoint" {
     // whole element. Icons are multi-subpath shapes, so this was the difference
     // between a glyph and a smear.
     const gpa = testing.allocator;
-    const ops = [_]elmz.PathOp{
+    const ops = [_]types.PathOp{
         .move, .line, .line, .line, .close,
         .move, .line, .line, .line, .close,
         .move, .line, .line, .line, .close,
@@ -3433,7 +3433,7 @@ test "three disjoint squares stay disjoint" {
     };
     var c = try testCanvas(gpa, 32, 32);
     defer c.deinit();
-    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .evenodd }, .{ .solid = .{ .r = 255, .g = 255, .b = 255 } }, elmz.Rect.unbounded);
+    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .evenodd }, .{ .solid = .{ .r = 255, .g = 255, .b = 255 } }, types.Rect.unbounded);
 
     var inside: usize = 0;
     var outside: usize = 0;
@@ -3454,14 +3454,14 @@ test "three disjoint squares stay disjoint" {
     // An UNCLOSED subpath is legal input and used to wedge even with two of
     // them: the join ran from the open subpath's last point diagonally into the
     // next one's first. `M2 2 L22 2 L22 22 L2 22` has no `Z`.
-    const ops2 = [_]elmz.PathOp{ .move, .line, .line, .line, .move, .line, .line, .line, .close };
+    const ops2 = [_]types.PathOp{ .move, .line, .line, .line, .move, .line, .line, .line, .close };
     const pts2 = [_][2]f32{
         .{ 2, 2 },   .{ 22, 2 },  .{ 22, 22 }, .{ 2, 22 },
         .{ 12, 12 }, .{ 18, 12 }, .{ 18, 18 }, .{ 12, 18 },
     };
     var d = try testCanvas(gpa, 24, 24);
     defer d.deinit();
-    d.pathClip(0, 0, .{ .ops = &ops2, .points = &pts2, .rule = .evenodd }, .{ .solid = .{ .r = 255, .g = 255, .b = 255 } }, elmz.Rect.unbounded);
+    d.pathClip(0, 0, .{ .ops = &ops2, .points = &pts2, .rule = .evenodd }, .{ .solid = .{ .r = 255, .g = 255, .b = 255 } }, types.Rect.unbounded);
     // Every row above the inner square is solid across the outer one; the wedge
     // cut a diagonal notch out of exactly these.
     for (3..11) |y| {
@@ -3663,9 +3663,9 @@ test "a vertical gradient ramps top to bottom and is constant across each row" {
     var c = try testCanvas(gpa, 40, 100);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 255, .b = 0 }); // green: anything unpainted shows up
-    c.fillRect(.{ .x = 0, .y = 0, .w = 40, .h = 100 }, elmz.Fill.vgrad(
-        elmz.Color.rgbHex(0x000000),
-        elmz.Color.rgbHex(0xffffff),
+    c.fillRect(.{ .x = 0, .y = 0, .w = 40, .h = 100 }, types.Fill.vgrad(
+        types.Color.rgbHex(0x000000),
+        types.Color.rgbHex(0xffffff),
     ));
     try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @floatFromInt(chanAt(c.px, c.w, 20, 0))), 3);
     try std.testing.expectApproxEqAbs(@as(f32, 128), @as(f32, @floatFromInt(chanAt(c.px, c.w, 20, 50))), 5);
@@ -3679,9 +3679,9 @@ test "a horizontal gradient varies by column and not by row" {
     var c = try testCanvas(gpa, 100, 10);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 255, .b = 0 });
-    c.fillRect(.{ .x = 0, .y = 0, .w = 100, .h = 10 }, elmz.Fill.hgrad(
-        elmz.Color.rgbHex(0x000000),
-        elmz.Color.rgbHex(0xffffff),
+    c.fillRect(.{ .x = 0, .y = 0, .w = 100, .h = 10 }, types.Fill.hgrad(
+        types.Color.rgbHex(0x000000),
+        types.Color.rgbHex(0xffffff),
     ));
     try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @floatFromInt(chanAt(c.px, c.w, 0, 5))), 3);
     try std.testing.expectApproxEqAbs(@as(f32, 128), @as(f32, @floatFromInt(chanAt(c.px, c.w, 50, 5))), 5);
@@ -3698,19 +3698,19 @@ test "every fill kind packs alpha, so an opaque gradient cannot export as a hole
     // gradient stored correct RGB at alpha 0 and the picture went out with a
     // hole in it. Invisible on screen (src-over never reads the destination's
     // alpha) and invisible to a pinned png (a pin records what was written).
-    const a = elmz.Color{ .r = 255, .g = 0, .b = 0 };
-    const b = elmz.Color{ .r = 0, .g = 128, .b = 255 };
-    const c = elmz.Color{ .r = 12, .g = 200, .b = 40 };
+    const a = types.Color{ .r = 255, .g = 0, .b = 0 };
+    const b = types.Color{ .r = 0, .g = 128, .b = 255 };
+    const c = types.Color{ .r = 12, .g = 200, .b = 40 };
     // Three opaque stops is the case that bypasses `rampRow` (which is only for
     // two) and lands in the general per-pixel loop, so both paths are covered.
-    const three: elmz.Stops = .{ .colors = .{ a, b, c, c }, .n = 3 };
-    const fills = [_]elmz.Fill{
+    const three: types.Stops = .{ .colors = .{ a, b, c, c }, .n = 3 };
+    const fills = [_]types.Fill{
         .{ .solid = a },
-        elmz.Fill.vgrad(a, b),
-        elmz.Fill.hgrad(a, b),
-        elmz.Fill.diag(a, b),
+        types.Fill.vgrad(a, b),
+        types.Fill.hgrad(a, b),
+        types.Fill.diag(a, b),
         .{ .linear = .{ .from = .{ 0, 0 }, .to = .{ 1, 1 }, .stops = three } },
-        .{ .radial = .{ .stops = elmz.Stops.two(a, b) } },
+        .{ .radial = .{ .stops = types.Stops.two(a, b) } },
     };
     for (fills) |f| {
         var cv = try testCanvas(std.testing.allocator, 16, 16);
@@ -3737,7 +3737,7 @@ test "coverage and glyphs composite alpha, so text is not a hole in the png" {
     // alpha 0, which `encodePng` writes out as a hole; and the two text paths
     // (real face, built-in face) did not even agree with each other.
     const gpa = std.testing.allocator;
-    const white = elmz.Color{ .r = 255, .g = 255, .b = 255 };
+    const white = types.Color{ .r = 255, .g = 255, .b = 255 };
 
     // Rounded rect: every pixel of it is coverage-blended, so this is the
     // whole-element case rather than an edge case.
@@ -3764,7 +3764,7 @@ test "coverage and glyphs composite alpha, so text is not a hole in the png" {
 
     // And the common case is untouched: over an opaque backdrop, 255 stays 255
     // even for a half-transparent source.
-    c.fillRect(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, .{ .solid = elmz.Color.rgbHex(0x102030) });
+    c.fillRect(.{ .x = 0, .y = 0, .w = 16, .h = 16 }, .{ .solid = types.Color.rgbHex(0x102030) });
     c.roundRect(.{ .x = 2, .y = 2, .w = 12, .h = 12 }, 4, .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 128 } }, null);
     try std.testing.expectEqual(@as(u8, 255), c.px[(8 * 16 + 8) * 4 + 3]);
 }
@@ -3774,9 +3774,9 @@ test "a radial fill is brightest at the centre and falls off outward" {
     var c = try testCanvas(gpa, 80, 80);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 255, .b = 0 });
-    c.fillRect(.{ .x = 0, .y = 0, .w = 80, .h = 80 }, elmz.Fill.radialFill(
-        elmz.Color.rgbHex(0xffffff),
-        elmz.Color.rgbHex(0x000000),
+    c.fillRect(.{ .x = 0, .y = 0, .w = 80, .h = 80 }, types.Fill.radialFill(
+        types.Color.rgbHex(0xffffff),
+        types.Color.rgbHex(0x000000),
     ));
     const centre = chanAt(c.px, c.w, 40, 40);
     const edge = chanAt(c.px, c.w, 0, 0);
@@ -3786,15 +3786,15 @@ test "a radial fill is brightest at the centre and falls off outward" {
 
 test "a gradient BORDER ramps around the outline and leaves the interior alone" {
     const gpa = std.testing.allocator;
-    const bg = elmz.Color.rgbHex(0x102030);
+    const bg = types.Color.rgbHex(0x102030);
     for ([_]f32{ 0, 14 }) |radius| {
         var c = try testCanvas(gpa, 60, 60);
         defer c.deinit();
         c.clear(bg);
-        c.roundRectClip(.{ .x = 10, .y = 10, .w = 40, .h = 40 }, radius, elmz.Fill.vgrad(
-            elmz.Color.rgbHex(0xff0000),
-            elmz.Color.rgbHex(0x0000ff),
-        ), 1, elmz.Rect.unbounded);
+        c.roundRectClip(.{ .x = 10, .y = 10, .w = 40, .h = 40 }, radius, types.Fill.vgrad(
+            types.Color.rgbHex(0xff0000),
+            types.Color.rgbHex(0x0000ff),
+        ), 1, types.Rect.unbounded);
         // top edge is the ramp's start, bottom edge its end
         const top = c.px[((10 * @as(usize, c.w)) + 30) * 4 ..][0..3];
         const bot = c.px[((49 * @as(usize, c.w)) + 30) * 4 ..][0..3];
@@ -3813,9 +3813,9 @@ test "text takes a gradient fill, not just a solid colour" {
     var c = try testCanvas(gpa, 240, 48);
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 0, .b = 0 });
-    c.drawText(2, 2, 30, elmz.Fill.hgrad(
-        elmz.Color.rgbHex(0xff0000),
-        elmz.Color.rgbHex(0x0000ff),
+    c.drawText(2, 2, 30, types.Fill.hgrad(
+        types.Color.rgbHex(0xff0000),
+        types.Color.rgbHex(0x0000ff),
     ), "MMMMMMMM");
 
     // Inked span, so the test follows the glyphs instead of assuming where
@@ -3940,7 +3940,7 @@ test "an SVG icon bakes once and the second draw reuses the raster" {
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 0, .b = 0 });
 
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
     const red = [3]u8{ 255, 0, 0 };
 
     try std.testing.expectEqual(@as(usize, 0), dst.icons.items.len);
@@ -3988,7 +3988,7 @@ test "an icon tinted a second colour gets its own raster" {
     var dst = try Canvas.initIo(gpa, 8, 8, std.testing.io);
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 0, .b = 0 });
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
 
     dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, .{ 255, 0, 0 }, clip);
     dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, .{ 0, 255, 0 }, clip);
@@ -4021,8 +4021,8 @@ test "a second identical icon call is served from cache, not re-read" {
     var dst = try Canvas.initIo(gpa, 8, 8, std.testing.io);
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 0, .b = 0 });
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
-    const rect = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const rect = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
 
     dst.blitSvg(rect, path, .{ 255, 0, 0 }, clip);
     try std.testing.expectEqual(@as(usize, 1), dst.icons.items.len);
@@ -4140,7 +4140,7 @@ test "an image paints its decoded pixels" {
     var dst = try Canvas.initIo(gpa, 8, 4, std.testing.io);
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 0, .b = 0 });
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
 
     dst.blitImage(.{ .x = 0, .y = 0, .w = 8, .h = 4 }, path, .fit, clip);
     try std.testing.expectEqual(@as(u32, 0), dst.image_failures);
@@ -4165,8 +4165,8 @@ test "an image is served from cache after its file is gone" {
     var dst = try Canvas.initIo(gpa, 8, 4, std.testing.io);
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 0, .b = 0 });
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
-    const rect = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
+    const rect = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 4 };
 
     dst.blitImage(rect, path, .fit, clip);
     try std.testing.expectEqual(@as(usize, 1), dst.images.items.len);
@@ -4219,7 +4219,7 @@ test "an unreadable icon path counts a failure and caches nothing" {
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 255, .b = 0 });
 
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
     dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, "/nonexistent/icon.svg", .{ 255, 0, 0 }, clip);
 
     // Invisible, not fatal: the canvas is exactly as it was, no entry exists,
@@ -4243,7 +4243,7 @@ test "a file that is not an SVG counts a failure and caches nothing" {
     defer dst.deinit();
     dst.clear(.{ .r = 0, .g = 255, .b = 0 });
 
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 };
     dst.blitSvg(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, path, .{ 255, 0, 0 }, clip);
 
     // THE EMPTY-EDGE CASE. Magnolia does not reject the text -- it parses it to
@@ -4347,7 +4347,7 @@ test "a blit composites by source alpha instead of stamping it" {
 
 test "a blitted pixel and a painted pixel of the same alpha agree" {
     const gpa = std.testing.allocator;
-    const half = elmz.Color{ .r = 0, .g = 0, .b = 0, .a = 128 };
+    const half = types.Color{ .r = 0, .g = 0, .b = 0, .a = 128 };
 
     // painted: the normal quad path
     var painted = try testCanvas(gpa, 1, 1);
@@ -4433,10 +4433,10 @@ test "the default bakes, and an explicit .sdf never touches the cache" {
     var c = try testCanvas(std.testing.allocator, 200, 160);
     defer c.deinit();
 
-    const rect = elmz.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
-    const color = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
-    c.clear(elmz.Color{ .r = 20, .g = 20, .b = 20, .a = 255 });
+    const rect = types.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const color = types.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
+    c.clear(types.Color{ .r = 20, .g = 20, .b = 20, .a = 255 });
 
     // A small blur used to be handed to the distance field, on the argument
     // that baking a mask would cost more than the ramp saved. It does not any
@@ -4463,7 +4463,7 @@ test "the default bakes, and an explicit .sdf never touches the cache" {
     // the count unchanged even if the baked path ran -- a cache hit is not
     // evidence about dispatch. A fresh shape is: if `.sdf` fell through to
     // baked, this draw would have to build stencil number three.
-    c.halo(elmz.Rect{ .x = 20, .y = 20, .w = 60, .h = 40 }, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .sdf }, clip);
+    c.halo(types.Rect{ .x = 20, .y = 20, .w = 60, .h = 40 }, 8, .{ .color = color, .blur = 24, .mode = .glow, .quality = .sdf }, clip);
     try std.testing.expectEqual(@as(usize, 2), c.masks.items.len);
     try std.testing.expectEqual(@as(usize, 2), c.bakes);
 }
@@ -4488,10 +4488,10 @@ test "a shadow falls on the side away from its light, on both axes" {
     inline for (lights, 0..) |deg, k| {
         var c = try testCanvas(std.testing.allocator, 220, 220);
         defer c.deinit();
-        c.clear(elmz.Color{ .r = 244, .g = 244, .b = 248, .a = 255 });
-        const card = elmz.Rect{ .x = 80, .y = 80, .w = 60, .h = 60 };
-        const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 220 };
-        c.halo(card, 8, elmz.Halo.shadow(.{ .r = 12, .g = 10, .b = 20, .a = 255 }, deg, 10), clip);
+        c.clear(types.Color{ .r = 244, .g = 244, .b = 248, .a = 255 });
+        const card = types.Rect{ .x = 80, .y = 80, .w = 60, .h = 60 };
+        const clip = types.Rect{ .x = 0, .y = 0, .w = 220, .h = 220 };
+        c.halo(card, 8, types.Halo.shadow(.{ .r = 12, .g = 10, .b = 20, .a = 255 }, deg, 10), clip);
         const above = darknessIn(&c, 90, 130, 50, 79, 220);
         const below = darknessIn(&c, 90, 130, 141, 170, 220);
         const left = darknessIn(&c, 50, 79, 90, 130, 220);
@@ -4514,9 +4514,9 @@ test "a light widens the ramp on the side it throws the shadow toward" {
     inline for (lights, 0..) |deg, k| {
         var c = try testCanvas(std.testing.allocator, 220, 220);
         defer c.deinit();
-        c.clear(elmz.Color{ .r = 244, .g = 244, .b = 248, .a = 255 });
-        const card = elmz.Rect{ .x = 80, .y = 80, .w = 60, .h = 60 };
-        const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 220 };
+        c.clear(types.Color{ .r = 244, .g = 244, .b = 248, .a = 255 });
+        const card = types.Rect{ .x = 80, .y = 80, .w = 60, .h = 60 };
+        const clip = types.Rect{ .x = 0, .y = 0, .w = 220, .h = 220 };
         c.halo(card, 8, .{
             .color = .{ .r = 12, .g = 10, .b = 20, .a = 255 },
             .blur = 18,
@@ -4545,11 +4545,11 @@ test "the baked stencil matches the distance field across a sliced glow" {
     defer a.deinit();
     var b = try testCanvas(std.testing.allocator, 220, 160);
     defer b.deinit();
-    a.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
-    b.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
-    const rect = elmz.Rect{ .x = 60, .y = 50, .w = 100, .h = 60 };
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 160 };
-    const col = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
+    a.clear(types.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    b.clear(types.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    const rect = types.Rect{ .x = 60, .y = 50, .w = 100, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 220, .h = 160 };
+    const col = types.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
     a.halo(rect, 8, .{ .color = col, .blur = 24, .mode = .glow, .quality = .sdf }, clip);
     b.halo(rect, 8, .{ .color = col, .blur = 24, .mode = .glow, .quality = .baked }, clip);
 
@@ -4576,12 +4576,12 @@ test "a baked outer rim does not light its own face" {
     defer a.deinit();
     var b = try testCanvas(std.testing.allocator, 200, 140);
     defer b.deinit();
-    const bg = elmz.Color{ .r = 20, .g = 20, .b = 26, .a = 255 };
+    const bg = types.Color{ .r = 20, .g = 20, .b = 26, .a = 255 };
     a.clear(bg);
     b.clear(bg);
-    const rect = elmz.Rect{ .x = 50, .y = 40, .w = 100, .h = 60 };
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 140 };
-    const col = elmz.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
+    const rect = types.Rect{ .x = 50, .y = 40, .w = 100, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 140 };
+    const col = types.Color{ .r = 255, .g = 200, .b = 0, .a = 220 };
     a.halo(rect, 8, .{ .color = col, .blur = 20, .mode = .outer_glow, .quality = .sdf }, clip);
     b.halo(rect, 8, .{ .color = col, .blur = 20, .mode = .outer_glow, .quality = .baked }, clip);
     try std.testing.expectEqual(@as(i32, 0), b.masks.items[0].sw);
@@ -4609,12 +4609,12 @@ test "an offset outer glow takes the field path at both qualities" {
     defer a.deinit();
     var b = try testCanvas(std.testing.allocator, 200, 160);
     defer b.deinit();
-    a.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
-    b.clear(elmz.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    a.clear(types.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
+    b.clear(types.Color{ .r = 24, .g = 24, .b = 30, .a = 255 });
 
-    const rect = elmz.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
-    const base = elmz.Halo{
+    const rect = types.Rect{ .x = 60, .y = 50, .w = 80, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const base = types.Halo{
         .color = .{ .r = 255, .g = 200, .b = 0, .a = 220 },
         .blur = 20,
         .spread = 2,
@@ -4637,10 +4637,10 @@ test "an offset outer glow takes the field path at both qualities" {
     try std.testing.expect(worst <= 2);
 }
 test "a baked inner rim agrees with the field path, boundary rows included" {
-    const bg = elmz.Color{ .r = 38, .g = 40, .b = 52, .a = 255 };
-    const col = elmz.Color{ .r = 205, .g = 214, .b = 244, .a = 48 };
-    const rect = elmz.Rect{ .x = 20, .y = 30, .w = 124, .h = 32 };
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const bg = types.Color{ .r = 38, .g = 40, .b = 52, .a = 255 };
+    const col = types.Color{ .r = 205, .g = 214, .b = 244, .a = 48 };
+    const rect = types.Rect{ .x = 20, .y = 30, .w = 124, .h = 32 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 100 };
     const W = 200;
     var field = try testCanvas(std.testing.allocator, W, 100);
     defer field.deinit();
@@ -4689,18 +4689,18 @@ test "a baked inner rim agrees with the field path, boundary rows included" {
 }
 
 test "an inner rim is baked once and reused, mode included in the key" {
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 300, .h = 160 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 300, .h = 160 };
     var c = try testCanvas(std.testing.allocator, 300, 160);
     defer c.deinit();
-    c.clear(elmz.Color{ .r = 38, .g = 40, .b = 52, .a = 255 });
-    const h = elmz.Halo{
-        .color = elmz.Color{ .r = 205, .g = 214, .b = 244, .a = 48 },
+    c.clear(types.Color{ .r = 38, .g = 40, .b = 52, .a = 255 });
+    const h = types.Halo{
+        .color = types.Color{ .r = 205, .g = 214, .b = 244, .a = 48 },
         .blur = 20,
         .spread = 2,
         .mode = .inner_glow,
         .quality = .baked,
     };
-    const r = elmz.Rect{ .x = 20, .y = 20, .w = 124, .h = 32 };
+    const r = types.Rect{ .x = 20, .y = 20, .w = 124, .h = 32 };
     c.halo(r, 8, h, clip);
     try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
     const first = c.bakes;
@@ -4714,15 +4714,15 @@ test "an inner rim is baked once and reused, mode included in the key" {
     c.halo(r, 8, h, clip);
     try std.testing.expectEqual(first, c.bakes);
     try std.testing.expectEqual(@as(usize, 1), c.masks.items.len);
-    try std.testing.expectEqual(elmz.Halo.Mode.inner_glow, c.masks.items[0].mode);
+    try std.testing.expectEqual(types.Halo.Mode.inner_glow, c.masks.items[0].mode);
 }
 
 test "an inner rim's template follows its aspect bucket, not the bare minimum" {
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 320, .h = 300 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 320, .h = 300 };
     var c = try testCanvas(std.testing.allocator, 320, 300);
     defer c.deinit();
-    c.clear(elmz.Color{ .r = 38, .g = 40, .b = 52, .a = 255 });
-    const h = elmz.Halo{ .color = elmz.Color{ .r = 205, .g = 214, .b = 244, .a = 48 }, .blur = 20, .spread = 2, .mode = .inner_glow, .quality = .baked };
+    c.clear(types.Color{ .r = 38, .g = 40, .b = 52, .a = 255 });
+    const h = types.Halo{ .color = types.Color{ .r = 205, .g = 214, .b = 244, .a = 48 }, .blur = 20, .spread = 2, .mode = .inner_glow, .quality = .baked };
 
     // 124x32 rounds to aspect 4, so the template is 128 wide. 130x32 lands in the
     // same bucket and must reuse it -- width does not enter the key beyond this.
@@ -4741,9 +4741,9 @@ test "an inner rim's template follows its aspect bucket, not the bare minimum" {
 test "nine slices: differently sized silhouettes share a single stencil" {
     var c = try testCanvas(std.testing.allocator, 700, 320);
     defer c.deinit();
-    c.clear(elmz.Color{ .r = 18, .g = 18, .b = 22, .a = 255 });
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 700, .h = 320 };
-    const color = elmz.Color{ .r = 120, .g = 200, .b = 255, .a = 200 };
+    c.clear(types.Color{ .r = 18, .g = 18, .b = 22, .a = 255 });
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 700, .h = 320 };
+    const color = types.Color{ .r = 120, .g = 200, .b = 255, .a = 200 };
 
     // Three widths, one radius and blur. Before slicing these were three
     // stencils, and a view with a hundred glowing rows baked all hundred --
@@ -4776,14 +4776,14 @@ test "a stretched stencil still agrees with the distance field when large" {
     defer a.deinit();
     var b = try testCanvas(std.testing.allocator, 520, 300);
     defer b.deinit();
-    a.clear(elmz.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
-    b.clear(elmz.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
+    a.clear(types.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
+    b.clear(types.Color{ .r = 22, .g = 22, .b = 28, .a = 255 });
 
     // Long edges, so the middle of each edge is stretched far past the baked
     // corner -- the part of a 9-slice that is actually an approximation.
-    const rect = elmz.Rect{ .x = 60, .y = 90, .w = 380, .h = 110 };
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 520, .h = 300 };
-    const h = elmz.Halo{
+    const rect = types.Rect{ .x = 60, .y = 90, .w = 380, .h = 110 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 520, .h = 300 };
+    const h = types.Halo{
         .color = .{ .r = 255, .g = 190, .b = 90, .a = 210 },
         .blur = 30,
         .spread = 3,
@@ -4838,9 +4838,9 @@ test "the stencil and the distance field put the ramp in the same place" {
             }
             return -1;
         }
-        fn edges(w: f32, h: f32, spread: f32, q: elmz.Halo.Quality) ![4]f32 {
-            const clip = elmz.Rect{ .x = 0, .y = 0, .w = 260, .h = 200 };
-            const rect = elmz.Rect{ .x = 40, .y = 40, .w = w, .h = h };
+        fn edges(w: f32, h: f32, spread: f32, q: types.Halo.Quality) ![4]f32 {
+            const clip = types.Rect{ .x = 0, .y = 0, .w = 260, .h = 200 };
+            const rect = types.Rect{ .x = 40, .y = 40, .w = w, .h = h };
             var c = try testCanvas(gpa, 260, 200);
             defer c.deinit();
             const r = c.renderer();
@@ -4885,8 +4885,8 @@ test "the stencil and the distance field put the ramp in the same place" {
 
 test "a wide inner glow keeps the corners it is attached to" {
     const gpa = std.testing.allocator;
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
-    const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const rect = types.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
 
     // (42,70) is a pixel inside the left edge at mid-height; (44,44) is 4px in
     // from the top-left corner on the diagonal. A rim light has to be bright at
@@ -4919,8 +4919,8 @@ test "a wide inner glow keeps the corners it is attached to" {
 
 test "an outer rim is feathered where it meets the element" {
     const gpa = std.testing.allocator;
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
-    const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const rect = types.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
 
     var c = try testCanvas(gpa, 200, 160);
     defer c.deinit();
@@ -4946,8 +4946,8 @@ test "an outer rim is feathered where it meets the element" {
 
 test "an inner glow drops fast off the edge and then converges" {
     const gpa = std.testing.allocator;
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
-    const rect = elmz.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 160 };
+    const rect = types.Rect{ .x = 40, .y = 40, .w = 80, .h = 60 };
 
     inline for (.{ .sdf, .baked }) |q| {
         var c = try testCanvas(gpa, 200, 160);
@@ -4994,12 +4994,12 @@ test "a cast shadow fills the strip under its element and never tints the face" 
     var c = try testCanvas(gpa, 220, 180);
     defer c.deinit();
     const r = c.renderer();
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 180 };
-    const bg = elmz.Color{ .r = 30, .g = 30, .b = 46, .a = 255 };
-    const panel = elmz.Color{ .r = 49, .g = 50, .b = 68, .a = 255 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 220, .h = 180 };
+    const bg = types.Color{ .r = 30, .g = 30, .b = 46, .a = 255 };
+    const panel = types.Color{ .r = 49, .g = 50, .b = 68, .a = 255 };
     r.quad(clip, .{ .solid = bg }, clip);
 
-    const rect = elmz.Rect{ .x = 60, .y = 40, .w = 100, .h = 70 };
+    const rect = types.Rect{ .x = 60, .y = 40, .w = 100, .h = 70 };
     r.quad(rect, .{ .solid = panel }, clip);
     r.halo(rect, 0, .{
         .color = .{ .r = 0, .g = 0, .b = 0, .a = 200 },
@@ -5034,7 +5034,7 @@ test "a frost blurs what is behind it and leaves everything else alone" {
     var c = try testCanvas(gpa, 200, 140);
     defer c.deinit();
     const r = c.renderer();
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 200, .h = 140 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 200, .h = 140 };
 
     // Hard 3px black/white stripes: a blur that does nothing is obvious, and a
     // blur that samples outside its rect darkens the edges as well.
@@ -5071,15 +5071,15 @@ test "a light source throws the ramp further on the away side" {
     // the silhouette but leaves the falloff identical on every edge, which reads as
     // a copy rather than as cast light.
     const gpa = std.testing.allocator;
-    const rect = elmz.Rect{ .x = 60, .y = 40, .w = 100, .h = 70 };
+    const rect = types.Rect{ .x = 60, .y = 40, .w = 100, .h = 70 };
 
     const Case = struct {
         fn bands(light: ?f32, above: *usize, below: *usize) !void {
             var c = try testCanvas(gpa, 220, 180);
             defer c.deinit();
             const r = c.renderer();
-            const clip = elmz.Rect{ .x = 0, .y = 0, .w = 220, .h = 180 };
-            const bg = elmz.Color{ .r = 30, .g = 30, .b = 46, .a = 255 };
+            const clip = types.Rect{ .x = 0, .y = 0, .w = 220, .h = 180 };
+            const bg = types.Color{ .r = 30, .g = 30, .b = 46, .a = 255 };
             r.quad(clip, .{ .solid = bg }, clip);
             r.quad(rect, .{ .solid = .{ .r = 49, .g = 50, .b = 68, .a = 255 } }, clip);
             r.halo(rect, 0, .{
@@ -5130,12 +5130,12 @@ test "a frame painted with opaque colours exports an opaque alpha channel" {
     // opaque path writes it, so a frame made only of opaque fills exports as
     // nothing at all.
     const gpa = std.testing.allocator;
-    const clip = elmz.Rect{ .x = 0, .y = 0, .w = 32, .h = 24 };
+    const clip = types.Rect{ .x = 0, .y = 0, .w = 32, .h = 24 };
     var c = try testCanvas(gpa, 32, 24);
     defer c.deinit();
     const r = c.renderer();
 
-    r.quad(clip, .{ .solid = elmz.Color.rgbHex(0x1e1e2e) }, clip);
+    r.quad(clip, .{ .solid = types.Color.rgbHex(0x1e1e2e) }, clip);
     // Both opaque paths: the row fill above, a per-pixel blend here.
     r.halo(.{ .x = 8, .y = 6, .w = 12, .h = 10 }, 3, .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 255 }, .blur = 2, .mode = .glow }, clip);
 
@@ -5204,7 +5204,7 @@ test "coverage blends in light, not in encoded bytes" {
     var c = try testCanvas(std.testing.allocator, 4, 4);
     defer c.deinit();
     @memset(c.px, 0);
-    const white = elmz.Color{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    const white = types.Color{ .r = 255, .g = 255, .b = 255, .a = 255 };
     c.blendCoverage(1, 1, white, 0.5);
     const i = (1 * 4 + 1) * 4;
     try std.testing.expectApproxEqAbs(@as(f32, 188), @as(f32, @floatFromInt(c.px[i])), 2);
@@ -5212,14 +5212,14 @@ test "coverage blends in light, not in encoded bytes" {
     // Black over white is the same arithmetic by symmetry, and that is the
     // check that this is a transfer fix rather than a brightness nudge.
     @memset(c.px, 255);
-    const black = elmz.Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    const black = types.Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
     c.blendCoverage(1, 1, black, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 188), @as(f32, @floatFromInt(c.px[i])), 2);
 
     // Full coverage must still be an exact identity -- no colour drift on the
     // interior of a glyph, where most of the pixels are.
     @memset(c.px, 0);
-    const teal = elmz.Color{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 255 };
+    const teal = types.Color{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 255 };
     c.blendCoverage(1, 1, teal, 1.0);
     try std.testing.expectEqual(@as(u8, 0x89), c.px[i]);
     try std.testing.expectEqual(@as(u8, 0xb4), c.px[i + 1]);
@@ -5229,8 +5229,8 @@ test "coverage blends in light, not in encoded bytes" {
 test "a painted frame exports opaque pixels through the PNG encoder" {
     var c = try testCanvas(testing.allocator, 12, 6);
     defer c.deinit();
-    const base = elmz.Color{ .r = 30, .g = 40, .b = 50, .a = 255 };
-    const over = elmz.Color{ .r = 200, .g = 120, .b = 60, .a = 255 };
+    const base = types.Color{ .r = 30, .g = 40, .b = 50, .a = 255 };
+    const over = types.Color{ .r = 200, .g = 120, .b = 60, .a = 255 };
     c.fillRect(.{ .x = 0, .y = 0, .w = 12, .h = 6 }, .{ .solid = base });
     // A second opaque quad through the blending path, so both routes are covered.
     c.fillRect(.{ .x = 4, .y = 2, .w = 4, .h = 2 }, .{ .solid = over });
@@ -5351,9 +5351,9 @@ test "the same text drawn twice comes out of the glyph cache" {
     const any = withFace(&c) orelse return;
     defer gpa.free(any);
 
-    const black: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
-    const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
-    const fill: elmz.Fill = .{ .solid = white };
+    const black: types.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    const white: types.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    const fill: types.Fill = .{ .solid = white };
     const msg = "Hamburgefonstiv"; // every glyph carries ink, so none is skipped
 
     c.clear(black);
@@ -5383,8 +5383,8 @@ test "a face with no cache storage measures but paints nothing" {
     var c = try Canvas.init(gpa, 80, 30);
     defer c.deinit();
 
-    const black: elmz.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
-    const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    const black: types.Color = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    const white: types.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
 
     const any = testing_font.anySystemFont(gpa, std.testing.io) orelse return;
     defer gpa.free(any);
@@ -5414,7 +5414,7 @@ test "a canvas with no face still paints text, because the band is text too" {
     try testing.expect(!c.font.available());
     try testing.expectEqual(@as(usize, 0), inkPixels(c.px));
 
-    const white: elmz.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    const white: types.Color = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
     c.drawText(2, 2, 12, .{ .solid = white }, "font is missing");
     try testing.expect(inkPixels(c.px) > 60);
 }
@@ -5548,7 +5548,7 @@ fn pxAt(c: *const Canvas, x: u32, y: u32) u8 {
     return c.px[(y * c.w + x) * 4];
 }
 
-const RED: elmz.Fill = .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 255 } };
+const RED: types.Fill = .{ .solid = .{ .r = 255, .g = 0, .b = 0, .a = 255 } };
 
 test "a path fills its interior and nothing past its edges" {
     const gpa = std.testing.allocator;
@@ -5556,9 +5556,9 @@ test "a path fills its interior and nothing past its edges" {
     defer c.deinit();
     c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
 
-    const ops = [_]elmz.PathOp{ .move, .line, .line, .close };
+    const ops = [_]types.PathOp{ .move, .line, .line, .close };
     const pts = [_][2]f32{ .{ 2, 2 }, .{ 18, 2 }, .{ 2, 18 }, .{ 2, 2 } };
-    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts }, RED, elmz.Rect.unbounded);
+    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts }, RED, types.Rect.unbounded);
 
     try std.testing.expect(pxAt(&c, 4, 4) > 200); // inside
     try std.testing.expect(pxAt(&c, 18, 18) == 0); // beyond the hypotenuse
@@ -5567,7 +5567,7 @@ test "a path fills its interior and nothing past its edges" {
 
 test "even-odd punches the hole that non-zero fills in" {
     const gpa = std.testing.allocator;
-    const ops = [_]elmz.PathOp{
+    const ops = [_]types.PathOp{
         .move, .line, .line, .line, .close,
         .move, .line, .line, .line, .close,
     };
@@ -5582,13 +5582,13 @@ test "even-odd punches the hole that non-zero fills in" {
     var solid = try testCanvas(gpa, 20, 20);
     defer solid.deinit();
     solid.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
-    solid.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .nonzero }, RED, elmz.Rect.unbounded);
+    solid.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .nonzero }, RED, types.Rect.unbounded);
     try std.testing.expect(pxAt(&solid, 10, 10) > 200);
 
     var holed = try testCanvas(gpa, 20, 20);
     defer holed.deinit();
     holed.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
-    holed.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .evenodd }, RED, elmz.Rect.unbounded);
+    holed.pathClip(0, 0, .{ .ops = &ops, .points = &pts, .rule = .evenodd }, RED, types.Rect.unbounded);
     try std.testing.expect(pxAt(&holed, 10, 10) == 0); // the hole
     try std.testing.expect(pxAt(&holed, 4, 10) > 200); // the ring around it
 }
@@ -5602,9 +5602,9 @@ test "a curved path bulges past the chord its controls imply" {
     // A quad from (2,18) through control (10,2) to (18,18) reaches its apex at
     // y = 10, well ABOVE the straight chord at y = 18. A backend that treated
     // the control point as a corner would fill almost nothing here.
-    const ops = [_]elmz.PathOp{ .move, .quad, .close };
+    const ops = [_]types.PathOp{ .move, .quad, .close };
     const pts = [_][2]f32{ .{ 2, 18 }, .{ 10, 2 }, .{ 18, 18 } };
-    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts }, RED, elmz.Rect.unbounded);
+    c.pathClip(0, 0, .{ .ops = &ops, .points = &pts }, RED, types.Rect.unbounded);
 
     try std.testing.expect(pxAt(&c, 10, 12) > 200); // under the apex: inside
     try std.testing.expect(pxAt(&c, 10, 5) == 0); // above the apex: outside
@@ -5625,10 +5625,10 @@ test "a non-finite rect paints nothing, not the whole clip" {
     // and the clamp below it happens AFTER the conversion, so it cannot save it.
     var c = try testCanvas(std.testing.allocator, 16, 16);
     defer c.deinit();
-    const red = elmz.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
+    const red = types.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
     const nan = std.math.nan(f32);
     const inf = std.math.inf(f32);
-    const bad = [_]elmz.Rect{
+    const bad = [_]types.Rect{
         .{ .x = nan, .y = nan, .w = 4, .h = 4 },
         .{ .x = 4, .y = 4, .w = nan, .h = nan },
         .{ .x = nan, .y = 4, .w = 4, .h = 4 },
@@ -5735,8 +5735,8 @@ test "two weights of a variable face differ through the seam" {
     const probe = @import("cedar.zig").Font.init(bytes);
     if (probe.axisCount() == 0) return error.SkipZigTest;
 
-    const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
-    const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const ink: types.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: types.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     var cb: [32]f32 = undefined;
     c.setFontAt(bytes, 0, wghtCoords(probe, 300, &cb));
@@ -5839,8 +5839,8 @@ test "a style weight reaches the pixels, not just the struct" {
     const r = c.renderer();
     c.setFont(bytes);
 
-    const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
-    const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const ink: types.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: types.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     @memset(c.px, 0);
     r.setFace(0);
@@ -5881,8 +5881,8 @@ test "the sticky face honours setFaceWeight, not just setFontAt" {
     if (Canvas.wghtAxis(probe) == null) return error.SkipZigTest;
 
     c.setFontAt(bytes, 0, &.{});
-    const ink: elmz.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
-    const area: elmz.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const ink: types.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: types.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     r.setFace(0);
     r.setWeight(100);
@@ -5933,7 +5933,7 @@ test "a stroked glyph is hollow, and its fill is not" {
         .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } },
         "O",
         1,
-        elmz.Rect.unbounded,
+        types.Rect.unbounded,
         &scratch,
     );
     if (!drew) return; // no field cache attached, or a glyph the face cannot answer

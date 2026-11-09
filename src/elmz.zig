@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 /// Geometry, paint and primitives live below both this file and `software`,
 /// which rasterises them. Re-exported so `elmz.Rect` keeps meaning what it
 /// always meant.
-pub const types = @import("types.zig");
+pub const types = @import("types");
 pub const Color = types.Color;
 pub const Size = types.Size;
 pub const Stops = types.Stops;

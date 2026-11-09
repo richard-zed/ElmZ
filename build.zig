@@ -73,11 +73,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // The types module sits below everything: geometry, paint, primitives.
+    // `software` rasterises them and `elmz` produces them, so neither may own
+    // them -- owning them in `elmz` is what forced the renderer to import the
+    // runtime upward.
+    const types_mod = b.addModule("types", .{
+        .root_source_file = b.path("src/types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const elmz_mod = b.addModule("elmz", .{
         .root_source_file = b.path("src/elmz.zig"),
         .target = target,
         .optimize = optimize,
     });
+    elmz_mod.addImport("types", types_mod);
 
     // Cedar, the font backend, comes from its own package. Pinned by commit
     // and hash in build.zig.zon, so a clone builds the same code this tree was
@@ -97,7 +108,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/software.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "elmz", .module = elmz_mod }},
+        .imports = &.{
+            .{ .name = "elmz", .module = elmz_mod },
+            .{ .name = "types", .module = types_mod },
+        },
         .link_libc = true,
     });
     // No C in the font path any more: Cedar is Zig, so nothing is compiled
@@ -473,13 +487,11 @@ pub fn build(b: *std.Build) void {
     // ---------------------------------------------------------------------
     // tests: elmz core + the runner loop (fake window, no display needed)
     // ---------------------------------------------------------------------
-    const core_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/elmz.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
+    // Uses the REGISTERED module, not a fresh anonymous one. A fresh root at
+    // src/elmz.zig gives that file a second identity: it reaches types.zig by
+    // path import while software reaches it as a module, and Zig rejects a file
+    // belonging to two modules.
+    const core_tests = b.addTest(.{ .root_module = elmz_mod });
     const runner_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/runner.zig"),
