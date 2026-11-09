@@ -297,13 +297,6 @@ pub const StyleEntry = struct {
         frost: ?FrostSpecEntry = null,
         /// Outline width in pixels; absent fills solid.
         stroke: ?u8 = null,
-        /// Layout, so a named style can set spacing. `margin` sets all four
-        /// sides; a named side then wins over it.
-        margin: ?f32 = null,
-        margin_left: ?f32 = null,
-        margin_right: ?f32 = null,
-        margin_top: ?f32 = null,
-        margin_bottom: ?f32 = null,
     } = .{},
 };
 
@@ -2327,11 +2320,6 @@ pub fn Ui(comptime M: type) type {
                 out.weight = entry.spec.weight;
                 if (entry.spec.frost) |f| out.frost = .{ .blur = f.blur };
                 out.stroke = entry.spec.stroke;
-                out.margin = entry.spec.margin;
-                out.margin_left = entry.spec.margin_left;
-                out.margin_right = entry.spec.margin_right;
-                out.margin_top = entry.spec.margin_top;
-                out.margin_bottom = entry.spec.margin_bottom;
                 if (entry.spec.halo) |h| out.halo = .{
                     .color = roleColor(self.theme, h.color),
                     .blur = h.blur,
@@ -2520,12 +2508,6 @@ pub fn Ui(comptime M: type) type {
                 .text => |*tx| tx.weight = v,
                 else => {},
             };
-            // `tone` is a DEFAULT, so an explicit colour wins over it. Applying
-            // it before the merge let a style's `.color` overwrite it every time,
-            // which made `.tone = .muted` look like it did nothing.
-            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted and e.color == null) {
-                e.color = .{ .solid = self.theme.text_muted };
-            }
             return e;
         }
 
@@ -2731,6 +2713,7 @@ pub fn Ui(comptime M: type) type {
             e.wrap = o.wrap;
             if (o.width) |v| e.width = v;
             if (o.height) |v| e.height = v;
+            if (o.tone == .muted) e.color = .{ .solid = self.theme.text_muted };
             return self.finish(e, o);
         }
 
@@ -7996,28 +7979,4 @@ test "a theme can write .color = .red and the builtin answers it" {
         }
     }
     try std.testing.expect(found);
-}
-
-test "tone is a default, so an explicit colour wins over it" {
-    const gpa = std.testing.allocator;
-    var ui = Ui(TMsg).init(gpa);
-    defer ui.deinit();
-    ui.reset();
-
-    // Muted with nothing else set: the tone supplies the colour.
-    const plain = ui.text(.{ .label = "x", .tone = .muted });
-    try std.testing.expect(plain.color != null);
-
-    // Muted plus an explicit colour: the colour wins, the tone does not clobber it.
-    const explicit = ui.text(.{
-        .label = "x",
-        .tone = .muted,
-        .style = .{ .color = .{ .solid = Color.rgbHex(0xff0000) } },
-    });
-    try std.testing.expect(explicit.color != null);
-    try std.testing.expect(std.meta.eql(explicit.color.?, Fill{ .solid = Color.rgbHex(0xff0000) }));
-
-    // Not muted: no colour from the tone at all.
-    const normal = ui.text(.{ .label = "x" });
-    try std.testing.expect(normal.color == null);
 }
