@@ -471,6 +471,13 @@ pub const StyleSpec = struct {
     /// Outline width in pixels. Absent draws the fill solid; a value draws the
     /// fill as an outline of that width, leaving the interior hollow.
     stroke: ?u8 = null,
+    /// Layout, carried so a named style can set spacing. `margin` sets all
+    /// four sides; a named side then wins over it.
+    margin: ?f32 = null,
+    margin_left: ?f32 = null,
+    margin_right: ?f32 = null,
+    margin_top: ?f32 = null,
+    margin_bottom: ?f32 = null,
 };
 
 /// Blur of what is behind an element, in the theme file.
@@ -932,6 +939,11 @@ pub fn styleView(styles: StylesSpec, out: *std.ArrayListUnmanaged(elmz.StyleEntr
                 } else null,
                 .frost = if (e.spec.frost) |f| .{ .blur = f.blur } else null,
                 .stroke = e.spec.stroke,
+                .margin = e.spec.margin,
+                .margin_left = e.spec.margin_left,
+                .margin_right = e.spec.margin_right,
+                .margin_top = e.spec.margin_top,
+                .margin_bottom = e.spec.margin_bottom,
             },
         });
     }
@@ -1531,7 +1543,30 @@ const Walker = struct {
             };
             return;
         }
-        self.skipValue();
+        if (std.mem.eql(u8, key, "margin")) {
+            entry.margin = try self.readNumber("style .margin");
+            return;
+        }
+        if (std.mem.eql(u8, key, "margin_left")) {
+            entry.margin_left = try self.readNumber("style .margin_left");
+            return;
+        }
+        if (std.mem.eql(u8, key, "margin_right")) {
+            entry.margin_right = try self.readNumber("style .margin_right");
+            return;
+        }
+        if (std.mem.eql(u8, key, "margin_top")) {
+            entry.margin_top = try self.readNumber("style .margin_top");
+            return;
+        }
+        if (std.mem.eql(u8, key, "margin_bottom")) {
+            entry.margin_bottom = try self.readNumber("style .margin_bottom");
+            return;
+        }
+        // Unknown keys are an error, not a skip. A typo used to load clean and
+        // render wrong, which reads as "the theme is not working".
+        self.diag.set("unknown style key .{s}", .{key});
+        return error.Palette;
     }
 
     /// `.{ .blur = 12 }` -- a frost has one field.
