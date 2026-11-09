@@ -41,7 +41,7 @@ pub fn SliderOpts(comptime M: type) type {
 
 /// A value control: track, filled portion and knob, composed from rects because none of the
 /// three is a primitive worth adding.
-pub fn TextInputOpts(comptime M: type) type {
+pub fn InputOpts(comptime M: type) type {
     return struct {
         key: u64,
         edit: *elmz.TextEdit,
@@ -57,7 +57,7 @@ pub fn TextInputOpts(comptime M: type) type {
     };
 }
 
-pub fn textInput(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
+pub fn input(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     // The mask is built HERE and handed to the payload, so measure and paint
     // are given the same bytes. Building it in paint would mean the caret was
     // placed against the value and drawn against the mask, which is exactly
@@ -96,7 +96,7 @@ pub fn textInput(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
     // The click itself dispatches through the ordinary press path, so the
     // caret move and the message cannot come from two different places.
     e.on_press = o.msg;
-    e.widget = ui.payload(.{ .text_input = .{
+    e.widget = ui.payload(.{ .input = .{
         .edit = o.edit,
         .display = display,
         .size = o.size,
@@ -104,6 +104,11 @@ pub fn textInput(ui: anytype, o: anytype) *@TypeOf(ui.*).Elem {
         .placeholder = o.placeholder,
         .pad = pad,
         .msg = o.msg,
+        // A field with a fixed height overflows by construction, so it takes
+        // the same per-path scroll slot the containers use. Without this the
+        // element is granted no scroll key at all and the wheel writes into a
+        // slot nothing reads -- no bar, no movement, no error.
+        .scrolls = o.height != null,
     } });
     return e;
 }

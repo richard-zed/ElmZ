@@ -1246,7 +1246,7 @@ pub fn Widget(comptime M: type) type {
             msg: M,
         },
         /// A text field.
-        text_input: struct {
+        input: struct {
             edit: *reducer.TextEdit,
             /// What is DRAWN and MEASURED.
             display: []const u8,
@@ -1258,19 +1258,31 @@ pub fn Widget(comptime M: type) type {
             pad: f32 = 6,
             /// Emitted when the runtime moves the caret (a click).
             msg: ?M = null,
+            /// Whether this field scrolls its own contents. Set by the builder
+            /// for a box whose content can exceed it; layout then gives the
+            /// element a scroll key so the ordinary implicit-scroll machinery
+            /// -- wheel region, thumbs, bar -- applies with no extra code.
+            scrolls: bool = false,
         },
     };
 }
 
 /// Draw a text field's CONTENT: the placeholder, the value, the caret.
-fn paintTextInput(
+fn paintInput(
     r: Renderer,
     th: Theme,
     ti: anytype,
     rect: Rect,
-    clip: Rect,
     focused: bool,
     hov: Hover,
+    /// Already clamped by the caller against the content height it measured.
+    /// A field that does not scroll is handed 0.
+    scroll_off: f32,
+    /// The field's own interior, already intersected with the inherited clip.
+    /// Text and caret are confined to THIS, not to the parent's clip: a field
+    /// with a fixed height overflows by construction, and drawing past its own
+    /// box is the leak this replaces.
+    vp: Rect,
 ) void {
     const pad = ti.pad;
     const ix = rect.x + pad;
@@ -1314,12 +1326,17 @@ fn paintTextInput(
         }
     }
 
+    // Scrolled by the SHARED offset, not a field-local one: the wheel, the bar
+    // and the clamp all belong to the runtime's per-path slot, so a second
+    // offset here would drift from the bar that is drawn beside it.
+    const oy = iy - scroll_off;
+
     if (shown.len == 0) {
-        if (ti.placeholder.len > 0) r.text(ix, iy, size, .{ .solid = th.text_muted }, ti.placeholder, clip);
+        if (ti.placeholder.len > 0) r.text(ix, oy, size, .{ .solid = th.text_muted }, ti.placeholder, vp);
     } else {
         for (lines, 0..) |ln, i| {
             if (ln.len == 0) continue;
-            r.text(ix, iy + @as(f32, @floatFromInt(i)) * ts.line_height, size, .{ .solid = th.text }, ln, clip);
+            r.text(ix, oy + @as(f32, @floatFromInt(i)) * ts.line_height, size, .{ .solid = th.text }, ln, vp);
         }
     }
 
@@ -1331,8 +1348,18 @@ fn paintTextInput(
     const line_txt = if (lines.len > 0) lines[@min(cline, lines.len - 1)] else shown[0..0];
     const pre = line_txt[0..@min(coff, line_txt.len)];
     const cx = ix + r.advanceText(pre, size, pre.len);
-    const cy = iy + @as(f32, @floatFromInt(cline)) * ts.line_height;
-    r.quad(.{ .x = cx, .y = cy, .w = 1, .h = @max(1, ts.line_height - 2) }, .{ .solid = th.text }, clip);
+    const cy = oy + @as(f32, @floatFromInt(cline)) * ts.line_height;
+    r.quad(.{ .x = cx, .y = cy, .w = 1, .h = @max(1, ts.line_height - 2) }, .{ .solid = th.text }, vp);
+}
+
+/// The wrapped height of what an input draws, in pixels. `paintInput` uses the
+/// same `wrapText` on the same string, so the two cannot disagree about where
+/// the last line sits.
+fn inputContentHeight(r: Renderer, ti: anytype, iw: f32) f32 {
+    const ts = r.measureText(ti.display, ti.size);
+    var line_buf: [256][]const u8 = undefined;
+    const n = r.wrapText(ti.display, ti.size, iw, &line_buf);
+    return @as(f32, @floatFromInt(@max(n, 1))) * ts.line_height;
 }
 
 /// Where a click at pixel `x` puts the caret, as a BYTE OFFSET INTO THE VALUE.
@@ -2801,7 +2828,28 @@ pub fn Element(comptime M: type) type {
             if (self.widget) |wp| {
                 const field_focused = hov.focus != null and self.key != null and hov.focus.? == self.key.?;
                 switch (wp.*) {
-                    .text_input => |ti| paintTextInput(r, th, ti, rect, clip, field_focused, hov),
+                    .input => |ti| {
+                        const pad = ti.pad;
+                        const inner: Rect = .{
+                            .x = rect.x + pad,
+                            .y = rect.y + pad,
+                            .w = rect.w - 2 * pad,
+                            .h = rect.h - 2 * pad,
+                        };
+                        if (inner.w <= 0 or inner.h <= 0) return;
+                        // Same rule as every other container: measure the
+                        // content, let `scrollFit` decide, paint shifted by the
+                        // clamped offset. A field with no `height` is measured
+                        // to fit, so it never scrolls.
+                        const ch = inputContentHeight(r, ti, inner.w);
+                        const f = self.scrollFit(inner, clip, inner.w, ch);
+                        // Always clip to the field's own box: a field with a fixed height
+                        // overflows whether or not the offset has moved yet, and
+                        // `scrollFit`'s no-overflow branch hands back the
+                        // inherited clip rather than `inner`.
+                        paintInput(r, th, ti, rect, field_focused, hov, f.off_y, inner.intersect(clip));
+                        try self.scrollChrome(r, th, inner, f, inner.w, ch, hits, gpa, generic_at);
+                    },
                     .slider, .select, .menu, .toast => {},
                 }
             }
@@ -3552,8 +3600,8 @@ pub fn Ui(comptime M: type) type {
             return widgets.select(self, o);
         }
 
-        pub fn textInput(self: *Self, o: widgets.TextInputOpts(M)) *Elem {
-            return widgets.textInput(self, o);
+        pub fn input(self: *Self, o: widgets.InputOpts(M)) *Elem {
+            return widgets.input(self, o);
         }
 
         pub fn menu(self: *Self, o: widgets.MenuOpts(M)) *Elem {
@@ -4889,7 +4937,24 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                     e.scroll_offset = self.scrollAtKey(path);
                     e.scroll_offset_x = self.scrollAtKeyX(path);
                 },
-                .text, .button, .bar, .rect, .icon, .image => {},
+                .text, .button, .bar, .rect, .icon, .image => {
+                    // A widget normally owns no scroll state, but one whose
+                    // payload says so takes the SAME per-path slot the
+                    // containers use. `scrollChrome` keys the thumbs off
+                    // `scroll_key`, so without this a scrolling field records
+                    // no viewport and paints no bar.
+                    if (e.widget) |wp| {
+                        const scrolls = switch (wp.*) {
+                            .input => |ti| ti.scrolls,
+                            .slider, .select, .menu, .toast => false,
+                        };
+                        if (scrolls) {
+                            e.scroll_key = path;
+                            e.scroll_offset = self.scrollAtKey(path);
+                            e.scroll_offset_x = self.scrollAtKeyX(path);
+                        }
+                    }
+                },
             }
             switch (e.geometry) {
                 .column => |c| for (c.children, 0..) |ch, i| self.injectScrollOffsets(ch, pathChild(path, i)),
@@ -5017,7 +5082,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
                     const k = h.key orelse continue;
                     if (k != fk) continue;
                     const wp = h.widget orelse continue;
-                    if (wp.* == .text_input) break :blk true;
+                    if (wp.* == .input) break :blk true;
                 }
                 break :blk false;
             };
@@ -8368,7 +8433,7 @@ fn fieldUpdate(m: *FieldState, msg: TMsg) Action(TMsg) {
 fn fieldView(m: *FieldState, ui: *Ui(TMsg)) *Element(TMsg) {
     var kids = [_]*Element(TMsg){
         ui.button(.{ .label = "b", .msg = .inc, .key = 1 }),
-        ui.textInput(.{ .key = 2, .edit = &m.edit }),
+        ui.input(.{ .key = 2, .edit = &m.edit }),
     };
     return ui.column(.{ .children = &kids });
 }
@@ -8473,8 +8538,8 @@ test "a field paints its box, its mask and its caret where the caret is" {
         fn v(_: *u8, ui: *Ui(TMsg)) *Element(TMsg) {
             return ui.column(.{ .children = &.{
                 ui.text(.{ .label = "NAME", .size = 11 }),
-                ui.textInput(.{ .key = 1, .edit = e, .size = 16, .msg = .inc }),
-                ui.textInput(.{ .key = 2, .edit = e, .size = 16, .mask = true, .msg = .inc }),
+                ui.input(.{ .key = 1, .edit = e, .size = 16, .msg = .inc }),
+                ui.input(.{ .key = 2, .edit = e, .size = 16, .mask = true, .msg = .inc }),
             } });
         }
     };

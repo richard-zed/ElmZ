@@ -302,6 +302,24 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&paint_exe_install.step);
     b.step("paint", "build the headless fills render").dependOn(&paint_exe_install.step);
 
+    const media = b.addExecutable(.{
+        .name = "media",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/media.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "software", .module = software_mod },
+                .{ .name = "runner", .module = runner_mod },
+            },
+        }),
+    });
+    b.step("media", "build the input/icon/image demo").dependOn(&b.addInstallArtifact(media, .{}).step);
+    b.step("run-media", "render the input/icon/image demo to frames/*.png (headless)").dependOn(
+        &runExample(b, media).step,
+    );
+
     const effects_exe = b.addExecutable(.{
         .name = "effects",
         .root_module = b.createModule(.{

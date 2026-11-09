@@ -1212,7 +1212,7 @@ pub fn run(
                         // lengths. Through the payload, because that is what
                         // carries the Model pointer and the pad.
                         if (h.widget) |w| switch (w.*) {
-                            .text_input => |ti| {
+                            .input => |ti| {
                                 const off = elmz.caretAtClick(canvas.renderer(), ti, p[0] - (h.rect.x + ti.pad));
                                 _ = ti.edit.moveTo(off, false);
                                 dirty = true;
