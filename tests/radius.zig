@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 const Model = struct {};
 const Msg = enum {};
@@ -89,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
     defer rt.deinit();
 
-    var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+    var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
     defer frame.deinit();
 
     try canvas.writePng(io, gpa, "radius.png");

@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz",
@@ -108,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     for (script, 0..) |step, i| {
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer frame.deinit();
 
         try out.print("frame {d}: state=count {d}  prims={d}  hits={d}\n", .{

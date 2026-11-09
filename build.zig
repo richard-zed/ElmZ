@@ -109,7 +109,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "elmz", .module = elmz_mod },
             .{ .name = "types", .module = types_mod },
         },
         .link_libc = true,
@@ -121,15 +120,10 @@ pub fn build(b: *std.Build) void {
     software_mod.addImport("sakura", sak_mod);
 
     // the loop: needs elmz + software, knows no platform
-    const runner_mod = b.addModule("runner", .{
-        .root_source_file = b.path("src/runner.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "elmz", .module = elmz_mod },
-            .{ .name = "software", .module = software_mod },
-        },
-    });
+    // The host loop paints through the software renderer, so elmz names it.
+    // No cycle: software imports types, never elmz.
+    elmz_mod.addImport("software", software_mod);
+
 
     // ---------------------------------------------------------------------
     // the -sdl3 variants. Only built when asked for, so a machine without
@@ -155,7 +149,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -172,7 +165,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -191,7 +183,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -208,7 +199,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -225,7 +215,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -246,7 +235,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -270,7 +258,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -288,7 +275,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -308,7 +294,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -325,7 +310,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -377,7 +361,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -420,7 +403,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -433,7 +415,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     glow_exe.root_module.addImport("elmz", elmz_mod);
-    glow_exe.root_module.addImport("runner", runner_mod);
     glow_exe.root_module.addImport("software", software_mod);
     const glow_exe_install = b.addInstallArtifact(glow_exe, .{});
     b.getInstallStep().dependOn(&glow_exe_install.step);
@@ -461,7 +442,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -485,25 +465,16 @@ pub fn build(b: *std.Build) void {
     b.step("run-counter", "run the headless counter (writes frame_*.png)").dependOn(&run.step);
 
     // ---------------------------------------------------------------------
-    // tests: elmz core + the runner loop (fake window, no display needed)
+    // tests: elmz core, and the host loop (fake window, no display needed)
     // ---------------------------------------------------------------------
     // Uses the REGISTERED module, not a fresh anonymous one. A fresh root at
     // src/elmz.zig gives that file a second identity: it reaches types.zig by
     // path import while software reaches it as a module, and Zig rejects a file
     // belonging to two modules.
     const core_tests = b.addTest(.{ .root_module = elmz_mod });
-    const runner_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/runner.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "elmz", .module = elmz_mod },
-                .{ .name = "software", .module = software_mod },
-            },
-        }),
-    });
 
+    // Registered module, not a fresh root at src/software.zig: re-rooting gives
+    // the file a second identity and Zig rejects it.
     const software_tests = b.addTest(.{ .root_module = software_mod });
 
     // The reducer is a leaf that nothing imports yet, so without its own root
@@ -516,6 +487,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "types", .module = types_mod },
             },
         }),
     });
@@ -530,7 +502,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "elmz", .module = elmz_mod },
+                .{ .name = "types", .module = types_mod },
                 // cedar.zig imports the decoder directly (`@import("inkwell")`),
                 // so this root needs the module too. Without it only this root
                 // failed to compile, which is why the seam looked green while
@@ -546,11 +518,10 @@ pub fn build(b: *std.Build) void {
     const tmp_run = b.addRunArtifact(tmp_sticky);
     b.step("tmp-sticky", "ad hoc").dependOn(&tmp_run.step);
 
-    const test_step = b.step("test", "run core + software + runner + reducer + font tests");
+    const test_step = b.step("test", "run core + software + host + reducer + font tests");
     test_step.dependOn(&b.addRunArtifact(software_tests).step);
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     test_step.dependOn(&b.addRunArtifact(cedar_tests).step);
-    test_step.dependOn(&b.addRunArtifact(runner_tests).step);
     test_step.dependOn(&b.addRunArtifact(reducer_tests).step);
 
     const tasks_win = b.addExecutable(.{
@@ -566,7 +537,6 @@ pub fn build(b: *std.Build) void {
                 // them.
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -587,7 +557,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -609,7 +578,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -631,7 +599,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -652,7 +619,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -673,7 +639,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -694,7 +659,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -715,7 +679,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -738,7 +701,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),
@@ -774,7 +736,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
             },
         }),
     });
@@ -792,7 +753,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "elmz", .module = elmz_mod },
                 .{ .name = "software", .module = software_mod },
-                .{ .name = "runner", .module = runner_mod },
                 .{ .name = "platform_sdl3", .module = sdl_mod },
             },
         }),

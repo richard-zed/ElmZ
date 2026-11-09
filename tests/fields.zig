@@ -3,7 +3,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "fields",
@@ -133,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 0;
     for (typed) |c| {
         if (onText(&rt.state, &.{c})) |msg| _ = rt.dispatch(msg);
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         try snap(io, gpa, out, &rt, &canvas, &frame, i, "type");
         frame.deinit();
         i += 1;
@@ -147,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
 
     for ("hunter2") |c| {
         if (onText(&rt.state, &.{c})) |msg| _ = rt.dispatch(msg);
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         try snap(io, gpa, out, &rt, &canvas, &frame, i, "type");
         frame.deinit();
         i += 1;
@@ -156,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
     // Backspace once: the last `2` goes, and the caret follows the text.
     const back: elmz.keys.Key = .{ .named = .backspace };
     if (onKey(&rt.state, back)) |msg| _ = rt.dispatch(msg);
-    var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+    var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
     try snap(io, gpa, out, &rt, &canvas, &frame, i, "backspace");
     frame.deinit();
 

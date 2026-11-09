@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -30,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     canvas.fillRect(.{ .x = 40, .y = 70, .w = 260, .h = 10 }, elmz.Fill.hgrad(accent, theme.pressed));
     canvas.drawText(40, 96, 14, .{ .solid = fg }, "a frame, with the readout on it");
 
-    runner.drawOverlay(&canvas, .{
+    elmz.drawOverlay(&canvas, .{
         .frame_ns = 850_000,
         .build_ns = 47_000,
         .paint_ns = 803_000,
@@ -43,6 +42,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("overlay.png {d}x{d}, overlay compiled in: {s}\n", .{
         canvas.w,
         canvas.h,
-        if (runner.default_overlay) "yes (debug)" else "no (release)",
+        if (elmz.default_overlay) "yes (debug)" else "no (release)",
     });
 }

@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz fonts",
@@ -86,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
     defer rt.deinit();
 
     {
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer frame.deinit();
         try out.print("with a face:   {d} prims, {d} hits\n", .{ frame.primitiveCount(), frame.hits.len });
         try canvas.writePng(io, gpa, "fonts.png");
@@ -97,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     // is legible but visibly not the app's typeface.
     canvas.setFont(&.{});
     {
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer frame.deinit();
         try out.print("without a face: {d} prims, {d} hits\n", .{ frame.primitiveCount(), frame.hits.len });
         try canvas.writePng(io, gpa, "fonts-none.png");

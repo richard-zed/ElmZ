@@ -1,6 +1,5 @@
 const std = @import("std");
 const elmz = @import("elmz");
-const runner = @import("runner");
 const sdl = @import("platform_sdl3");
 
 const app = .{
@@ -56,5 +55,5 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 pub fn main(init: std.process.Init) !void {
     var w = try sdl.Windows.init(app.title, app.size.w, app.size.h);
     defer w.deinit();
-    _ = try runner.runAppEnv(app, init.gpa, init.io, init.environ_map, w.asWindow());
+    _ = try elmz.runAppEnv(app, init.gpa, init.io, init.environ_map, w.asWindow());
 }

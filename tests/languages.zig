@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz languages",
@@ -117,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (primary) |b| gpa.free(b);
     if (primary) |b| canvas.setFont(b);
 
-    const fonts = runner.HeadlessFonts.init(gpa, io, null);
+    const fonts = elmz.HeadlessFonts.init(gpa, io, null);
     defer fonts.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
@@ -134,14 +133,14 @@ pub fn main(init: std.process.Init) !void {
     // falls through to the primary face, and every non-Latin script renders as
     // tofu. That failure is silent -- the pixels are still ink, so counting ink
     // proves nothing. The path is the whole point.
-    const base: ?[:0]u8 = runner.themePathBesideExe(gpa, io, "theme.defaults.zon");
+    const base: ?[:0]u8 = elmz.themePathBesideExe(gpa, io, "theme.defaults.zon");
     defer if (base) |b| gpa.free(b);
     // The USER file too, which this used to pass as null. Missing it meant the
     // example read only `theme.defaults.zon`, so an edit to `theme.zon` changed
     // nothing here and looked like the style system ignoring the file. Null is
     // still the right answer when the file is absent -- resolveChain treats a
     // null path as "no override", not as an error.
-    const user: ?[:0]u8 = runner.themePathBesideExe(gpa, io, "theme.zon");
+    const user: ?[:0]u8 = elmz.themePathBesideExe(gpa, io, "theme.zon");
     defer if (user) |u| gpa.free(u);
     // The app tier. `theme.zon` carries `.vars = .{ .weight = 600, .latin_font =
     // "Roboto Flex" }`, and an app that declares nothing REJECTS `.vars` -- a
@@ -152,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         weight: ?u16 = null,
         latin_font: ?[]const u8 = null,
     };
-    var chain = runner.resolveChain(App, gpa, io, rt.ui.theme, base, user);
+    var chain = elmz.resolveChain(App, gpa, io, rt.ui.theme, base, user);
     defer chain.deinit(gpa);
     rt.ui.theme = chain.theme;
     rt.ui.gradients = chain.gradients;
@@ -188,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     {
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer frame.deinit();
         try out.print("{d} prims\n", .{frame.primitiveCount()});
         try canvas.writePng(io, gpa, "languages.png");

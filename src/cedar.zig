@@ -2,7 +2,7 @@
 //! inside Elm.
 
 const std = @import("std");
-const elmz = @import("elmz");
+const types = @import("types");
 const gamma = @import("gamma.zig");
 const cedar = @import("inkwell");
 const ramp = @import("ramp.zig");
@@ -488,7 +488,7 @@ pub const Font = struct {
         return i;
     }
 
-    pub fn measure(self: *const Font, bytes: []const u8, size: f32) elmz.TextMetrics {
+    pub fn measure(self: *const Font, bytes: []const u8, size: f32) types.TextMetrics {
         const v = self.verticalMetrics(size);
         if (!self.ok) return .{ .width = 0, .height = size, .ascent = size, .descent = 0, .line_height = size };
         const s = self.scaleFor(size);
@@ -831,12 +831,12 @@ pub const Font = struct {
         x: f32,
         y: f32,
         size: f32,
-        fill: elmz.Fill,
+        fill: types.Fill,
         bytes: []const u8,
-        clip: elmz.Rect,
+        clip: types.Rect,
     ) void {
         if (!self.ok or !self.cache_ok) return;
-        const solid_c: ?elmz.Color = switch (fill) {
+        const solid_c: ?types.Color = switch (fill) {
             .solid => |cc| cc,
             else => null,
         };
@@ -847,7 +847,7 @@ pub const Font = struct {
         // reaches for a solid fill -- so nearly every label in a UI was paying
         // twice to compute a width nobody read. Gradient text still measures,
         // because there the colour of a glyph depends on where it sits.
-        var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
+        var box: types.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
         if (solid_c == null) {
             const tm = self.measure(bytes, size);
             box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
@@ -925,10 +925,10 @@ pub const Font = struct {
         x: f32,
         y: f32,
         size: f32,
-        fill: elmz.Fill,
+        fill: types.Fill,
         bytes: []const u8,
         width: u8,
-        clip: elmz.Rect,
+        clip: types.Rect,
         scratch: []u8,
     ) bool {
         return self.bandedText(px, cw, ch, x, y, size, fill, bytes, width, .stroke, clip, scratch);
@@ -950,10 +950,10 @@ pub const Font = struct {
         x: f32,
         y: f32,
         size: f32,
-        fill: elmz.Fill,
+        fill: types.Fill,
         bytes: []const u8,
         width: u8,
-        clip: elmz.Rect,
+        clip: types.Rect,
         scratch: []u8,
     ) bool {
         return self.bandedText(px, cw, ch, x, y, size, fill, bytes, width, .border, clip, scratch);
@@ -967,21 +967,21 @@ pub const Font = struct {
         x: f32,
         y: f32,
         size: f32,
-        fill: elmz.Fill,
+        fill: types.Fill,
         bytes: []const u8,
         width: u8,
         kind: Banded,
-        clip: elmz.Rect,
+        clip: types.Rect,
         scratch: []u8,
     ) bool {
         if (!self.ok or !self.fields_ok) {
             return false;
         }
-        const solid_c: ?elmz.Color = switch (fill) {
+        const solid_c: ?types.Color = switch (fill) {
             .solid => |cc| cc,
             else => null,
         };
-        var box: elmz.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
+        var box: types.Rect = .{ .x = x, .y = y, .w = 0, .h = 0 };
         if (solid_c == null) {
             const tm = self.measure(bytes, size);
             box = .{ .x = x, .y = y, .w = tm.width, .h = tm.height };
@@ -1075,14 +1075,14 @@ pub const Font = struct {
         x: f32,
         y: f32,
         size: f32,
-        color: elmz.Color,
+        color: types.Color,
         bytes: []const u8,
         radius: f32,
         falloff: f32,
         mode: ramp.HaloMode,
         spread: f32,
         offset: [2]f32,
-        clip: elmz.Rect,
+        clip: types.Rect,
         scratch: []u8,
     ) bool {
         if (!self.ok or !self.fields_ok) return false;
@@ -1180,7 +1180,7 @@ pub fn decode(bytes: []const u8, i: *usize) u32 {
 }
 
 /// Blend one glyph pixel.
-fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: elmz.Color, cov: u8) void {
+fn blend(px: []u8, cw: u32, ch: u32, x: i64, y: i64, color: types.Color, cov: u8) void {
     if (x < 0 or y < 0) return;
     const ux: u32 = @intCast(x);
     const uy: u32 = @intCast(y);

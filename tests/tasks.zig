@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "tasks",
@@ -124,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     for (script) |maybe_msg| {
         if (maybe_msg) |msg| _ = rt.dispatch(msg);
 
-        var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer frame.deinit();
 
         var name_buf: [64]u8 = undefined;

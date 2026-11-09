@@ -2,7 +2,6 @@
 //! background and runtime; this adds a platform.
 
 const std = @import("std");
-const runner = @import("runner");
 const sdl = @import("platform_sdl3");
 const app = @import("tasks.zig");
 
@@ -21,5 +20,5 @@ pub fn main(init: std.process.Init) !void {
     // and panics on a null entry. A launcher-supplied environment is not ours to
     // assume well-formed, and nothing about a GUI app's exit should depend on
     // stderr being usable. The window is the output.
-    _ = try runner.runAppEnv(app.app, gpa, init.io, init.environ_map, platform.asWindow());
+    _ = try elmz.runAppEnv(app.app, gpa, init.io, init.environ_map, platform.asWindow());
 }

@@ -2,7 +2,7 @@
 //! that ships no typeface ships one anyway.
 
 const std = @import("std");
-const elmz = @import("elmz");
+const types = @import("types");
 const cedar = @import("cedar.zig");
 
 /// Cell size in pixels, and the advance that includes the one-column gap.
@@ -131,7 +131,7 @@ pub fn spells(cp: u32) bool {
     return slot(cp) != null;
 }
 
-pub fn measure(bytes: []const u8, size: f32) elmz.TextMetrics {
+pub fn measure(bytes: []const u8, size: f32) types.TextMetrics {
     const s = scaleFor(size);
     var i: usize = 0;
     var n: u32 = 0;

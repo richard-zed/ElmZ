@@ -29,6 +29,41 @@ pub const FillRule = types.FillRule;
 pub const longestWord = types.longestWord;
 pub const rowChildWidth = types.rowChildWidth;
 
+/// The composition layer: start an app, paint a frame, resolve a theme beside
+/// the binary. It is a FILE inside this module, not a module of its own --
+/// `runner.zig` was a module root, which gave it an identity an importer could
+/// not reach from here. Demoting it is what lets an app depend on `elmz` alone.
+///
+/// The naming reflects the split that matters: everything below `host` is
+/// embeddable (types, software, the runtime and its widgets), and `host` is the
+/// part that assumes a filesystem and a process -- the theme watch, the
+/// executable path, the run loop. An embedder with its own loop uses the
+/// runtime directly and never touches this.
+pub const host = @import("host.zig");
+
+pub const default_overlay = host.default_overlay;
+pub const OverlayStats = host.OverlayStats;
+pub const FrameRing = host.FrameRing;
+pub const drawOverlay = host.drawOverlay;
+pub const Options = host.Options;
+pub const ThemeWatch = host.ThemeWatch;
+pub const ThemeWatchOf = host.ThemeWatchOf;
+pub const ChainOf = host.ChainOf;
+pub const resolveChain = host.resolveChain;
+pub const exeStem = host.exeStem;
+pub const themePathBesideExe = host.themePathBesideExe;
+pub const themeCandidates = host.themeCandidates;
+pub const Stats = host.Stats;
+pub const FontSlot = host.FontSlot;
+pub const FontRegistry = host.FontRegistry;
+pub const applyChainFont = host.applyChainFont;
+pub const runApp = host.runApp;
+pub const runAppEnv = host.runAppEnv;
+pub const HeadlessFonts = host.HeadlessFonts;
+pub const paintInto = host.paintInto;
+pub const paintOnce = host.paintOnce;
+pub const run = host.run;
+
 /// The palette a `Ui` builds with.
 pub const Theme = struct {
     /// page/window background; the colour a backend clears to
@@ -97,6 +132,10 @@ test {
     // pulls its declarations in. The aliases above are what a caller uses; this
     // is what makes the suite see them.
     std.testing.refAllDecls(theme);
+    // The host loop's tests live in host.zig and had their own test root before
+    // it was demoted to a file. Without this they would silently stop running --
+    // 53 of them, which is most of the run-loop coverage.
+    std.testing.refAllDecls(host);
 }
 
 /// The failure banner is deliberately not themed: it reports a bug, so it must not be able

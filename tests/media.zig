@@ -10,7 +10,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz - input, icon, image",
@@ -235,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
     _ = rt.state.box.insertText(rt.state.arena.allocator(), box_text);
     _ = rt.dispatch(.focus_box);
 
-    var frame = try runner.paintInto(Model, Msg, &rt, &canvas);
+    var frame = try elmz.paintInto(Model, Msg, &rt, &canvas);
     defer frame.deinit();
     try report(out, &rt, &frame, 0, "seeded");
     try canvas.writePng(io, gpa, "frames/media-00-seeded.png");
@@ -251,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
     const field_slot = elmz.pathChild(elmz.scroll_path_root, 1);
     rt.scrollTo(field_slot, 9999); // clamped by `scrollFit` on read
     try out.print("    scroll offset after scrollTo: {d:.1}\n", .{rt.scrollOffset(field_slot)});
-    var frame2 = try runner.paintInto(Model, Msg, &rt, &canvas);
+    var frame2 = try elmz.paintInto(Model, Msg, &rt, &canvas);
     defer frame2.deinit();
     try report(out, &rt, &frame2, 1, "scrolled");
     try canvas.writePng(io, gpa, "frames/media-01-scrolled.png");
@@ -260,7 +259,7 @@ pub fn main(init: std.process.Init) !void {
     // paints proves `.icon` and `.image` came from cache, not from disk.
     cwd.deleteFile(io, "frames/demo-icon.svg") catch {};
     cwd.deleteFile(io, "frames/demo-image.png") catch {};
-    var frame3 = try runner.paintInto(Model, Msg, &rt, &canvas);
+    var frame3 = try elmz.paintInto(Model, Msg, &rt, &canvas);
     defer frame3.deinit();
     try report(out, &rt, &frame3, 2, "sources-deleted");
     try canvas.writePng(io, gpa, "frames/media-02-cached.png");

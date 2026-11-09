@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz - showcase",
@@ -195,10 +194,10 @@ pub fn main(init: std.process.Init) !void {
     var user_owned: ?[:0]u8 = null;
     defer if (base_owned) |bp| gpa.free(bp);
     defer if (user_owned) |up| gpa.free(up);
-    base_owned = runner.themePathBesideExe(gpa, io, "theme.defaults.zon");
-    user_owned = runner.themePathBesideExe(gpa, io, "theme.zon");
+    base_owned = elmz.themePathBesideExe(gpa, io, "theme.defaults.zon");
+    user_owned = elmz.themePathBesideExe(gpa, io, "theme.zon");
 
-    const chain = runner.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
+    const chain = elmz.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
     rt.ui.theme = chain.theme;
     // Both halves of a loaded theme, or a file's `.gradients` would be parsed
     // and then dropped on the one path that draws a picture of it.
@@ -224,7 +223,7 @@ pub fn main(init: std.process.Init) !void {
     // -- frame one: resting state -----------------------------------------
     var button_rect: ?elmz.Rect = null;
     {
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "showcase.png");
         // Find the primary button the way the pointer would: by its key.
@@ -239,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
     // -- frame two: the pointer over the primary button --------------------
     if (button_rect) |r| {
         rt.pointer.pos = .{ r.x + r.w / 2, r.y + r.h / 2 };
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "showcase-hover.png");
         // The hovered element paints a different fill, so the primitive count
@@ -256,7 +255,7 @@ pub fn main(init: std.process.Init) !void {
     // No contrived bad source string here. If `theme.zon` loaded, there is no
     // error to show and no third PNG: the band is a report, not a decoration.
     if (theme_failed) {
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "showcase-error.png");
         try out.print("showcase-error.png{d:>6} primitives, band reads: {s}\n", .{

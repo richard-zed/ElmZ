@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz - click ownership",
@@ -238,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ---- 3. one picture of the end state ---------------------------------
-    try runner.paintOnce(Model, Msg, &rt, &canvas);
+    try elmz.paintOnce(Model, Msg, &rt, &canvas);
     try canvas.writePng(io, gpa, "clicks.png");
 
     // ---- 3. the release that never comes --------------------------------
@@ -307,7 +306,7 @@ fn stage(
         rt.press.down(&f, p);
     }
     rt.pointer = .{ .pos = pos };
-    try runner.paintOnce(Model, Msg, rt, canvas);
+    try elmz.paintOnce(Model, Msg, rt, canvas);
 }
 
 fn sample(canvas: *software.Canvas, p: [2]f32) elmz.Color {

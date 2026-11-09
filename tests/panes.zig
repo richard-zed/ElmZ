@@ -4,7 +4,6 @@
 const std = @import("std");
 const elmz = @import("elmz");
 const software = @import("software");
-const runner = @import("runner");
 
 pub const app = .{
     .title = "elmz - panes",
@@ -257,7 +256,7 @@ pub fn main(init: std.process.Init) !void {
     defer rt.deinit();
 
     {
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "panes.png");
         try out.print("panes.png          {d} primitives, {d} hit regions\n", .{ f.prims.len, f.hits.len });
@@ -279,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
     // Scrolled: the thumb moves, the rows move, nothing else does.
     rt.scrollBy(scroll_key, 130);
     {
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "panes-scrolled.png");
         try out.print("panes-scrolled.png {d} primitives, offset {d}\n", .{ f.prims.len, rt.scrollOffset(scroll_key) });
@@ -289,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
     // gets a look at the pointer.
     rt.state.menu = true;
     {
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "panes-menu.png");
         try out.print("panes-menu.png     {d} primitives, {d} hit regions\n", .{ f.prims.len, f.hits.len });

@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const elmz = @import("elmz");
-const runner = @import("runner");
 const software = @import("software");
 
 // Sized against the content: the deepest shadow tail is dist + spread +
@@ -236,10 +235,10 @@ pub fn main(init: std.process.Init) !void {
     var user_owned: ?[:0]u8 = null;
     defer if (base_owned) |bp| gpa.free(bp);
     defer if (user_owned) |up| gpa.free(up);
-    base_owned = runner.themePathBesideExe(gpa, io, "theme.defaults.zon");
-    user_owned = runner.themePathBesideExe(gpa, io, "theme.zon");
+    base_owned = elmz.themePathBesideExe(gpa, io, "theme.defaults.zon");
+    user_owned = elmz.themePathBesideExe(gpa, io, "theme.zon");
 
-    const chain = runner.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
+    const chain = elmz.resolveChain(Tokens, gpa, io, .{}, base_owned, user_owned);
     rt.ui.theme = chain.theme;
     rt.ui.gradients = chain.gradients;
     rt.state.title_size = chain.app.title_size;
@@ -251,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
 
     // -- frame one: at rest ------------------------------------------------
     {
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "glow.png");
         rest_halos = countHalos(f.prims);
@@ -270,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
     // -- frame two: the pointer over the baked button ----------------------
     if (baked_rect) |r| {
         rt.pointer.pos = .{ r.x + r.w / 2, r.y + r.h / 2 };
-        var f = try runner.paintInto(Model, Msg, &rt, &canvas);
+        var f = try elmz.paintInto(Model, Msg, &rt, &canvas);
         defer f.deinit();
         try canvas.writePng(io, gpa, "glow-hover.png");
         // The halo is STILL one per element -- hover swaps which halo, it does
