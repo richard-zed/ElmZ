@@ -417,11 +417,33 @@ pub fn themeCandidates(
     app_name: ?[]const u8,
     home: ?[]const u8,
     xdg_config_home: ?[]const u8,
+    theme_path: ?[]const u8,
 ) ?[][]const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (list.items) |it| gpa.free(it);
         list.deinit(gpa);
+    }
+
+    // An app that names its theme beats every convention: it is the most
+    // specific statement the file system can carry. Built with `join` rather
+    // than `themePathBesideExe`, which returns a SENTINEL slice whose length
+    // the teardown below would get wrong.
+    if (theme_path) |tp| {
+        const resolved: ?[]u8 = if (std.fs.path.isAbsolute(tp))
+            gpa.dupe(u8, tp) catch null
+        else blk: {
+            const exe = std.process.executablePathAlloc(io, gpa) catch break :blk null;
+            defer gpa.free(exe);
+            const dir = std.fs.path.dirname(exe) orelse break :blk null;
+            break :blk std.fs.path.join(gpa, &.{ dir, tp }) catch null;
+        };
+        if (resolved) |r| {
+            list.append(gpa, r) catch {
+                gpa.free(r);
+                return null;
+            };
+        }
     }
 
     const xdg = xdg_config_home;
@@ -956,7 +978,7 @@ pub fn run(
             defer if (stem_owned) |st| g.free(st);
             stem_owned = exeStem(g, io_arg);
             const app_name: ?[]const u8 = if (stem_owned) |st| st else null;
-            candidates = themeCandidates(g, io_arg, app_name, opts.home, opts.xdg_config_home);
+            candidates = themeCandidates(g, io_arg, app_name, opts.home, opts.xdg_config_home, opts.theme_path);
 
             // Watch only when at least one candidate exists. A stat four times a
             // second forever is a real cost for an app that ships no theme file.
