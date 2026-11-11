@@ -602,6 +602,12 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
     var out: ThemeFileType(App) = .{ .version = theme_version };
 
     var customs = std.array_list.Managed(CustomRole).init(gpa);
+    // `deinit` frees the BACKING ARRAY only. Every item owns a duped name, so
+    // an error return below would drop them; free the contents first.
+    errdefer {
+        for (customs.items) |c| gpa.free(c.name);
+        customs.deinit();
+    }
     defer customs.deinit();
 
     for (t.colors) |c| {
@@ -639,6 +645,10 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
     }
 
     var cgrads = std.array_list.Managed(CustomGradient).init(gpa);
+    errdefer {
+        for (cgrads.items) |g| gpa.free(g.name);
+        cgrads.deinit();
+    }
     defer cgrads.deinit();
     for (t.gradients) |g| {
         var matched = false;
@@ -668,6 +678,12 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
     }
 
     var styles = std.array_list.Managed(StyleEntry).init(gpa);
+    // A StyleEntry owns its name AND up to five spec strings (bg, color,
+    // border, font, halo.color). Per-item teardown, not `deinit`.
+    errdefer {
+        for (styles.items) |e| freeSpecEntry(gpa, e);
+        styles.deinit();
+    }
     defer styles.deinit();
     for (t.styles) |st| {
         var spec = st.value;

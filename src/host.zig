@@ -206,6 +206,20 @@ pub fn ThemeWatchOf(comptime App: type) type {
             if (!reload) return;
 
             const chain = resolveChain(App, gpa, io, self.floor, self.paths);
+            // The three tables below are overwritten whole; the previous chain's
+            // copies own heap strings and are unreachable the moment the
+            // assignment lands. `owned_styles` is freed further down -- these
+            // were the ones that leaked, once per reload.
+            theme_mod.freeCustom(gpa, &ui.theme);
+            theme_mod.freeGradients(gpa, &ui.gradients);
+            // `vars` is held BY VALUE in a byte buffer, so the previous copy is
+            // unreachable once overwritten. Rebuild it to free the strings, but
+            // only when one is actually stored -- the default is all-null and
+            // freeing a null union field would be a use of undefined.
+            if (ui.vars_len == @sizeOf(App)) {
+                var prev: App = ui.vars(App);
+                theme_mod.freeVars(App, gpa, &prev);
+            }
             ui.theme = chain.theme;
             ui.gradients = chain.gradients;
             ui.setVars(App, chain.app);

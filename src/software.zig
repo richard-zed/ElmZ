@@ -1023,8 +1023,10 @@ pub const Canvas = struct {
     /// Same, with the `io` an icon needs to read its file.
     pub fn initIo(gpa: Allocator, w: u32, h: u32, io: ?std.Io) !Self {
         const px = try gpa.alloc(u8, @as(usize, w) * h * 4);
+        errdefer gpa.free(px);
         @memset(px, 0);
         const mem = try gpa.create(FontMem);
+        errdefer gpa.destroy(mem);
         const scratch = try gpa.alloc(u8, @as(usize, w) * h);
         return .{ .gpa = gpa, .w = w, .h = h, .px = px, .font_mem = mem, .stroke_scratch = scratch, .io = io };
     }
