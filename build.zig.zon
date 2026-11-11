@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .inkwell = .{
-            .url = "https://github.com/richard-zed/Inkwell/archive/refs/tags/v0.6.2.tar.gz",
-            .hash = "inkwell-0.6.0--16WKFSRDAB7u0k37G15rzwhpamcHZFM9FQiN9Juizs0",
+            .url = "https://github.com/richard-zed/Inkwell/archive/refs/tags/v0.6.3.tar.gz",
+            .hash = "inkwell-0.6.0--16WKFmVDAB2LXEqVm9NJ66_nogLk4-T239bZvWsRLG5",
         },
         .magnolia = .{
             .url = "https://github.com/richard-zed/Magnolia/archive/refs/tags/v0.1.1.tar.gz",
