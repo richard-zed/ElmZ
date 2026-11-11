@@ -867,8 +867,48 @@ pub fn OwnedRunner(comptime App: type, comptime Plat: type) type {
     };
 }
 
+/// True when a single opaque, unclipped quad in `prims` already writes every
+/// pixel of the canvas, which makes clearing it first pure waste.
+///
+/// The clear is load-bearing in general: a root `column` with `.pad` and no
+/// `.bg` covers a fraction of the canvas, and the rest must not keep last
+/// frame's pixels. So this is a SKIP, not a removal -- it only fires when the
+/// frame provably covers itself.
+fn frameCoversCanvas(prims: []const elmz.Primitive, w: f32, h: f32) bool {
+    for (prims) |p| {
+        const q = switch (p) {
+            .quad => |q| q,
+            else => continue,
+        };
+        // A clip narrower than the canvas would leave the rest stale.
+        if (q.clip.x > 0 or q.clip.y > 0 or
+            q.clip.w < w or q.clip.h < h) continue;
+        if (q.rect.x > 0 or q.rect.y > 0 or
+            q.rect.w < w or q.rect.h < h) continue;
+        const covers = switch (q.fill) {
+            .solid => |c| c.a == 255,
+            // A gradient is opaque only when every stop is; `twoOpaque` is
+            // narrowed to exactly two, so check the stores directly.
+            .linear => |g| stopsOpaque(g.stops),
+            .radial => |g| stopsOpaque(g.stops),
+        };
+        if (covers) return true;
+    }
+    return false;
+}
+
+fn stopsOpaque(s: elmz.Stops) bool {
+    if (s.n == 0) return false;
+    for (s.colors[0..s.n]) |c| {
+        if (c.a != 255) return false;
+    }
+    return true;
+}
+
 /// Fill the canvas with the `bg` role.
 fn clearToTheme(canvas: *software.Canvas, ui: anytype) void {
+    // Callers skip this entirely when `frameCoversCanvas` says the frame
+    // paints every pixel itself; this function cannot see the frame.
     const fill = ui.roleFill("bg");
     if (fill == .solid) {
         canvas.clear(fill.solid);
@@ -936,7 +976,9 @@ pub fn paintInto(
         .h = @floatFromInt(canvas.h),
     }, canvas.renderer());
     errdefer frame.deinit();
-    clearToTheme(canvas, &rt.ui);
+    const cw: f32 = @floatFromInt(canvas.w);
+    const ch: f32 = @floatFromInt(canvas.h);
+    if (!frameCoversCanvas(frame.prims, cw, ch)) clearToTheme(canvas, &rt.ui);
     canvas.paintFrame(frame.prims);
     return frame;
 }
@@ -1158,7 +1200,8 @@ pub fn runLoop(
             frame = try rt.frame(size, canvas.renderer());
             const t1 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
 
-            clearToTheme(canvas, &rt.ui);
+            if (!frameCoversCanvas(frame.?.prims, @floatFromInt(canvas.w), @floatFromInt(canvas.h)))
+                clearToTheme(canvas, &rt.ui);
             canvas.paintFrame(frame.?.prims);
             const t2 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
 

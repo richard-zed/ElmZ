@@ -1074,13 +1074,21 @@ pub const Canvas = struct {
     }
 
     pub fn clear(self: *Self, color: types.Color) void {
+        // One 32-bit store per pixel rather than four byte stores. A memset
+        // cannot express this: the format is RGBA8, so memset only fills a
+        // UNIFORM byte, and a theme bg like 0x1e1e2e is three different bytes
+        // plus alpha. The word is built once and splatted.
+        const word: u32 = @as(u32, color.r) |
+            (@as(u32, color.g) << 8) |
+            (@as(u32, color.b) << 16) |
+            (@as(u32, 255) << 24);
+        // `px` is a byte allocation, so the base is not guaranteed 4-byte
+        // aligned; align(1) makes the store legal either way and the compiler
+        // still emits a single 32-bit move.
+        const n = self.px.len / 4;
+        const words: [*]align(1) u32 = @ptrCast(self.px.ptr);
         var i: usize = 0;
-        while (i < self.px.len) : (i += 4) {
-            self.px[i + 0] = color.r;
-            self.px[i + 1] = color.g;
-            self.px[i + 2] = color.b;
-            self.px[i + 3] = 255;
-        }
+        while (i < n) : (i += 1) words[i] = word;
     }
 
     /// Logical rect -> device rect.

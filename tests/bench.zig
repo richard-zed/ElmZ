@@ -352,7 +352,7 @@ pub fn main(init: std.process.Init) !void {
             } } },
         };
         try out.print("\n  640x480 full-canvas fill, {d} passes x5, best of 5\n", .{iters});
-        try out.print("  variant        ms/pass   ns/px   vs solid   spread  (all split path)\n", .{});
+        try out.print("  variant        ms/pass   ns/px   vs solid   spread\n", .{});
         var solid_ns: f64 = 0;
         for (cases, 0..) |cs, i| {
             const sm = repeatFill(io, &fc, cs.fill, iters);
