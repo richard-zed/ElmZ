@@ -640,8 +640,15 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
             }) catch return error.OutOfMemory;
         }
     }
+    // `out` dies with an error return, and the `try` at the caller means its
+    // `freeFileType` is never registered. Every slice handed to `out` needs its
+    // own errdefer or it goes down with the struct.
     if (customs.items.len > 0) {
         out.theme.colors.roles = customs.toOwnedSlice() catch return error.OutOfMemory;
+        errdefer {
+            for (out.theme.colors.roles) |r| gpa.free(r.name);
+            gpa.free(out.theme.colors.roles);
+        }
     }
 
     var cgrads = std.array_list.Managed(CustomGradient).init(gpa);
@@ -675,6 +682,10 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
     }
     if (cgrads.items.len > 0) {
         out.theme.gradients.roles = cgrads.toOwnedSlice() catch return error.OutOfMemory;
+        errdefer {
+            for (out.theme.gradients.roles) |g| gpa.free(g.name);
+            gpa.free(out.theme.gradients.roles);
+        }
     }
 
     var styles = std.array_list.Managed(StyleEntry).init(gpa);
@@ -702,6 +713,7 @@ fn buildFileType(comptime App: type, gpa: Allocator, t: OpenTables, diag: *Theme
     }
     if (styles.items.len > 0) {
         out.styles = styles.toOwnedSlice() catch return error.OutOfMemory;
+        errdefer freeStyles(gpa, &out.styles);
     }
 
     return out;
@@ -1277,11 +1289,31 @@ const Walker = struct {
             }
             self.advance();
         }
+        // Each slice is taken into a LOCAL before the next `toOwnedSlice`, so a
+        // later failure can still free it. Written inline in the returned
+        // literal, the first slice is already out of its list (emptying it, so
+        // its errdefer frees nothing) and dies with the discarded struct.
+        const owned_colors = try colors.toOwnedSlice(self.gpa);
+        errdefer {
+            for (owned_colors) |e| self.gpa.free(e.name);
+            self.gpa.free(owned_colors);
+        }
+        const owned_grads = try grads.toOwnedSlice(self.gpa);
+        errdefer {
+            for (owned_grads) |e| self.gpa.free(e.name);
+            self.gpa.free(owned_grads);
+        }
+        const owned_vars = try vars_list.toOwnedSlice(self.gpa);
+        errdefer {
+            for (owned_vars) |e| self.gpa.free(e.name);
+            self.gpa.free(owned_vars);
+        }
+        const owned_styles = try styles.toOwnedSlice(self.gpa);
         return .{
-            .colors = try colors.toOwnedSlice(self.gpa),
-            .gradients = try grads.toOwnedSlice(self.gpa),
-            .vars = try vars_list.toOwnedSlice(self.gpa),
-            .styles = try styles.toOwnedSlice(self.gpa),
+            .colors = owned_colors,
+            .gradients = owned_grads,
+            .vars = owned_vars,
+            .styles = owned_styles,
         };
     }
 

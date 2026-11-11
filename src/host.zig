@@ -436,10 +436,14 @@ pub fn themeCandidates(
     theme_path: ?[]const u8,
 ) ?[][]const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer {
+    // This function never returns an error, so `errdefer` would NEVER run --
+    // every `return null` below leaked the array and each path already in it.
+    // A flag plus `defer` is the only form that fires on success-or-null alike.
+    var handed_over = false;
+    defer if (!handed_over) {
         for (list.items) |it| gpa.free(it);
         list.deinit(gpa);
-    }
+    };
 
     // An app that names its theme beats every convention: it is the most
     // specific statement the file system can carry. Built with `join` rather
@@ -506,7 +510,9 @@ pub fn themeCandidates(
         }
     }
 
-    return list.toOwnedSlice(gpa) catch null;
+    const owned = list.toOwnedSlice(gpa) catch return null;
+    handed_over = true;
+    return owned;
 }
 
 /// How long the loop may block in poll before it gets to re-stat the theme.
