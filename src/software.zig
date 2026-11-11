@@ -1002,13 +1002,6 @@ pub const Canvas = struct {
         slot.vary_index = face_index;
     }
 
-    /// The face to draw with at `index`: the primary at 0, a registered extra otherwise.
-    pub fn faceAt(self: *const Self, index: usize) Face {
-        if (index == 0) return self.font;
-        if (index >= self.extra_faces.items.len) return .none;
-        return self.extra_faces.items[index].face;
-    }
-
     /// The same face BY POINTER, which is what painting needs.
     pub fn facePtrAt(self: *Self, index: usize) *const Face {
         if (index == 0) return &self.font;
@@ -2196,27 +2189,24 @@ pub const Canvas = struct {
                         self.drawTextHalo(hair, t.x * self.scale, t.y * self.scale, t.size * self.scale, th, t.bytes, .{ .x = 0, .y = 0, .w = @floatFromInt(self.w), .h = @floatFromInt(self.h) });
                     }
                 }
+                // Face then weight, once: the halo above may have left another face
+                // selected, and every branch below draws with this one.
+                if (t.face != 0) r.setFace(t.face);
+                r.setWeight(t.weight);
                 if (t.border) |bw| {
                     // A BORDER runs outside the ink and leaves the interior to
                     // the fill painted after it. The collector encodes it as its
                     // own field, not as `.stroke`, so testing `.stroke` alone
                     // sent every border prim down the plain-text path below --
                     // queued, counted, and drawn as ordinary text.
-                    if (t.face != 0) r.setFace(t.face);
-                    r.setWeight(t.weight);
                     r.borderedText(t.x, t.y, t.size, t.border_fill orelse t.fill, t.bytes, bw, t.clip);
                     r.setFace(t.face);
                     r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
                 } else if (t.stroke) |sw| {
-                    if (t.face != 0) r.setFace(t.face);
-                    r.setWeight(t.weight);
                     r.strokedText(t.x, t.y, t.size, t.fill, t.bytes, sw, t.clip);
                 } else if (t.face == 0) {
-                    r.setWeight(t.weight);
                     r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
                 } else {
-                    r.setFace(t.face);
-                    r.setWeight(t.weight);
                     const f = self.facePtrAt(t.face);
                     self.drawTextFace(f, t.x * self.scale, t.y * self.scale, t.size * self.scale, t.fill, t.bytes, self.scaledRect(t.clip));
                 }
