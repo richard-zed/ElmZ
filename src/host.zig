@@ -880,7 +880,6 @@ pub fn Runner(comptime App: type) type {
         pub fn run(self: *Self) !Stats {
             return runLoop(self.tokens, S, M, &self.rt, &self.canvas, self.window, self.opts);
         }
-
     };
 }
 
@@ -4121,4 +4120,3 @@ pub fn init(
         .has_font = font_bytes != null,
     };
 }
-
