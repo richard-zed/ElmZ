@@ -559,9 +559,28 @@ fn clockNs(opts: Options, io: ?std.Io) u64 {
     return 0;
 }
 
+/// What a run did, counted. Returned by `Runner.run` and by `elmz.init(...).run()`
+/// when the loop finally exits -- by quit, by `max_events`, or by a failed load.
+///
+/// These are totals for the whole run, not per-frame rates. They exist so a test
+/// can assert that a run actually did the work it claimed to: a zero `frames`
+/// means nothing was ever painted, which is the failure a green exit code hides.
 pub const Stats = struct {
+    /// Frames actually presented to the window. Not loop iterations -- a frame is
+    /// only counted when the canvas was rebuilt and handed to `present`, so an
+    /// idle loop that never repaints leaves this at zero.
     frames: u32 = 0,
+
+    /// Input events pulled from the window, one per `poll` that returned one. This
+    /// is the counter `max_events` is measured against, so a test can bound a run
+    /// without knowing which events will arrive.
     events: u32 = 0,
+
+    /// Messages dispatched through `update`, from any source: input, command
+    /// results, toast timeouts, animation ticks. Every increment sits beside a
+    /// `dispatch`, so theme reloads are NOT counted -- they mutate the palette in
+    /// place and dirty the frame without going through `update`. A single event
+    /// can produce several messages, so this can exceed `events`.
     messages: u32 = 0,
 };
 

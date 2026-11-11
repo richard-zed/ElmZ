@@ -24,6 +24,39 @@ pub fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 
 const Elem = elmz.Element(Msg);
 
+/// A tree of exactly one widget type, repeated, so build cost per widget can be
+/// divided out. The row benchmark mixes five primitive kinds, which is fine for
+/// a frame total and useless for "what does a button cost".
+pub const Widget = enum { text, button, row, checkbox };
+pub const WModel = struct {
+    kind: Widget = .text,
+    n: usize = 1,
+};
+
+pub fn wview(m: *WModel, ui: *elmz.Ui(Msg)) *Elem {
+    var buf: [256]*Elem = undefined;
+    const n = @min(m.n, buf.len);
+    for (0..n) |i| {
+        buf[i] = switch (m.kind) {
+            .text => ui.text(.{ .label = "label", .size = 10 }),
+            .button => ui.button(.{ .label = "go", .msg = .inc }),
+            .row => ui.row(.{ .children = &.{
+                ui.rect(.{ .width = 6, .height = 12 }),
+                ui.text(.{ .label = "row", .size = 10 }),
+                ui.button(.{ .label = "go", .msg = .inc }),
+            }, .gap = 4, .style = .{ .pad = 2, .bg = elmz.solid(ui.theme.panel) } }),
+            .checkbox => ui.checkbox(.{ .key = i, .label = "pick", .checked = false, .msg = .inc }),
+        };
+    }
+    return ui.column(.{ .children = buf[0..n] });
+}
+
+pub fn wupdate(m: *WModel, msg: Msg) elmz.Action(Msg) {
+    _ = msg;
+    m.n +%= 0;
+    return .{};
+}
+
 /// One row = 5 prims (row fill, swatch, label, button fill, button label) and one hit
 /// region.
 pub fn view(m: *Model, ui: *elmz.Ui(Msg)) *Elem {
@@ -49,6 +82,23 @@ const Row = struct {
 
 fn ns(io: std.Io) i128 {
     return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+}
+
+/// Best-of-N with the spread of the samples. One sample cannot be told apart
+/// from the noise floor: filling the same solid rect twice on an idle machine
+/// has differed by 12%, which is wider than most wins worth keeping.
+const Sample = struct { best: u64, worst: u64 };
+
+fn repeatFill(io: std.Io, c: *software.Canvas, fill: elmz.Fill, iters: usize) Sample {
+    var best: u64 = std.math.maxInt(u64);
+    var worst: u64 = 0;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const t = measureFill(io, c, fill, iters);
+        if (t < best) best = t;
+        if (t > worst) worst = t;
+    }
+    return .{ .best = best, .worst = worst };
 }
 
 fn measure(
@@ -273,20 +323,135 @@ pub fn main(init: std.process.Init) !void {
             .{ .name = "diagonal 135", .fill = elmz.Fill.angled(135, a, b) },
             .{ .name = "diagonal 205", .fill = elmz.Fill.angled(205, a, b) },
             .{ .name = "radial", .fill = elmz.Fill.radialFill(a, b) },
+            // Leaves the corners outside the last stop, which is the split fast
+            // path. The covering shape above never reaches it, and was for a long
+            // time the only radial measured.
+            .{ .name = "radial split", .fill = elmz.Fill{ .radial = .{
+                .radius = 0.28,
+                .stops = elmz.Stops.two(a, b),
+            } } },
         };
-        try out.print("\n  640x480 full-canvas fill, {d} passes each\n", .{iters});
-        try out.print("  variant        ms/pass   ns/px   vs solid\n", .{});
+        try out.print("\n  640x480 full-canvas fill, {d} passes x5, best of 5\n", .{iters});
+        try out.print("  variant        ms/pass   ns/px   vs solid   spread\n", .{});
         var solid_ns: f64 = 0;
         for (cases, 0..) |cs, i| {
-            const t = measureFill(io, &fc, cs.fill, iters);
+            const sm = repeatFill(io, &fc, cs.fill, iters);
+            const t = sm.best;
             const nspx = @as(f64, @floatFromInt(t)) / area;
             if (i == 0) solid_ns = nspx;
             const ratio = if (solid_ns > 0) nspx / solid_ns else 0;
-            try out.print("  {s:<12} {d:>8.3}  {d:>5.2}   {d:>5.2}x\n", .{
+            const spread = if (sm.best > 0)
+                100.0 * @as(f64, @floatFromInt(sm.worst - sm.best)) / @as(f64, @floatFromInt(sm.best))
+            else
+                0;
+            try out.print("  {s:<12} {d:>8.3}  {d:>5.2}   {d:>5.2}x   {d:>4.1}%\n", .{
                 cs.name,
                 @as(f64, @floatFromInt(t)) / 1e6,
                 nspx,
                 ratio,
+                spread,
+            });
+        }
+    }
+
+    // -- widgets: build and paint split, per widget type -------------------
+    // The row table's 5-prim row hides this. Here one widget type is repeated
+    // 64 times so the per-widget share can be read directly.
+    {
+        var wrt = elmz.Runtime(WModel, Msg).init(gpa, .{}, wupdate, wview);
+        defer wrt.deinit();
+
+        const n: usize = 64;
+        try out.print("\n  widgets, {d} repeated, {d}x{d}\n", .{ n, W, H });
+        try out.print("  kind      build ms   paint ms   build us/each   paint us/each\n", .{});
+        for ([_]Widget{ .text, .button, .row, .checkbox }) |kind| {
+            wrt.state.kind = kind;
+            wrt.state.n = n;
+            wrt.pointer.pos = null;
+
+            // discarded warm-up frame, same reasoning as measure()
+            {
+                var f = try wrt.frame(.{ .w = @floatFromInt(canvas.w), .h = @floatFromInt(canvas.h) }, canvas.renderer());
+                f.deinit();
+            }
+
+            var bbest: u64 = std.math.maxInt(u64);
+            var pbest: u64 = std.math.maxInt(u64);
+            var i: usize = 0;
+            while (i < 5) : (i += 1) {
+                const t0 = ns(io);
+                var f = try wrt.frame(.{ .w = @floatFromInt(canvas.w), .h = @floatFromInt(canvas.h) }, canvas.renderer());
+                const t1 = ns(io);
+                canvas.clear(wrt.ui.theme.bg);
+                canvas.paintFrame(f.prims);
+                const t2 = ns(io);
+                f.deinit();
+                const b: u64 = @intCast(t1 - t0);
+                const p: u64 = @intCast(t2 - t1);
+                if (b < bbest) bbest = b;
+                if (p < pbest) pbest = p;
+            }
+            try out.print("  {s:<8} {d:>8.3}  {d:>8.3}   {d:>12.2}   {d:>13.2}\n", .{
+                @tagName(kind),
+                @as(f64, @floatFromInt(bbest)) / 1e6,
+                @as(f64, @floatFromInt(pbest)) / 1e6,
+                @as(f64, @floatFromInt(bbest)) / 1e3 / @as(f64, @floatFromInt(n)),
+                @as(f64, @floatFromInt(pbest)) / 1e3 / @as(f64, @floatFromInt(n)),
+            });
+        }
+    }
+
+    // -- glyphs: the cost the row benchmark only ever aggregates -----------
+    // Every row draw above includes text, but mixed with fills, buttons and hit
+    // testing, so no line here isolates a glyph. Raster cost scales with the
+    // SQUARE of the point size, which is the one curve worth seeing directly.
+    {
+        const ink = elmz.Fill{ .solid = .{ .r = 0xf0, .g = 0xf0, .b = 0xf0, .a = 255 } };
+        const clip = elmz.Rect{ .x = 0, .y = 0, .w = @floatFromInt(canvas.w), .h = @floatFromInt(canvas.h) };
+        const latin = "The quick brown fox jumps over the lazy dog";
+        const cjk = "\u{4e2d}\u{6587}\u{5b57}\u{4f53}\u{6e2c}\u{8a66}\u{6a19}\u{6e96}";
+
+        try out.print("\n  glyphs, {d}-char latin line, {s}\n", .{ latin.len, if (canvas.font.available()) "real outlines" else "builtin bitmap" });
+        try out.print("  size    us/draw   ns/glyph   em-px\n", .{});
+        for ([_]f32{ 10, 16, 32, 64, 144 }) |sz| {
+            var best: u64 = std.math.maxInt(u64);
+            var i: usize = 0;
+            while (i < 5) : (i += 1) {
+                canvas.drawTextClip(4, 4, sz, ink, latin, clip); // warm
+                const t0 = ns(io);
+                canvas.drawTextClip(4, 4, sz, ink, latin, clip);
+                const t1 = ns(io);
+                const d: u64 = @intCast(t1 - t0);
+                if (d < best) best = d;
+            }
+            const per = @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(latin.len));
+            try out.print("  {d:>4.0}  {d:>8.1}   {d:>8.1}   {d:>5.1}\n", .{
+                sz,
+                @as(f64, @floatFromInt(best)) / 1e3,
+                per,
+                sz,
+            });
+        }
+
+        // CJK: the worst case for the outline path, since CFF charstrings run
+        // longer and the flattener buffer is sized off them.
+        try out.print("\n  glyphs, {d}-char CJK line, {s}\n", .{ cjk.len, if (canvas.font.available()) "real outlines" else "builtin bitmap" });
+        try out.print("  size    us/draw   ns/glyph\n", .{});
+        for ([_]f32{ 16, 32, 64, 144 }) |sz| {
+            var best: u64 = std.math.maxInt(u64);
+            var i: usize = 0;
+            while (i < 5) : (i += 1) {
+                canvas.drawTextClip(4, 4, sz, ink, cjk, clip);
+                const t0 = ns(io);
+                canvas.drawTextClip(4, 4, sz, ink, cjk, clip);
+                const t1 = ns(io);
+                const d: u64 = @intCast(t1 - t0);
+                if (d < best) best = d;
+            }
+            try out.print("  {d:>4.0}  {d:>8.1}   {d:>8.1}\n", .{
+                sz,
+                @as(f64, @floatFromInt(best)) / 1e3,
+                @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(cjk.len)),
             });
         }
     }

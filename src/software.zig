@@ -2315,6 +2315,12 @@ pub const Canvas = struct {
             else
                 m.rh / 2;
             const row = m.px[@as(usize, sj) * m.rw ..][0..m.rw];
+            // The stencil's interior is fully saturated, so most of a large halo
+            // is `a == 255` -- a plain store of the tint. Going through
+            // `blendCoverage` for those paid a gamma blend per pixel to compute a
+            // value it already knew, which is why the baked blit measured twice
+            // the cost of the distance field it caches.
+            const sat: u8 = h.color.a;
             var x = sp.x0;
             while (x < sp.x1) : (x += 1) {
                 const i = x - ox;
@@ -2330,6 +2336,14 @@ pub const Canvas = struct {
                     m.rw / 2;
                 const a = row[si];
                 if (a == 0) continue;
+                if (a == 255 and sat == 255) {
+                    const o = (@as(usize, @intCast(y)) * self.w + @as(u32, @intCast(x))) * 4;
+                    self.px[o + 0] = h.color.r;
+                    self.px[o + 1] = h.color.g;
+                    self.px[o + 2] = h.color.b;
+                    self.px[o + 3] = 255;
+                    continue;
+                }
                 self.blendCoverage(x, y, h.color, @as(f32, @floatFromInt(a)) / 255.0);
             }
         }
