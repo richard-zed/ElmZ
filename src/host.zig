@@ -720,7 +720,7 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
     defer if (font_bytes) |b| gpa.free(b);
 
     var rt = if (@hasField(@TypeOf(app), "state"))
-        elmz.Runtime(S, M).init(gpa, app.state, app.update, app.view)
+        elmz.Runtime(S, M).init(gpa, .{ .state = app.state }, app.update, app.view)
     else
         elmz.Runtime(S, M).init(gpa, .{}, app.update, app.view);
     defer rt.deinit();
@@ -772,7 +772,128 @@ pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const
     // knowing about before you write the second one.
     const Tokens = if (@hasField(@TypeOf(app), "theme_tokens")) app.theme_tokens else struct {};
 
-    return run(Tokens, S, M, &rt, &canvas, window, opts);
+    return runLoop(Tokens, S, M, &rt, &canvas, window, opts);
+}
+
+/// A prepared app, built by `Runner.init` and driven by `Runner.run`.
+///
+/// This is `runAppEnv` split into two halves so a caller can hold the app
+/// between them -- to build a window, install a signal handler, or set up a
+/// second sink before the first frame. The app literal stays the single source
+/// of truth: every field is read the same `@hasField` way, so there is no
+/// second field list to keep in sync.
+pub fn Runner(comptime App: type) type {
+    return struct {
+        const Self = @This();
+        const S = App.Model;
+        const M = App.Msg;
+
+        canvas: software.Canvas,
+        rt: elmz.Runtime(S, M),
+        font_bytes: ?[]u8 = null,
+        opts: Options,
+        gpa: std.mem.Allocator,
+        tokens: type,
+        window: elmz.Window,
+
+        /// Build the canvas and runtime, but present nothing yet.
+        ///
+        /// `env` carries a HOME for the font search; pass `init.environ_map`
+        /// unless the app declares `home`/`font_home` itself.
+        pub fn init(
+            app: App,
+            gpa: std.mem.Allocator,
+            io: ?std.Io,
+            env: ?*const std.process.Environ.Map,
+            window: elmz.Window,
+        ) !Self {
+            var self: Self = .{
+                .canvas = try software.Canvas.init(gpa, @intCast(app.size.w), @intCast(app.size.h)),
+                .rt = if (@hasField(App, "state"))
+                    elmz.Runtime(S, M).init(gpa, .{ .state = app.state }, app.update, app.view)
+                else
+                    elmz.Runtime(S, M).init(gpa, .{}, app.update, app.view),
+                .opts = .{ .io = io, .gpa = gpa, .overlay = default_overlay },
+                .gpa = gpa,
+                .tokens = if (@hasField(App, "theme_tokens")) app.theme_tokens else struct {},
+                .window = window,
+            };
+
+            // A declared typeface loads once the runtime exists, so a path that
+            // cannot be read can name itself in the error band.
+            errdefer self.deinit();
+            if (@hasField(App, "font_path")) {
+                if (io) |i| self.font_bytes = attachFont(&self.rt.ui, &self.canvas, gpa, i, app.font_path);
+            }
+            if (@hasField(App, "home")) self.opts.home = app.home;
+            if (@hasField(App, "font_home")) self.opts.home = app.font_home;
+            if (self.opts.home == null) {
+                if (env) |e| self.opts.home = e.get("HOME");
+            }
+            if (@hasField(App, "on_key")) self.rt.on_key = app.on_key;
+            if (@hasField(App, "on_text")) self.rt.on_text = app.on_text;
+            if (@hasField(App, "on_wheel")) self.rt.on_wheel = app.on_wheel;
+            if (@hasField(App, "on_outside")) self.rt.on_outside = app.on_outside;
+            if (@hasField(App, "on_tick")) self.rt.on_tick = app.on_tick;
+            if (@hasField(App, "theme_path")) self.opts.theme_path = app.theme_path;
+
+            return self;
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.font_bytes) |b| self.gpa.free(b);
+            self.font_bytes = null;
+            self.rt.deinit();
+            self.canvas.deinit();
+        }
+
+        pub fn run(self: *Self) !Stats {
+            return runLoop(self.tokens, S, M, &self.rt, &self.canvas, self.window, self.opts);
+        }
+
+    };
+}
+
+/// A `Runner` that also owns the backend platform it built the window from.
+///
+/// This is what `elmz.init(app, Backend, gpa, io, env)` returns: the platform is stored by
+/// value, so teardown is a plain call and no allocator is involved in owning it.
+pub fn OwnedRunner(comptime App: type, comptime Plat: type) type {
+    const Base = Runner(App);
+
+    return struct {
+        const Self = @This();
+
+        base: Base,
+        plat: Plat,
+
+        /// Build everything from the app literal alone: `title` names the window and
+        /// `size` sizes both the window and the canvas.
+        pub fn init(
+            app: App,
+            gpa: std.mem.Allocator,
+            io: ?std.Io,
+            env: ?*const std.process.Environ.Map,
+        ) !Self {
+            const title = if (@hasField(App, "title")) app.title else "elmz";
+            var self: Self = undefined;
+            // Built IN PLACE: `asWindow()` keeps a pointer to the platform's own address,
+            // so a copy would leave `base.window.ptr` dangling.
+            self.plat = try Plat.init(title, app.size.w, app.size.h);
+            errdefer self.plat.deinit();
+            self.base = try Base.init(app, gpa, io, env, self.plat.asWindow());
+            return self;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.base.deinit();
+            self.plat.deinit();
+        }
+
+        pub fn run(self: *Self) !Stats {
+            return self.base.run();
+        }
+    };
 }
 
 /// Fill the canvas with the `bg` role.
@@ -877,7 +998,7 @@ fn ActiveDrag(comptime M: type) type {
     };
 }
 
-pub fn run(
+pub fn runLoop(
     comptime App: type,
     comptime S: type,
     comptime M: type,
@@ -1754,7 +1875,7 @@ test "runner paints once, then stops when the window says quit" {
     const events = [_]elmz.Event{.quit};
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 1), stats.frames);
     try std.testing.expectEqual(@as(u32, 1), stats.events);
@@ -1779,7 +1900,7 @@ test "a resize rebuilds the canvas at the size the window reports" {
     const events = [_]elmz.Event{ .resize, .quit };
     var fake: Fake = .{ .events = &events, .pending = .{ .w = 400, .h = 300 } };
 
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 400), canvas.w);
     try std.testing.expectEqual(@as(u32, 300), canvas.h);
@@ -1813,7 +1934,7 @@ test "density sizes the canvas in device pixels while layout stays logical" {
     const events = [_]elmz.Event{.quit};
     var fake: Fake = .{ .events = &events, .density = 2.0 };
 
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     // Device pixels: a 200x120 logical window on a 2x display owns 400x240.
     try std.testing.expectEqual(@as(f32, 2), canvas.scale);
@@ -1851,7 +1972,7 @@ test "a minimised window keeps the frame it already had" {
     const events = [_]elmz.Event{ .resize, .quit };
     var fake: Fake = .{ .events = &events, .pending = .{ .w = 0, .h = 0 } };
 
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 200), canvas.w);
     try std.testing.expectEqual(@as(u32, 120), canvas.h);
@@ -1947,7 +2068,7 @@ test "runner hit-tests a click and routes it to update" {
     };
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 1), rt.state.n);
     try std.testing.expectEqual(@as(u32, 1), stats.messages);
@@ -2180,7 +2301,7 @@ test "run() drains a command's result while polling, with no further events" {
     const events = [_]elmz.Event{ .{ .pointer_down = point }, .{ .pointer_up = point } };
     var fake: Fake = .{ .events = &events, .idle = 20_000 };
 
-    const stats = try run(struct {}, CState, CMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try runLoop(struct {}, CState, CMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 1), rt.state.clicks);
     try std.testing.expectEqual(@as(i32, 42), rt.state.got);
@@ -2222,7 +2343,7 @@ test "a press on one button released over another dispatches nothing" {
     };
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 0), rt.state.n);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -2356,7 +2477,7 @@ test "a cancelled press fires nothing and leaves nothing lit" {
         .quit,
     };
     var fake: Fake = .{ .events = &events };
-    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 0), rt.state.n);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -2404,7 +2525,7 @@ test "a release with no press before it dispatches nothing" {
     const events = [_]elmz.Event{ .{ .pointer_up = point }, .quit };
     var fake: Fake = .{ .events = &events };
 
-    const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    const stats = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(i32, 0), rt.state.n);
     try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -2428,7 +2549,7 @@ test "the same event script produces the same frames and the same pixels" {
         defer rt.deinit();
 
         var fake: Fake = .{ .events = &events };
-        const stats = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+        const stats = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
         res.* = .{ .frames = stats.frames, .messages = stats.messages, .hash = fake.last_hash };
     }
 
@@ -3036,7 +3157,7 @@ test "keystrokes and typed text reach the app's hooks, and null does not repaint
         },
         .idle = 2,
     };
-    const stats = try run(struct {}, KState, KMsg, &rt, &canvas, fake.window(), .{});
+    const stats = try runLoop(struct {}, KState, KMsg, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(i32, 1), rt.state.downs); // 'a' only, not 'q'
     try std.testing.expectEqual(@as(i32, 1), rt.state.ups); // release was seen
@@ -3125,7 +3246,7 @@ test "tab moves focus in document order and never reaches the app hook" {
         },
         .idle = 2,
     };
-    const stats = try run(struct {}, TabS, TabM, &rt, &canvas, fake.window(), .{});
+    const stats = try runLoop(struct {}, TabS, TabM, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(?u64, 1), rt.focus);
     try std.testing.expectEqual(@as(u32, 0), stats.messages); // traversal is not a message
@@ -3168,7 +3289,7 @@ test "tab falls through to the app when nothing can take focus" {
         },
         .idle = 2,
     };
-    const stats = try run(struct {}, PlainS, PlainM, &rt, &canvas, fake.window(), .{});
+    const stats = try runLoop(struct {}, PlainS, PlainM, &rt, &canvas, fake.window(), .{});
 
     // With no focusable candidate, Tab is genuinely not the runtime's: it
     // reaches the hook and the message counts exactly once.
@@ -3207,7 +3328,7 @@ test "a release that claimed nothing does not repaint" {
         },
         .idle = 2,
     };
-    const stats = try run(struct {}, u8, RMsg, &rt, &canvas, fake.window(), .{});
+    const stats = try runLoop(struct {}, u8, RMsg, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(u32, 1), stats.frames); // the first paint only
 }
@@ -3241,7 +3362,7 @@ test "a press and release on a control still repaints twice" {
         },
         .idle = 2,
     };
-    const stats = try run(struct {}, u8, RepaintMsg, &rt, &canvas, fake.window(), .{});
+    const stats = try runLoop(struct {}, u8, RepaintMsg, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(u32, 3), stats.frames); // initial, press, release
 }
@@ -3284,7 +3405,7 @@ test "a viewport under the pointer takes the wheel before the app sees it" {
         },
         .idle = 2,
     };
-    _ = try run(struct {}, VWState, VWMsg, &rt, &canvas, fake.window(), .{});
+    _ = try runLoop(struct {}, VWState, VWMsg, &rt, &canvas, fake.window(), .{});
 
     // Two notches at 48 units each, and the app's hook never ran: the offset is
     // runtime state, so there is nothing for the app to route.
@@ -3332,7 +3453,7 @@ test "a wheel event reaches the app's hook and an unclaimed one repaints nothing
             },
             .idle = 2,
         };
-        const stats = try run(struct {}, WState, WMsg, &rt, &canvas, fake.window(), .{});
+        const stats = try runLoop(struct {}, WState, WMsg, &rt, &canvas, fake.window(), .{});
 
         try std.testing.expectEqual(@as(f32, 2.5), rt.state.dy); // deltas arrive unnormalised
         try std.testing.expectEqual(@as(f32, -1), rt.state.dx);
@@ -3358,7 +3479,7 @@ test "a wheel event reaches the app's hook and an unclaimed one repaints nothing
             },
             .idle = 2,
         };
-        const stats = try run(struct {}, WState, WMsg, &rt, &canvas, fake.window(), .{});
+        const stats = try runLoop(struct {}, WState, WMsg, &rt, &canvas, fake.window(), .{});
 
         try std.testing.expectEqual(@as(u32, 300), rt.state.calls); // three wheel events, no messages
         try std.testing.expectEqual(@as(u32, 0), stats.messages);
@@ -3404,7 +3525,7 @@ test "the frame clock delivers dt while the app animates, and stops when told" {
 
     clock_now = 0;
     var fake = Fake{ .events = &.{}, .idle = 3 };
-    const stats = try run(struct {}, ClockState, ClockMsg, &rt, &canvas, fake.window(), .{ .now_ns = stepNow });
+    const stats = try runLoop(struct {}, ClockState, ClockMsg, &rt, &canvas, fake.window(), .{ .now_ns = stepNow });
 
     try std.testing.expectEqual(@as(u32, 3), rt.state.ticks); // each tick asked for one more
     try std.testing.expectApproxEqAbs(@as(f32, 0.015), rt.state.sum, 1e-5); // 3 x 5ms of real dt
@@ -3437,7 +3558,7 @@ test "a clock that nobody listens to is not a clock: no on_tick, no ticks" {
 
     clock_now = 0;
     var fake = Fake{ .events = &.{}, .idle = 3 };
-    const stats = try run(struct {}, QuietState, QuietMsg, &rt, &canvas, fake.window(), .{ .now_ns = stepNow });
+    const stats = try runLoop(struct {}, QuietState, QuietMsg, &rt, &canvas, fake.window(), .{ .now_ns = stepNow });
 
     try std.testing.expectEqual(@as(u32, 0), rt.state.seen);
     try std.testing.expectEqual(@as(u32, 1), stats.frames); // no message, no repaint
@@ -3485,7 +3606,7 @@ test "dragging the thumb moves the content by the viewport's ratio, and letting 
         },
         .idle = 1,
     };
-    _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+    _ = try runLoop(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
 
     // 10 of pointer travel x (200 content / 100 view) = 20 of content. The
     // direction matters more than the magnitude: dy grows downward, and
@@ -3515,7 +3636,7 @@ test "a cancelled drag stops moving the content" {
         },
         .idle = 1,
     };
-    _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+    _ = try runLoop(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(f32, 20), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
 }
@@ -3538,7 +3659,7 @@ test "a press on the content is not a scroll drag" {
         },
         .idle = 1,
     };
-    _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+    _ = try runLoop(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
 
     try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
 }
@@ -3561,7 +3682,7 @@ test "a drag clamps at both ends of the content" {
             },
             .idle = 1,
         };
-        _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+        _ = try runLoop(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
         try std.testing.expectEqual(@as(f32, 100), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
     }
 
@@ -3581,7 +3702,7 @@ test "a drag clamps at both ends of the content" {
             },
             .idle = 1,
         };
-        _ = try run(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
+        _ = try runLoop(struct {}, DragState, DragMsg, &rt, &canvas, fake.window(), .{});
         try std.testing.expectEqual(@as(f32, 0), rt.scrollOffset(elmz.pathChild(elmz.scroll_path_root, 0)));
     }
 }
@@ -3631,7 +3752,7 @@ test "a press that lands on nothing reaches the app, so a popup can dismiss itse
 
     const ev = [_]elmz.Event{ .{ .pointer_down = empty }, .{ .pointer_up = empty } };
     var fake: Fake = .{ .events = &ev, .w = 200, .h = 200 };
-    _ = try run(struct {}, OutState, OutMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, OutState, OutMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 1), rt.state.outside);
     try std.testing.expectEqual(empty[0], rt.state.at[0]);
@@ -3642,7 +3763,7 @@ test "a press that lands on nothing reaches the app, so a popup can dismiss itse
     const on_btn: [2]f32 = .{ b.x + b.w / 2, b.y + b.h / 2 };
     const ev2 = [_]elmz.Event{ .{ .pointer_down = on_btn }, .{ .pointer_up = on_btn } };
     var fake2: Fake = .{ .events = &ev2, .w = 200, .h = 200 };
-    _ = try run(struct {}, OutState, OutMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, OutState, OutMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
 
     try std.testing.expectEqual(@as(u32, 1), rt.state.clicks);
     try std.testing.expectEqual(@as(u32, 1), rt.state.outside);
@@ -3672,7 +3793,7 @@ test "an arrow key moves the roving cursor, not just the frame" {
 
     const events = [_]elmz.Event{ .{ .key = .{ .named = .down } }, .quit };
     var fake: Fake = .{ .events = &events };
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
 
     // The frame knew how to move a roving cursor for a while and nothing ever
     // asked it to: `rovingStep` had a test and no caller. This asserts the
@@ -3724,20 +3845,20 @@ test "an arrow steps into a roving set from the control that owns it" {
 
     const down = [_]elmz.Event{ .{ .key = .{ .named = .down } }, .quit };
     var fake: Fake = .{ .events = &down };
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
     try std.testing.expectEqual(@as(?u64, 40), rt.focus);
 
     // And from inside, the next one moves along the set as before.
     const again = [_]elmz.Event{ .{ .key = .{ .named = .down } }, .quit };
     var fake2: Fake = .{ .events = &again };
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
     try std.testing.expectEqual(@as(?u64, 41), rt.focus);
 
     // Up from the owner enters at the far end, not the near one.
     rt.focus = 30;
     const up = [_]elmz.Event{ .{ .key = .{ .named = .up } }, .quit };
     var fake3: Fake = .{ .events = &up };
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake3.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake3.window(), .{ .poll_timeout_ms = 0 });
     try std.testing.expectEqual(@as(?u64, 42), rt.focus);
 }
 
@@ -3775,7 +3896,7 @@ test "a toast expires on the clock with no input at all" {
         .quit,
     };
     var fake: Fake = .{ .events = &events };
-    _ = try run(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{
+    _ = try runLoop(struct {}, TState, TMsg, &rt, &canvas, fake.window(), .{
         .poll_timeout_ms = 0,
         .now_ns = &toastNow,
     });
@@ -3850,7 +3971,7 @@ test "a press on an option chooses it, rather than dismissing the list" {
     const on_row: [2]f32 = .{ beta.?.x + beta.?.w / 2, beta.?.y + beta.?.h / 2 };
     const ev = [_]elmz.Event{ .{ .pointer_down = on_row }, .{ .pointer_up = on_row } };
     var fake: Fake = .{ .events = &ev, .w = 200, .h = 200 };
-    _ = try run(struct {}, PopState, PopMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, PopState, PopMsg, &rt, &canvas, fake.window(), .{ .poll_timeout_ms = 0 });
     try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
     try std.testing.expectEqual(@as(u32, 0), rt.state.toggles);
 
@@ -3858,7 +3979,7 @@ test "a press on an option chooses it, rather than dismissing the list" {
     const away: [2]f32 = .{ 195, 195 };
     const ev2 = [_]elmz.Event{ .{ .pointer_down = away }, .{ .pointer_up = away } };
     var fake2: Fake = .{ .events = &ev2, .w = 200, .h = 200 };
-    _ = try run(struct {}, PopState, PopMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
+    _ = try runLoop(struct {}, PopState, PopMsg, &rt, &canvas, fake2.window(), .{ .poll_timeout_ms = 0 });
     try std.testing.expectEqual(@as(u32, 1), rt.state.toggles);
     try std.testing.expectEqual(@as(u32, 1), rt.state.picked_b);
 }
@@ -3964,3 +4085,4 @@ pub fn init(
         .has_font = font_bytes != null,
     };
 }
+

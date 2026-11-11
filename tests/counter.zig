@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
 
     // One call for what used to be five: canvas, typeface, runtime, and the
     // free ordering that keeps the borrowed font bytes alive.
-    var prog = try elmz.init(Model, Msg, gpa, io, .{
+    var prog = try elmz.initHeadless(Model, Msg, gpa, io, .{
         .size = .{ .w = W, .h = H },
         .font = "DejaVu Sans",
         .initial = .{},

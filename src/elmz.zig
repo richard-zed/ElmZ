@@ -33,7 +33,10 @@ const instance_deps: instance.Deps = .{
 pub fn Instance(comptime S: type, comptime M: type) type {
     return instance.Instance(S, M, instance_deps);
 }
-pub fn init(
+
+/// Headless construction: canvas, typeface and runtime without a window.
+/// `init` above is the windowed one-call entry; this is the offscreen twin.
+pub fn initHeadless(
     comptime S: type,
     comptime M: type,
     gpa: Allocator,
@@ -42,6 +45,7 @@ pub fn init(
 ) !Instance(S, M) {
     return instance.init(S, M, instance_deps, gpa, io, opts);
 }
+
 pub const structFields = types.structFields;
 pub const StructField = types.StructField;
 pub const PathOp = types.PathOp;
@@ -80,10 +84,32 @@ pub const FontRegistry = host.FontRegistry;
 pub const applyChainFont = host.applyChainFont;
 pub const runApp = host.runApp;
 pub const runAppEnv = host.runAppEnv;
+/// Split form of `runAppEnv`: `Runner(App).init` prepares, `.run()` drives.
+pub const Runner = host.Runner;
+
+/// One-call entry: builds the window from the app literal, then runs.
+///
+///     pub fn main(init: std.process.Init) !void {
+///         var r = try elmz.init(app, sdl.Windows, init.gpa, init.io, init.environ_map);
+///         defer r.deinit();
+///         _ = try r.run();
+///     }
+///
+/// `Plat` is the backend window type (`sdl.Windows`); elmz cannot import a
+/// backend itself without forcing one on every app.
+pub fn init(
+    app: anytype,
+    comptime Plat: type,
+    gpa: std.mem.Allocator,
+    io: ?std.Io,
+    env: ?*const std.process.Environ.Map,
+) !host.OwnedRunner(@TypeOf(app), Plat) {
+    return host.OwnedRunner(@TypeOf(app), Plat).init(app, gpa, io, env);
+}
 pub const HeadlessFonts = host.HeadlessFonts;
 pub const paintInto = host.paintInto;
 pub const paintOnce = host.paintOnce;
-pub const run = host.run;
+pub const runLoop = host.runLoop;
 
 /// The palette a `Ui` builds with.
 pub const Theme = struct {
