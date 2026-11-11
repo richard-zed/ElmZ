@@ -59,6 +59,11 @@ fn keyEvent(ev: c.SDL_KeyboardEvent) elmz.Key {
 pub const Windows = struct {
     const Self = @This();
 
+    /// SDL_Init/SDL_Quit are PROCESS-GLOBAL, but a window owns one of each.
+    /// Without a count the first window to close tears down SDL underneath
+    /// every other one still running.
+    var live: usize = 0;
+
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
     texture: *c.SDL_Texture,
@@ -79,11 +84,17 @@ pub const Windows = struct {
         // it was built with when wayland is absent. An environment variable
         // still outranks the hint, which keeps a dummy driver usable.
         _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "wayland");
-        if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
-            std.log.err("SDL_Init: {s}", .{c.SDL_GetError()});
-            return error.SdlInit;
+        if (live == 0) {
+            if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
+                std.log.err("SDL_Init: {s}", .{c.SDL_GetError()});
+                return error.SdlInit;
+            }
         }
-        errdefer c.SDL_Quit();
+        live += 1;
+        errdefer {
+            live -= 1;
+            if (live == 0) c.SDL_Quit();
+        }
 
         // SDL3: visible by default — no SDL_WINDOW_SHOWN, no x/y. Resizable,
         // because a window that cannot be resized is not the same thing as one
@@ -138,7 +149,9 @@ pub const Windows = struct {
         c.SDL_DestroyTexture(self.texture);
         c.SDL_DestroyRenderer(self.renderer);
         c.SDL_DestroyWindow(self.window);
-        c.SDL_Quit();
+        // Last window out shuts SDL down; an earlier one leaves it running.
+        if (live > 0) live -= 1;
+        if (live == 0) c.SDL_Quit();
     }
 
     pub fn asWindow(self: *Self) elmz.Window {

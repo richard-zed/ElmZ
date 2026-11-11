@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (primary) |b| gpa.free(b);
     if (primary) |b| canvas.setFont(b);
 
-    const fonts = elmz.HeadlessFonts.init(gpa, io, null);
+    const fonts = try elmz.HeadlessFonts.init(gpa, io, null);
     defer fonts.deinit();
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);

@@ -359,8 +359,10 @@ pub fn resolveChain(
         out.gradients = loaded.gradients;
         theme_mod.freeVars(App, gpa, &out.app);
         out.app = loaded.vars;
-        // Replaced, not merged: a half-inherited table would mean a style's
-        // `.color` came from one file and its `.font` from another.
+        // Replaced, not merged -- UNLIKE the scoped colours and font above. A
+        // single STYLE must come from one file: merging would let `.color` come
+        // from one tier and `.font` from another, which is one style meaning two
+        // things. Scoped values are free to inherit because each resolves alone.
         if (out.owned_styles.len > 0) theme_mod.freeStyles(gpa, &out.owned_styles);
         out.owned_styles = loaded.styles;
         out.styles = theme_mod.styleView(loaded.styles, &out.view_buf, gpa) catch &.{};
@@ -496,20 +498,28 @@ pub fn themeCandidates(
 /// How long the loop may block in poll before it gets to re-stat the theme.
 fn effectiveTimeout(opts: Options, busy: bool, watching: bool, animating: bool, toasting: bool, editing: bool) i32 {
     if (busy) return 5;
+    // Every clock that is RUNNING gets a vote, and the shortest wins. Returning
+    // on the first match instead meant an animating app held the 8ms anim
+    // timeout even when a toast (100ms) or caret (32ms) only needed the longer
+    // one -- 12x the wakeups, on battery, for no visible gain. Three things
+    // change with time and none may sit behind another.
+    var t: i32 = opts.poll_timeout_ms;
+    const vote = struct {
+        fn add(cur: i32, want: i32) i32 {
+            return if (cur < 0) want else @min(cur, want);
+        }
+    };
     // An animation produces frames with no input at all, so blocking here is
     // exactly the bug: it would freeze until the pointer moved.
-    if (animating) return opts.anim_poll_ms;
-    // A toast expires on a wall clock with no input to wake the loop, so the
-    // wait is bounded whether or not anything else is moving.
-    if (toasting) return if (opts.poll_timeout_ms < 0) opts.toast_poll_ms else @min(opts.poll_timeout_ms, opts.toast_poll_ms);
-    // A caret blinks on a wall clock with no input to wake the loop, so the wait
-    // is bounded whether or not anything else is moving. Same trap as the toast
-    // above, and it has now cost time four separate ways: -1 means block
-    // forever, and nothing that changes with time may sit behind it.
-    if (editing) return if (opts.poll_timeout_ms < 0) opts.caret_poll_ms else @min(opts.poll_timeout_ms, opts.caret_poll_ms);
-    if (!watching) return opts.poll_timeout_ms;
-    if (opts.poll_timeout_ms < 0) return opts.theme_poll_ms;
-    return @min(opts.poll_timeout_ms, opts.theme_poll_ms);
+    if (animating) t = vote.add(t, opts.anim_poll_ms);
+    // A toast expires on a wall clock with no input to wake the loop.
+    if (toasting) t = vote.add(t, opts.toast_poll_ms);
+    // A caret blinks on a wall clock too. -1 means block forever, and nothing
+    // that changes with time may sit behind it.
+    if (editing) t = vote.add(t, opts.caret_poll_ms);
+    // The theme watch only polls when there is a file to watch.
+    if (watching) t = vote.add(t, opts.theme_poll_ms);
+    return t;
 }
 
 /// A logical size as a pixel count.
@@ -921,8 +931,11 @@ pub const HeadlessFonts = struct {
 
     /// Built IN PLACE, never returned by value: `lookup.ptr` addresses `reg` by location,
     /// and a returned struct is a temporary that the caller copies.
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8) *HeadlessFonts {
-        const self = gpa.create(HeadlessFonts) catch unreachable;
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8) !*HeadlessFonts {
+        // OOM is an error, not an abort: `catch unreachable` here would take the
+        // whole process down with no diagnostic on the one allocation that
+        // starts the font path.
+        const self = try gpa.create(HeadlessFonts);
         self.* = .{
             .reg = FontRegistry.init(gpa, io, home),
             .lookup = .{ .ptr = undefined, .resolve = registryResolve },
@@ -1248,16 +1261,18 @@ pub fn runLoop(
                     .toast => |t| t,
                     else => continue,
                 };
-                var slot: ?*ToastSlot = null;
-                for (toasts.items) |*s| {
+                // An INDEX, not a pointer: `append` may reallocate, and a
+                // pointer taken before it dangles afterwards.
+                var slot: ?usize = null;
+                for (toasts.items, 0..) |s, si| {
                     if (s.key == key) {
-                        slot = s;
+                        slot = si;
                         break;
                     }
                 }
-                if (slot) |sl| {
-                    sl.rect = h.rect;
-                    sl.seen = true;
+                if (slot) |si| {
+                    toasts.items[si].rect = h.rect;
+                    toasts.items[si].seen = true;
                 } else {
                     toasts.append(rt.gpa, .{
                         .key = key,
@@ -1266,12 +1281,13 @@ pub fn runLoop(
                         .msg = tst.msg,
                         .rect = h.rect,
                     }) catch continue;
-                    slot = &toasts.items[toasts.items.len - 1];
+                    slot = toasts.items.len - 1;
                 }
                 // Hover pauses the countdown: a toast that vanishes while you
                 // are reading it is worse than one that lingers.
-                const inside = if (rt.pointer.pos) |pt| slot.?.rect.containsRounded(0, pt) else false;
-                if (!inside) slot.?.t += dt_secs;
+                const si = slot.?;
+                const inside = if (rt.pointer.pos) |pt| toasts.items[si].rect.containsRounded(0, pt) else false;
+                if (!inside) toasts.items[si].t += dt_secs;
             }
             // Absent from the frame means the app took it away; forget the slot
             // so the same key appearing later starts a fresh timer.

@@ -1034,6 +1034,9 @@ pub const Canvas = struct {
         if (w == 0 or h == 0) return;
         if (w == self.w and h == self.h) return;
         const px = try self.gpa.alloc(u8, @as(usize, w) * h * 4);
+        // Without this, a failing scratch alloc below returned early and leaked
+        // the pixel buffer just taken -- `try` exits before the frees.
+        errdefer self.gpa.free(px);
         @memset(px, 0);
         // The stroke scratch tracks the canvas: it is one byte a pixel.
         const scratch = try self.gpa.alloc(u8, @as(usize, w) * h);
@@ -1875,6 +1878,16 @@ pub const Canvas = struct {
     /// coverage term swapped for a falloff that straddles the edge.
     pub fn halo(self: *Self, rect: types.Rect, corner: f32, h: types.Halo, clip: types.Rect) void {
         if (h.color.a == 0) return;
+        // Non-finite geometry is refused BEFORE anything converts it to an int.
+        // `shape.w <= 0` does not catch a NaN -- NaN compares false against
+        // every bound -- so a NaN width reached `@intFromFloat` in the baked
+        // path and trapped. `clipSpan` guards the same way, for the same reason.
+        if (!std.math.isFinite(rect.x) or !std.math.isFinite(rect.y) or
+            !std.math.isFinite(rect.w) or !std.math.isFinite(rect.h) or
+            !std.math.isFinite(h.offset[0]) or !std.math.isFinite(h.offset[1]) or
+            !std.math.isFinite(h.spread) or !std.math.isFinite(h.blur) or
+            !std.math.isFinite(corner))
+            return;
         // Explicit beats the default. A quality setting the library can
         // second-guess is not an escape hatch, so `.sdf` is honoured even where
         // a stencil would be cheaper.
@@ -2725,7 +2738,7 @@ pub const Canvas = struct {
     /// output pixel for a source that is usually already the right size. The
     /// scaling that does happen -- by the display density -- is an integer-ish
     /// step where a filter would buy nothing and blur the outline.
-    pub fn blitRgba(self: *Self, rect: types.Rect, pixels: []const u8, src_w: u32, src_h: u32, clip: types.Rect) void {
+    fn blitRgba(self: *Self, rect: types.Rect, pixels: []const u8, src_w: u32, src_h: u32, clip: types.Rect) void {
         if (src_w == 0 or src_h == 0) return;
         const dr = self.scaledRect(rect);
         const x0: i32 = @intFromFloat(@round(dr.x));

@@ -1193,6 +1193,9 @@ const Walker = struct {
             switch (self.tok()) {
                 .l_brace, .l_paren, .l_bracket => depth += 1,
                 .r_brace, .r_paren, .r_bracket => {
+                    // Saturating: a closer with no opener is malformed input,
+                    // and a usize underflow would panic on it rather than skip.
+                    if (depth == 0) return;
                     depth -= 1;
                     if (depth == 0) {
                         self.advance();
