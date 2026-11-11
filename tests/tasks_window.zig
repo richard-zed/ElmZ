@@ -12,13 +12,12 @@ pub fn main(init: std.process.Init) !void {
     // polling and a frame clock; it is threaded now, consumed later.
     const gpa = init.gpa;
 
-    var platform = try sdl.Windows.init(app.app.title, app.app.size.w, app.app.size.h);
-    defer platform.deinit();
-
     // No status print. `std.debug.print` initializes the stderr writer, which
     // scans the raw environment block on first use (std.Io.Threaded.Environ.scan)
     // and panics on a null entry. A launcher-supplied environment is not ours to
     // assume well-formed, and nothing about a GUI app's exit should depend on
     // stderr being usable. The window is the output.
-    _ = try elmz.runAppEnv(app.app, gpa, init.io, init.environ_map, platform.asWindow());
+    var w = try elmz.init(app.app, sdl.Windows, init.gpa, init.io, init.environ_map);
+    defer w.deinit();
+    _ = try w.run();
 }

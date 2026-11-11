@@ -728,86 +728,9 @@ fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io:
     return bytes;
 }
 
-/// Compose a whole app onto a window backend.
-///
-/// No environment map is handed in, so the font search has no HOME and skips
-/// every `~` directory -- meaning user-installed fonts are invisible to an app
-/// that starts here. That is not a failure worth crashing on, but it is a
-/// capability silently missing. Use `runAppEnv` with `init.environ_map` when the
-/// app names a font family rather than shipping its own file.
-pub fn runApp(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, window: elmz.Window) !Stats {
-    return runAppEnv(app, gpa, io, null, window);
-}
-
-/// `runApp` with the process environment available to the font search.
-pub fn runAppEnv(app: anytype, gpa: std.mem.Allocator, io: ?std.Io, env: ?*const std.process.Environ.Map, window: elmz.Window) !Stats {
-    const S = app.Model;
-    const M = app.Msg;
-
-    var canvas = try software.Canvas.init(gpa, @intCast(app.size.w), @intCast(app.size.h));
-    defer canvas.deinit();
-    var font_bytes: ?[]u8 = null;
-    defer if (font_bytes) |b| gpa.free(b);
-
-    var rt = if (@hasField(@TypeOf(app), "state"))
-        elmz.Runtime(S, M).init(gpa, .{ .state = app.state }, app.update, app.view)
-    else
-        elmz.Runtime(S, M).init(gpa, .{}, app.update, app.view);
-    defer rt.deinit();
-    // A declared typeface loads once the runtime exists, so a path that cannot
-    // be read can name itself in the error band instead of silently measuring
-    // every glyph at zero.
-    if (@hasField(@TypeOf(app), "font_path")) {
-        if (io) |i| font_bytes = attachFont(&rt.ui, &canvas, gpa, i, app.font_path);
-    }
-
-    var opts: Options = .{ .io = io, .gpa = gpa, .overlay = default_overlay };
-    // An app may pin the search to its own tree (a fixture in a test); the
-    // environment below is the default, because needing a home directory is the
-    // library's problem, not something every app should have to remember.
-    if (@hasField(@TypeOf(app), "home")) opts.home = app.home;
-    if (@hasField(@TypeOf(app), "font_home")) opts.home = app.font_home;
-    // Nothing declared: take it from the environment, because a font chain
-    // without a home directory is a feature that silently does nothing.
-    if (opts.home == null) {
-        if (env) |e| opts.home = e.get("HOME");
-    }
-    // Keystrokes and typed text, same optional-field trick as `state`: an app
-    // that declares `on_key` / `on_text` gets them, one that does not never
-    // hears about them and pays nothing. Focus stays in the app's Model -- the
-    // runtime has no focus ring, so it cannot pick a destination.
-    if (@hasField(@TypeOf(app), "on_key")) rt.on_key = app.on_key;
-    if (@hasField(@TypeOf(app), "on_text")) rt.on_text = app.on_text;
-    if (@hasField(@TypeOf(app), "on_wheel")) rt.on_wheel = app.on_wheel;
-    if (@hasField(@TypeOf(app), "on_outside")) rt.on_outside = app.on_outside;
-    if (@hasField(@TypeOf(app), "on_tick")) rt.on_tick = app.on_tick;
-
-    // Same optional-field trick as `state`: an app that wants a theme file
-    // declares `theme_path` in its struct, and one that does not never sees it.
-    if (@hasField(@TypeOf(app), "theme_path")) opts.theme_path = app.theme_path;
-    // `app.title` is the name a user would recognise, so the per-app XDG tier
-    // needs no extra field. An undeclared or empty title just skips that tier.
-
-    // Same trick again, for the type rather than a value: an app that wants
-    // tokens in its theme file names the struct here (`theme_tokens = Tokens`),
-    // and its `.vars` section is then parsed and checked against it. Without it
-    // there is no tier and a file writing one is told so, which is the whole
-    // point of declaring.
-    //
-    // What this does NOT do is hand the values back. Declaring `theme_tokens`
-    // buys validation, not delivery: `run` passes `.vars` through unread, so an
-    // app that wants the numbers resolves the chain itself (see
-    // `resolveChain`). Stated here because the declaration reads as though the
-    // runner would deliver them, and two resolutions of one file are worth
-    // knowing about before you write the second one.
-    const Tokens = if (@hasField(@TypeOf(app), "theme_tokens")) app.theme_tokens else struct {};
-
-    return runLoop(Tokens, S, M, &rt, &canvas, window, opts);
-}
-
 /// A prepared app, built by `Runner.init` and driven by `Runner.run`.
 ///
-/// This is `runAppEnv` split into two halves so a caller can hold the app
+/// Split into two halves so a caller can hold the app
 /// between them -- to build a window, install a signal handler, or set up a
 /// second sink before the first frame. The app literal stays the single source
 /// of truth: every field is read the same `@hasField` way, so there is no

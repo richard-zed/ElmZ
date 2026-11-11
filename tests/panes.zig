@@ -12,7 +12,7 @@ pub const app = .{
     .Msg = Msg,
     .update = update,
     .view = view,
-    // Wired through `@hasField` in runApp: an app that declares these hears
+    // Wired through `@hasField`: an app that declares these hears
     // about them, an app that does not pays nothing.
     .on_key = onKey,
     .on_outside = onOutside,

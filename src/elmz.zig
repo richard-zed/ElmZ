@@ -82,9 +82,7 @@ pub const Stats = host.Stats;
 pub const FontSlot = host.FontSlot;
 pub const FontRegistry = host.FontRegistry;
 pub const applyChainFont = host.applyChainFont;
-pub const runApp = host.runApp;
-pub const runAppEnv = host.runAppEnv;
-/// Split form of `runAppEnv`: `Runner(App).init` prepares, `.run()` drives.
+/// Lower-level entry: `Runner(App).init` prepares, `.run()` drives.
 pub const Runner = host.Runner;
 
 /// One-call entry: builds the window from the app literal, then runs.
@@ -4133,7 +4131,7 @@ pub fn Runtime(comptime S: type, comptime M: type) type {
         text_editing: bool = false,
         /// The window, when there is one.
         window: ?Window = null,
-        /// Optional keystroke hooks, wired by `runApp` from the app declaration.
+        /// Optional keystroke hooks, wired from the app declaration.
         on_key: ?*const fn (*S, Key, Phase) ?M = null,
         /// Same contract for typed text; see `Event.text` for why it is not derivable from
         /// keys and why the slice is borrowed.
@@ -6186,7 +6184,7 @@ test "a font failure names the path in the band" {
     var rt = Runtime(FocusState, FocusMsg).init(gpa, .{}, focusUpdate, focusView);
     defer rt.deinit();
 
-    // Raised between frames, the way runApp raises a failed load -- so this
+    // Raised between frames, the way a failed load is raised -- so this
     // also re-covers the "external failure survives the frame reset" path for
     // a second prong, not just `.theme`.
     rt.ui.failExternal(.font, "font not found: {s}", .{"src/font.ttf"});
