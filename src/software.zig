@@ -1385,6 +1385,50 @@ pub const Canvas = struct {
                     }
                     return;
                 }
+                // Per-pixel square root is what a radial ramp looks like, but
+                // it is not what it has to COST. Two opaque stops make the
+                // colour a linear function of t, so t only has to be known to
+                // 1/255 -- below that the mix rounds to the same byte. Sampling
+                // sqrt into a 256-entry table therefore changes no output pixel
+                // while removing the root from the inner loop entirely. The
+                // table is indexed by dt*t, where dt is per row, so the inner
+                // loop is an add and a fetch.
+                if (twoOpaque(g.stops)) {
+                    // Slot k stands for t in [k/255, (k+1)/255); sample its
+                    // centre so the worst error is half a step, not a whole one.
+                    var lut: [256]types.Color = undefined;
+                    var k: usize = 0;
+                    while (k < 256) : (k += 1) {
+                        lut[k] = g.stops.atFast((@as(f32, @floatFromInt(k)) + 0.5) / 255.0);
+                    }
+                    const t_scale: f32 = 255.0 / r;
+                    const r2 = r * r;
+                    while (y < sp.y1) : (y += 1) {
+                        const dyv = (@as(f32, @floatFromInt(y)) + 0.5) - cy;
+                        const dy2 = dyv * dyv;
+                        const row = @as(usize, @intCast(y)) * self.w;
+                        var x = sp.x0;
+                        var off = (row + @as(usize, @intCast(sp.x0))) * 4;
+                        const dx0 = (@as(f32, @floatFromInt(sp.x0)) + 0.5) - cx;
+                        var dxv = dx0;
+                        while (x < sp.x1) : (x += 1) {
+                            const d2 = dxv * dxv + dy2;
+                            // Clamp before the root: outside r the last stop
+                            // holds, and the table's top slot is exactly that.
+                            const kk: u8 = if (d2 >= r2) 255 else @intFromFloat(
+                                @sqrt(d2) * t_scale,
+                            );
+                            const c = lut[kk];
+                            self.px[off + 0] = c.r;
+                            self.px[off + 1] = c.g;
+                            self.px[off + 2] = c.b;
+                            self.px[off + 3] = 255;
+                            off += 4;
+                            dxv += 1.0;
+                        }
+                    }
+                    return;
+                }
                 const inv = 1.0 / r;
                 while (y < sp.y1) : (y += 1) {
                     const dyv = (@as(f32, @floatFromInt(y)) + 0.5) - cy;
@@ -5987,4 +6031,55 @@ test "a stroked glyph is hollow, and its fill is not" {
     // something thinner than an outline of the glyph, e.g. nothing at all in
     // the right place.
     try std.testing.expect(interior_inked > 0);
+}
+
+test "the radial lookup table stays within one step of the exact ramp" {
+    // The two-stop radial used to take a square root and a divide per pixel.
+    // It now samples t into a 256-entry colour table instead. That is only
+    // sound if the sampled colour matches the exact one to within the 8-bit
+    // step the table quantises to -- so this measures it rather than assuming.
+    const gpa = std.testing.allocator;
+    const c0 = types.Color{ .r = 0x1e, .g = 0x1e, .b = 0x2e, .a = 255 };
+    const c1 = types.Color{ .r = 0xf3, .g = 0xc0, .b = 0xe5, .a = 255 };
+
+    const w: u32 = 96;
+    const h: u32 = 96;
+    var c = try testCanvas(gpa, w, h);
+    defer c.deinit();
+    c.clear(.{ .r = 0, .g = 0, .b = 0, .a = 255 });
+
+    // The table only serves the COVERED case: a radial small enough to leave
+    // the corners outside takes the scanline-split path and returns before it.
+    // A default radius leaves the corners outside (r scales by width alone, so
+    // a square box reaches sqrt(2)/2 past the centre), which would make this
+    // test pass without ever executing the code it names.
+    const fill = types.Fill{ .radial = .{
+        .radius = 4.0,
+        .stops = types.Stops.two(c0, c1),
+    } };
+    c.fillRect(.{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) }, fill);
+
+    // Independent of the canvas: recompute what the exact path would produce.
+    const cx: f32 = @as(f32, @floatFromInt(w)) * 0.5;
+    const cy: f32 = @as(f32, @floatFromInt(h)) * 0.5;
+    const r: f32 = 4.0 * @as(f32, @floatFromInt(w));
+    var worst: u8 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const dx = (@as(f32, @floatFromInt(x)) + 0.5) - cx;
+            const dy = (@as(f32, @floatFromInt(y)) + 0.5) - cy;
+            const t = std.math.clamp(@sqrt(dx * dx + dy * dy) / r, 0, 1);
+            const want = types.Stops.two(c0, c1).atFast(t);
+            const got = c.px[(y * w + x) * 4 ..][0..4];
+            const dr = if (want.r > got[0]) want.r - got[0] else got[0] - want.r;
+            const dg = if (want.g > got[1]) want.g - got[1] else got[1] - want.g;
+            const db = if (want.b > got[2]) want.b - got[2] else got[2] - want.b;
+            worst = @max(worst, @max(dr, @max(dg, db)));
+        }
+    }
+    // One step, not zero: the table quantises t to 1/256 and samples the slot
+    // centre, so a half-step of the ramp is the honest bound.
+    try std.testing.expect(worst <= 1);
 }

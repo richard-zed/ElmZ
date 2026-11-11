@@ -77,6 +77,10 @@ const Row = struct {
     prims: usize,
     hits: usize,
     build_ns: u64,
+    /// Clearing the canvas, measured separately. It is a full-canvas fill of
+    /// every pixel, so folding it into paint charged each row count the whole
+    /// 3.7M-pixel canvas and buried the difference between 40 rows and 400.
+    clear_ns: u64,
     paint_ns: u64,
 };
 
@@ -119,21 +123,24 @@ fn measure(
         f.deinit();
     }
 
-    var out: Row = .{ .rows = rows, .prims = 0, .hits = 0, .build_ns = 0, .paint_ns = 0 };
+    var out: Row = .{ .rows = rows, .prims = 0, .hits = 0, .build_ns = 0, .clear_ns = 0, .paint_ns = 0 };
     for (0..iters) |_| {
         const t0 = ns(io);
         var f = try rt.frame(.{ .w = @floatFromInt(canvas.w), .h = @floatFromInt(canvas.h) }, canvas.renderer());
         const t1 = ns(io);
         canvas.clear(rt.ui.theme.bg);
-        canvas.paintFrame(f.prims);
         const t2 = ns(io);
+        canvas.paintFrame(f.prims);
+        const t3 = ns(io);
         out.prims = f.prims.len;
         out.hits = f.hits.len;
         out.build_ns += @intCast(t1 - t0);
-        out.paint_ns += @intCast(t2 - t1);
+        out.clear_ns += @intCast(t2 - t1);
+        out.paint_ns += @intCast(t3 - t2);
         f.deinit();
     }
     out.build_ns /= @intCast(iters);
+    out.clear_ns /= @intCast(iters);
     out.paint_ns /= @intCast(iters);
     return out;
 }
@@ -236,18 +243,22 @@ pub fn main(init: std.process.Init) !void {
     defer rt.deinit();
 
     try out.print("canvas {d}x{d}\n\n", .{ W, H });
-    try out.print("  rows  prims  hits   build ms   paint ms\n", .{});
+    try out.print("  rows  prims  hits   build ms   clear ms   paint ms   ns/prim\n", .{});
+    const canvas_area: f64 = @floatFromInt(W * H);
     for ([_]usize{ 40, 100, 400 }) |rows| {
         const iters: usize = if (rows > 200) 5 else 20;
         const r = try measure(io, &rt, &canvas, rows, iters, null);
-        try out.print("  {d:>4}  {d:>5}  {d:>4}   {d:>8.3}   {d:>8.3}\n", .{
+        try out.print("  {d:>4}  {d:>5}  {d:>4}   {d:>8.3}   {d:>8.3}   {d:>8.3}   {d:>7.1}\n", .{
             r.rows,
             r.prims,
             r.hits,
             @as(f64, @floatFromInt(r.build_ns)) / 1e6,
+            @as(f64, @floatFromInt(r.clear_ns)) / 1e6,
             @as(f64, @floatFromInt(r.paint_ns)) / 1e6,
+            @as(f64, @floatFromInt(r.paint_ns)) / @as(f64, @floatFromInt(@max(r.prims, 1))),
         });
     }
+    _ = canvas_area;
 
     // Hover: same geometry, pointer parked over the button column. The delta is
     // the second traversal the hit list forces on hovered frames.
@@ -323,16 +334,25 @@ pub fn main(init: std.process.Init) !void {
             .{ .name = "diagonal 135", .fill = elmz.Fill.angled(135, a, b) },
             .{ .name = "diagonal 205", .fill = elmz.Fill.angled(205, a, b) },
             .{ .name = "radial", .fill = elmz.Fill.radialFill(a, b) },
-            // Leaves the corners outside the last stop, which is the split fast
-            // path. The covering shape above never reaches it, and was for a long
-            // time the only radial measured.
-            .{ .name = "radial split", .fill = elmz.Fill{ .radial = .{
+            // A small radius, so most of the box falls OUTSIDE the circle and
+            // the split path can answer whole scanline runs with one fillRow.
+            // BOTH radius cases above are `covered = false` (the radius scales
+            // by width alone), so what differs between them is the fraction of
+            // pixels needing a square root -- not which path runs.
+            .{ .name = "radial small", .fill = elmz.Fill{ .radial = .{
                 .radius = 0.28,
+                .stops = elmz.Stops.two(a, b),
+            } } },
+            // The ONLY case that reaches the lookup table: a radius large
+            // enough to cover the whole box. Every case above returns from the
+            // scanline split first, which is why the table had no measurement.
+            .{ .name = "radial covered", .fill = elmz.Fill{ .radial = .{
+                .radius = 4.0,
                 .stops = elmz.Stops.two(a, b),
             } } },
         };
         try out.print("\n  640x480 full-canvas fill, {d} passes x5, best of 5\n", .{iters});
-        try out.print("  variant        ms/pass   ns/px   vs solid   spread\n", .{});
+        try out.print("  variant        ms/pass   ns/px   vs solid   spread  (all split path)\n", .{});
         var solid_ns: f64 = 0;
         for (cases, 0..) |cs, i| {
             const sm = repeatFill(io, &fc, cs.fill, iters);
@@ -383,11 +403,12 @@ pub fn main(init: std.process.Init) !void {
                 var f = try wrt.frame(.{ .w = @floatFromInt(canvas.w), .h = @floatFromInt(canvas.h) }, canvas.renderer());
                 const t1 = ns(io);
                 canvas.clear(wrt.ui.theme.bg);
-                canvas.paintFrame(f.prims);
                 const t2 = ns(io);
+                canvas.paintFrame(f.prims);
+                const t3 = ns(io);
                 f.deinit();
                 const b: u64 = @intCast(t1 - t0);
-                const p: u64 = @intCast(t2 - t1);
+                const p: u64 = @intCast(t3 - t2);
                 if (b < bbest) bbest = b;
                 if (p < pbest) pbest = p;
             }
@@ -412,9 +433,13 @@ pub fn main(init: std.process.Init) !void {
         const cjk = "\u{4e2d}\u{6587}\u{5b57}\u{4f53}\u{6e2c}\u{8a66}\u{6a19}\u{6e96}";
 
         try out.print("\n  glyphs, {d}-char latin line, {s}\n", .{ latin.len, if (canvas.font.available()) "real outlines" else "builtin bitmap" });
-        try out.print("  size    us/draw   ns/glyph   em-px\n", .{});
+        // hits/misses/flushes separate "this is slow" from "this is slow because
+        // the cache gave up". A high flush count at one size and not another is
+        // an arena sized below that size's working set, not a raster problem.
+        try out.print("  size    us/draw   ns/glyph   hits  misses  flushes\n", .{});
         for ([_]f32{ 10, 16, 32, 64, 144 }) |sz| {
             var best: u64 = std.math.maxInt(u64);
+            const before = canvas.font.cacheStats();
             var i: usize = 0;
             while (i < 5) : (i += 1) {
                 canvas.drawTextClip(4, 4, sz, ink, latin, clip); // warm
@@ -424,21 +449,25 @@ pub fn main(init: std.process.Init) !void {
                 const d: u64 = @intCast(t1 - t0);
                 if (d < best) best = d;
             }
+            const after = canvas.font.cacheStats();
             const per = @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(latin.len));
-            try out.print("  {d:>4.0}  {d:>8.1}   {d:>8.1}   {d:>5.1}\n", .{
+            try out.print("  {d:>4.0}  {d:>8.1}   {d:>8.1}  {d:>5}  {d:>6}  {d:>7}\n", .{
                 sz,
                 @as(f64, @floatFromInt(best)) / 1e3,
                 per,
-                sz,
+                if (before != null and after != null) after.?.hits - before.?.hits else 0,
+                if (before != null and after != null) after.?.misses - before.?.misses else 0,
+                if (before != null and after != null) after.?.flushes - before.?.flushes else 0,
             });
         }
 
         // CJK: the worst case for the outline path, since CFF charstrings run
         // longer and the flattener buffer is sized off them.
         try out.print("\n  glyphs, {d}-char CJK line, {s}\n", .{ cjk.len, if (canvas.font.available()) "real outlines" else "builtin bitmap" });
-        try out.print("  size    us/draw   ns/glyph\n", .{});
+        try out.print("  size    us/draw   ns/glyph   hits  misses  flushes\n", .{});
         for ([_]f32{ 16, 32, 64, 144 }) |sz| {
             var best: u64 = std.math.maxInt(u64);
+            const before = canvas.font.cacheStats();
             var i: usize = 0;
             while (i < 5) : (i += 1) {
                 canvas.drawTextClip(4, 4, sz, ink, cjk, clip);
@@ -448,10 +477,14 @@ pub fn main(init: std.process.Init) !void {
                 const d: u64 = @intCast(t1 - t0);
                 if (d < best) best = d;
             }
-            try out.print("  {d:>4.0}  {d:>8.1}   {d:>8.1}\n", .{
+            const after = canvas.font.cacheStats();
+            try out.print("  {d:>4.0}  {d:>8.1}   {d:>8.1}  {d:>5}  {d:>6}  {d:>7}\n", .{
                 sz,
                 @as(f64, @floatFromInt(best)) / 1e3,
                 @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(cjk.len)),
+                if (before != null and after != null) after.?.hits - before.?.hits else 0,
+                if (before != null and after != null) after.?.misses - before.?.misses else 0,
+                if (before != null and after != null) after.?.flushes - before.?.flushes else 0,
             });
         }
     }
