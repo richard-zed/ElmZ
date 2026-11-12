@@ -1038,6 +1038,7 @@ pub fn Element(comptime M: type) type {
             return .{
                 .bg = self.bg,
                 .color = self.color,
+                .tone = self.tone,
                 .border = self.border,
                 // `border_width` belongs here for exactly the reason `face`
                 // does below: anything that round-trips an element through
@@ -1051,7 +1052,7 @@ pub fn Element(comptime M: type) type {
                 // and every styled label painted in the primary face -- tofu for
                 // any script the primary does not cover.
                 .face = self.face,
-                .weight = self.weight,
+                .weight = if (self.weight == 0) null else self.weight,
                 .radius = self.radius,
                 .pad = self.pad,
                 .halo = self.halo,
