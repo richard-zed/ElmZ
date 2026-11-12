@@ -801,6 +801,9 @@ fn hitAppend(
 }
 
 /// Appearance for one element, as a single value.
+/// How a text label is coloured: `muted` draws in the theme's muted colour.
+pub const Tone = enum { normal, muted };
+
 pub const Style = struct {
     /// Which registered typeface this element's text draws in, as an index. BEHIND THE
     /// SCENES: nothing in a `view` sets this.
@@ -813,6 +816,8 @@ pub const Style = struct {
     weight: ?u16 = null,
     bg: ?Fill = null,
     color: ?Fill = null,
+    /// Tone override, from a theme style. Null leaves the call site's choice.
+    tone: ?Tone = null,
     border: ?Fill = null,
     /// Border width in logical pixels; absent means 1.
     border_width: ?f32 = null,
@@ -927,6 +932,8 @@ pub fn Element(comptime M: type) type {
         /// what this element draws with on top of `bg`: text colour, control label, bar
         /// fill.
         color: ?Fill = null,
+        /// Muted tone, resolved to a colour at paint. Absent leaves the call site's choice.
+        tone: ?Tone = null,
         /// Which registered typeface this element's text draws in. Set through
         /// `Style.face`, which is itself behind the scenes -- see `Style`.
         face: u16 = 0,
@@ -1075,6 +1082,7 @@ pub fn Element(comptime M: type) type {
         pub fn applyStyle(self: *Self, s: Style) void {
             self.bg = mergeFill(self.bg, s.bg);
             self.color = mergeFill(self.color, s.color);
+            self.tone = s.tone;
             self.border = mergeFill(self.border, s.border);
             if (s.border_width) |v| self.border_width = v;
             if (s.face) |v| self.face = v;
@@ -1107,6 +1115,7 @@ pub fn Element(comptime M: type) type {
         pub fn mergeStyle(self: *Self, s: Style) void {
             if (s.bg) |v| self.bg = v;
             if (s.color) |v| self.color = v;
+            if (s.tone) |v| self.tone = v;
             if (s.border) |v| self.border = v;
             if (s.border_width) |v| self.border_width = v;
             if (s.face) |v| self.face = v;
@@ -2507,7 +2516,6 @@ pub fn Ui(comptime M: type) type {
         }
 
         /// Which of the two text roles a label uses.
-        pub const Tone = enum { normal, muted };
 
         /// What every builder accepts, repeated in each opts struct rather than shared
         /// through a nested field.
@@ -2558,9 +2566,8 @@ pub fn Ui(comptime M: type) type {
             // it is narrower and set at the call site. Assigned AFTER the merge
             // so no theme `.color` can replace it -- the original bug was the
             // assignment happening before the merge, which let a style win.
-            if (fieldOr(o, "tone", @as(Tone, .normal)) == .muted) {
-                e.color = .{ .solid = self.theme.text_muted };
-            }
+            const tone: Tone = fieldOr(o, "tone", @as(?Tone, null)) orelse (st.tone orelse .normal);
+            if (tone == .muted) e.color = .{ .solid = self.theme.text_muted };
             return e;
         }
 
@@ -2569,10 +2576,15 @@ pub fn Ui(comptime M: type) type {
             /// Optional so a STYLE can supply it: a non-optional default of 14 meant every
             /// call site silently asked for 14, and a theme's `.size` could never win.
             size: ?f32 = null,
+            /// Optional so a STYLE can supply it; a default of 0 meant a style's weight
+            /// could never win.
+            weight: ?u16 = null,
             /// The typeface to draw this label in, BY NAME, resolved through the runtime's
             /// registry.
             font: ?[]const u8 = null,
-            tone: Tone = .normal,
+            /// Optional so a STYLE can supply it; a non-optional default made every call
+            /// site silently ask for `.normal` and a theme's tone could never win.
+            tone: ?Tone = null,
             wrap: bool = false,
             on_press: ?M = null,
             hover: ?Fill = null,
@@ -2754,7 +2766,7 @@ pub fn Ui(comptime M: type) type {
             // and raise the same miss again, and the band holds one line.
             const merged = self.resolveStyle(o);
             const size: f32 = o.size orelse (merged.size orelse 14);
-            const weight: u16 = merged.weight orelse 0;
+            const weight: u16 = o.weight orelse (merged.weight orelse 0);
             const e = self.mk(.{ .text = .{
                 .bytes = o.label,
                 .size = size,
@@ -5604,6 +5616,7 @@ test "every Style field is honoured by applyStyle and mergeStyle" {
             bool => true,
             Halo => .{ .color = .{ .r = 9, .g = 10, .b = 11, .a = 12 }, .blur = 3, .spread = 1, .offset = .{ 1, 2 } },
             Frost => .{ .blur = 5 },
+            Tone => .muted,
             else => @compileError("new Style field '" ++ f.name ++ "' of type " ++ @typeName(Child) ++
                 " needs a value here, and a matching line in applyStyle and mergeStyle"),
         };
