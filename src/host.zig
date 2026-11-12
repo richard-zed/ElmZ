@@ -754,19 +754,18 @@ fn attachFont(ui: anytype, canvas: *software.Canvas, gpa: std.mem.Allocator, io:
 /// second sink before the first frame. The app literal stays the single source
 /// of truth: every field is read the same `@hasField` way, so there is no
 /// second field list to keep in sync.
-pub fn Runner(comptime App: type) type {
+pub fn Runner(comptime App: type, comptime S: type, comptime M: type) type {
     return struct {
         const Self = @This();
-        const S = App.Model;
-        const M = App.Msg;
 
         canvas: software.Canvas,
         rt: elmz.Runtime(S, M),
         font_bytes: ?[]u8 = null,
         opts: Options,
         gpa: std.mem.Allocator,
-        tokens: type,
         window: elmz.Window,
+
+        const tokens = if (@hasField(App, "theme_tokens")) App.theme_tokens else struct {};
 
         /// Build the canvas and runtime, but present nothing yet.
         ///
@@ -787,7 +786,6 @@ pub fn Runner(comptime App: type) type {
                     elmz.Runtime(S, M).init(gpa, .{}, app.update, app.view),
                 .opts = .{ .io = io, .gpa = gpa, .overlay = default_overlay },
                 .gpa = gpa,
-                .tokens = if (@hasField(App, "theme_tokens")) app.theme_tokens else struct {},
                 .window = window,
             };
 
@@ -820,7 +818,7 @@ pub fn Runner(comptime App: type) type {
         }
 
         pub fn run(self: *Self) !Stats {
-            return runLoop(self.tokens, S, M, &self.rt, &self.canvas, self.window, self.opts);
+            return runLoop(tokens, S, M, &self.rt, &self.canvas, self.window, self.opts);
         }
     };
 }
@@ -829,8 +827,8 @@ pub fn Runner(comptime App: type) type {
 ///
 /// This is what `elmz.init(app, Backend, gpa, io, env)` returns: the platform is stored by
 /// value, so teardown is a plain call and no allocator is involved in owning it.
-pub fn OwnedRunner(comptime App: type, comptime Plat: type) type {
-    const Base = Runner(App);
+pub fn OwnedRunner(comptime App: type, comptime S: type, comptime M: type, comptime Plat: type) type {
+    const Base = Runner(App, S, M);
 
     return struct {
         const Self = @This();

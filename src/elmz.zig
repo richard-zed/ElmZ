@@ -101,8 +101,8 @@ pub fn init(
     gpa: std.mem.Allocator,
     io: ?std.Io,
     env: ?*const std.process.Environ.Map,
-) !host.OwnedRunner(@TypeOf(app), Plat) {
-    return host.OwnedRunner(@TypeOf(app), Plat).init(app, gpa, io, env);
+) !host.OwnedRunner(@TypeOf(app), @field(app, "Model"), @field(app, "Msg"), Plat) {
+    return host.OwnedRunner(@TypeOf(app), @field(app, "Model"), @field(app, "Msg"), Plat).init(app, gpa, io, env);
 }
 pub const HeadlessFonts = host.HeadlessFonts;
 pub const paintInto = host.paintInto;
