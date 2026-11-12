@@ -286,6 +286,12 @@ pub fn roleColor(pal: Theme, name: []const u8) Color {
     // first; and a genuinely misspelled role is likelier to be a colour someone
     // reached for than a name the theme forgot.
     if (builtinColor(name)) |c| return c;
+    // Short alias for the role whose stored name is a compound. `.muted` is the
+    // one people reach for and `text_muted` is what it is called; without this
+    // it fell through to `pal.text` -- a real colour, so nothing looked broken
+    // and the label simply drew in the wrong one. After the field and builtin
+    // passes, so a theme defining `.muted` itself still wins.
+    if (std.mem.eql(u8, name, "muted")) return pal.text_muted;
 
     // A name the file defined beats the `text` fallback. Without this a custom
     // role resolved to `text` -- a real colour, so nothing looked broken, the

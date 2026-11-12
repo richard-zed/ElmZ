@@ -84,6 +84,24 @@ const Row = struct {
     paint_ns: u64,
 };
 
+/// A prim whose rect misses the canvas entirely paints nothing: `clipSpan`
+/// rejects it, so the cost is the dispatch and the intersect, not pixels.
+fn primOnCanvas(p: elmz.Primitive, w: u32, h: u32) bool {
+    const r = switch (p) {
+        .quad => |q| q.rect,
+        .rrect => |q| q.rect,
+        .halo => |q| q.rect,
+        .frost => |q| q.rect,
+        .blit => |q| q.rect,
+        .icon => |q| q.rect,
+        .image => |q| q.rect,
+        .text => |t| elmz.Rect{ .x = t.x, .y = t.y, .w = 1, .h = t.size },
+    };
+    const fw: f32 = @floatFromInt(w);
+    const fh: f32 = @floatFromInt(h);
+    return r.x + r.w > 0 and r.y + r.h > 0 and r.x < fw and r.y < fh;
+}
+
 fn ns(io: std.Io) i128 {
     return std.Io.Timestamp.now(io, .awake).toNanoseconds();
 }
@@ -241,6 +259,41 @@ pub fn main(init: std.process.Init) !void {
 
     var rt = elmz.Runtime(Model, Msg).init(gpa, .{}, update, view);
     defer rt.deinit();
+
+    // Viewport-shaped: a canvas the size of a window, with a list taller than
+    // it. The tall canvas above is the opposite on purpose -- it keeps every
+    // row on-canvas so the prim count is honest. Here the point is the
+    // opposite: most rows sit OUTSIDE the canvas, which is what a scrolling
+    // list actually hands the painter.
+    {
+        const VW: u32 = 720;
+        const VH: u32 = 900;
+        var vc = try software.Canvas.init(gpa, VW, VH);
+        defer vc.deinit();
+        if (font_bytes) |fb| vc.setFont(fb);
+
+        try out.print("\nviewport {d}x{d}, list taller than the canvas\n", .{ VW, VH });
+        try out.print("  rows  prims  offscreen  build ms   paint ms   ns/prim\n", .{});
+        for ([_]usize{ 40, 100, 400 }) |rows| {
+            const r = try measure(io, &rt, &vc, rows, 5, null);
+            var off: usize = 0;
+            {
+                var f = try rt.frame(.{ .w = @floatFromInt(VW), .h = @floatFromInt(VH) }, vc.renderer());
+                defer f.deinit();
+                for (f.prims) |p| {
+                    if (!primOnCanvas(p, VW, VH)) off += 1;
+                }
+            }
+            try out.print("  {d:>4}  {d:>5}  {d:>9}   {d:>8.3}   {d:>8.3}   {d:>7.1}\n", .{
+                r.rows,
+                r.prims,
+                off,
+                @as(f64, @floatFromInt(r.build_ns)) / 1e6,
+                @as(f64, @floatFromInt(r.paint_ns)) / 1e6,
+                @as(f64, @floatFromInt(r.paint_ns)) / @as(f64, @floatFromInt(@max(r.prims, 1))),
+            });
+        }
+    }
 
     try out.print("canvas {d}x{d}\n\n", .{ W, H });
     try out.print("  rows  prims  hits   build ms   clear ms   paint ms   ns/prim\n", .{});

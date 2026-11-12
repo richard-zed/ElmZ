@@ -800,6 +800,9 @@ pub const Canvas = struct {
     /// Additional faces, each with its own cache, addressed by index >= 1.
     extra_faces: std.ArrayListUnmanaged(ExtraFace) = .empty,
     extra_faces_max: usize = 8,
+    /// Faces already reported as unable to vary a weight, so the warning prints
+    /// once per face rather than once per text element.
+    weight_static: std.AutoHashMapUnmanaged(u16, void) = .empty,
 
     /// Which face the NEXT text call draws in.
     cur_face: u16 = 0,
@@ -1070,6 +1073,7 @@ pub const Canvas = struct {
         if (self.font_mem) |m| self.gpa.destroy(m);
         for (self.extra_faces.items) |f| self.gpa.destroy(f.mem);
         self.extra_faces.deinit(self.gpa);
+        self.weight_static.deinit(self.gpa);
         self.gpa.free(self.px);
     }
 
@@ -3103,6 +3107,53 @@ pub const Canvas = struct {
         return null;
     }
 
+    /// The style word a numeric weight asks for.
+    fn weightWord(w: u16) []const u8 {
+        if (w == 0) return "Regular";
+        if (w <= 150) return "Thin";
+        if (w <= 250) return "ExtraLight";
+        if (w <= 350) return "Light";
+        if (w <= 450) return "Regular";
+        if (w <= 550) return "Medium";
+        if (w <= 650) return "SemiBold";
+        if (w <= 750) return "Bold";
+        if (w <= 850) return "ExtraBold";
+        return "Black";
+    }
+
+    /// A face in the SAME family whose style answers `cur_weight`, for a family
+    /// that ships its weights as separate static files. Null when none does.
+    fn pickStaticWeight(self: *Self, index: u16) ?u16 {
+        if (self.cur_weight == 0) return null;
+        const word = weightWord(self.cur_weight);
+        const base = if (index == 0) &self.font_base else blk: {
+            if (index >= self.extra_faces.items.len) return null;
+            break :blk &self.extra_faces.items[index].face_base;
+        };
+        if (!base.ok) return null;
+        var fam_buf: [128]u8 = undefined;
+        const fam = base.family(&fam_buf) orelse return null;
+        var sty_buf: [128]u8 = undefined;
+        const sty = base.style(&sty_buf) orelse "";
+        if (styleAnswers(sty, word)) return null;
+        var i: usize = 0;
+        while (i <= self.extra_faces_max) : (i += 1) {
+            if (i == index) continue;
+            const f = if (i == 0) &self.font_base else blk: {
+                if (i >= self.extra_faces.items.len) continue;
+                break :blk &self.extra_faces.items[i].face_base;
+            };
+            if (!f.ok) continue;
+            var fb: [128]u8 = undefined;
+            const f_fam = f.family(&fb) orelse continue;
+            if (!eqlIgnoreCase(f_fam, fam)) continue;
+            var sb: [128]u8 = undefined;
+            const f_sty = f.style(&sb) orelse "";
+            if (styleAnswers(f_sty, word)) return @intCast(i);
+        }
+        return null;
+    }
+
     /// Rebuild `cur_face`'s instance at `cur_weight`.
     fn revaryFace(self: *Self, index: u16) void {
         // Rebuild from the PRISTINE face, never from the current one. Applying a
@@ -3124,7 +3175,45 @@ pub const Canvas = struct {
         // why two weights drew identical pixels: nothing about the outline had
         // been asked to change.
         const wi = wghtAxis(slot.*);
-        if (wi == null) return;
+        if (wi == null) {
+            // A static file cannot be asked for a weight. A family that ships
+            // Regular/Bold/... as SEPARATE files can still honour it -- by a
+            // different face -- so try that before giving up.
+            if (self.pickStaticWeight(index)) |other| {
+                const base2 = if (other == 0)
+                    &self.font_base
+                else if (other < self.extra_faces.items.len)
+                    &self.extra_faces.items[other].face_base
+                else
+                    &self.font_base;
+                if (base2.ok) {
+                    self.clearMeasureCache();
+                    self.clearWrapCache();
+                    if (index == 0) {
+                        self.font = base2.*;
+                        if (self.font_mem) |m| {
+                            self.font.attachCache(&m.bytes);
+                            self.font.attachFields(&m.fields);
+                            self.font.attachLookup(&m.lookup);
+                            self.font.attachKern(&m.kern, &m.kern_mem);
+                        }
+                    } else {
+                        self.extra_faces.items[index].face = base2.*;
+                    }
+                }
+                return;
+            }
+            // Nothing to switch to. Every `.weight` lands here and vanishes,
+            // which looks exactly like the weight never being plumbed at all.
+            if (!self.weight_static.contains(self.cur_face)) {
+                self.weight_static.put(self.gpa, self.cur_face, {}) catch {};
+                std.debug.print(
+                    "elmz: face {d} has no wght axis and no weight sibling; .weight={d} ignored\n",
+                    .{ self.cur_face, self.cur_weight },
+                );
+            }
+            return;
+        }
         var coords: [32]f32 = undefined;
         const n = @min(slot.axisCount(), coords.len);
         var i: usize = 0;
