@@ -1018,7 +1018,7 @@ pub fn Element(comptime M: type) type {
             /// `face` is set through `Style.face`, never by a view: a style names a
             /// typeface, `Ui` resolves it against the registry and stores the INDEX here.
             text: struct { bytes: []const u8, size: f32, face: u16 = 0, weight: u16 = 0 },
-            button: struct { label: []const u8, size: f32 },
+            button: struct { label: []const u8, size: f32, weight: u16 = 0 },
             bar: struct { value: f32 },
             /// Children share ONE origin, each displaced by its own `offset`.
             stack: struct { children: []const *Self },
@@ -1914,6 +1914,10 @@ pub fn Element(comptime M: type) type {
                 .button => |b| {
                     // No fill here: `fill_now` above already drew it, with
                     // hover and press substituted in. This arm is content only.
+                    // Weight belongs to the face, so it is set before measuring:
+                    // a heavier instance is wider, and measuring at the old
+                    // weight would centre the label off by the difference.
+                    r.setWeight(b.weight);
                     const ts = r.measureText(b.label, b.size);
                     r.text(
                         rect.x + (rect.w - ts.width) / 2,
@@ -2567,6 +2571,11 @@ pub fn Ui(comptime M: type) type {
             // reads both off the geometry.
             if (st.weight) |v| switch (e.geometry) {
                 .text => |*tx| tx.weight = v,
+                // A button draws its own label, so it needs the weight as much
+                // as text does. Without this a themed `.weight` reached every
+                // `ui.text()` and no button at all -- which is most of what a
+                // theme styles.
+                .button => |*bt| bt.weight = v,
                 else => {},
             };
             // Tone is the caller's explicit choice and outranks a style colour:

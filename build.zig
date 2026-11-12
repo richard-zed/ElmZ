@@ -504,6 +504,10 @@ pub fn build(b: *std.Build) void {
     const tmp_run = b.addRunArtifact(tmp_sticky);
     b.step("tmp-sticky", "ad hoc").dependOn(&tmp_run.step);
 
+    const tmp_ink = b.addTest(.{ .root_module = software_mod, .filters = &.{"a variable face draws a heavier weight"} });
+    const tmp_ink_run = b.addRunArtifact(tmp_ink);
+    b.step("tmp-ink", "ad hoc").dependOn(&tmp_ink_run.step);
+
     const test_step = b.step("test", "run core + software + host + reducer + font tests");
     test_step.dependOn(&b.addRunArtifact(software_tests).step);
     test_step.dependOn(&b.addRunArtifact(core_tests).step);

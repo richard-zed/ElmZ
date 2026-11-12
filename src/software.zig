@@ -5945,6 +5945,72 @@ fn countInk(px: []const u8) usize {
     return n;
 }
 
+/// A variable font from the host, or null. Several known locations so the test
+/// is not pinned to one distro's package name -- being pinned is what let the
+/// weight path go unproven: the only test that exercised it hardcoded Roboto
+/// Flex and skipped silently everywhere else.
+fn hostVariableFont(gpa: Allocator) ?[]u8 {
+    const paths = [_][]const u8{
+        "/usr/share/fonts/roboto-flex/RobotoFlex[GRAD,XOPQ,XTRA,YOPQ,YTAS,YTDE,YTFI,YTLC,YTUC,opsz,slnt,wdth,wght].ttf",
+        "/usr/share/fonts/inter/InterVariable.ttf",
+        "/usr/share/fonts/truetype/inter/InterVariable.ttf",
+        "/usr/share/fonts/noto/NotoSans[wdth,wght].ttf",
+        "/usr/share/fonts/google-noto-variable-fonts/NotoSans[wdth,wght].ttf",
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    for (paths) |p| {
+        const b = std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        // A file that is not actually variable is worse than a miss: the test
+        // would skip on a machine that DOES have a variable font further down.
+        if (@import("cedar.zig").Font.init(b).axisCount() == 0) {
+            gpa.free(b);
+            continue;
+        }
+        return b;
+    }
+    return null;
+}
+
+test "a variable face draws a heavier weight with more ink" {
+    // The end-to-end assertion the whole weight path was missing. Everything
+    // between the theme's `.weight` and the outline had only ever been checked
+    // by asserting struct fields, and every one of those passed while the
+    // rendered pixels never changed.
+    const gpa = std.testing.allocator;
+    const bytes = hostVariableFont(gpa) orelse {
+        std.debug.print("PROBE: no variable font found\n", .{});
+        return error.SkipZigTest;
+    };
+    defer gpa.free(bytes);
+
+    const probe = @import("cedar.zig").Font.init(bytes);
+    std.debug.print("PROBE: variable font found, axes={d}\n", .{probe.axisCount()});
+    if (probe.axisCount() == 0) return error.SkipZigTest;
+
+    var c = try Canvas.init(gpa, 200, 120);
+    defer c.deinit();
+    c.setFont(bytes);
+    const r = c.renderer();
+    const ink: types.Fill = .{ .solid = .{ .r = 255, .g = 255, .b = 255, .a = 255 } };
+    const area: types.Rect = .{ .x = 0, .y = 0, .w = 200, .h = 120 };
+
+    @memset(c.px, 0);
+    r.setFace(0);
+    r.setWeight(300);
+    r.text(10, 10, 70, ink, "H", area);
+    const light = countInk(c.px);
+
+    @memset(c.px, 0);
+    r.setFace(0);
+    r.setWeight(900);
+    r.text(10, 10, 70, ink, "H", area);
+    const heavy = countInk(c.px);
+
+    std.debug.print("PROBE: weight ink light={d} heavy={d}\n", .{ light, heavy });
+    try std.testing.expect(light > 0);
+    try std.testing.expect(heavy > light);
+}
+
 test "a measurement cache does not answer across variation instances" {
     // `setFontAt` clears both caches, so rekeying them is invisible through it.
     // The state that distinguishes `instanceKey` from `fingerprint` is a face
