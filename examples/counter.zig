@@ -51,7 +51,7 @@ fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var window = try elmz.init(app, sdl.Windows, init.gpa, init.io, init.environ_map);
-    defer window.deinit();
+    const window = try elmz.init(app, sdl.Windows, init.gpa, init.io, init.environ_map);
+    defer window.destroy();
     _ = try window.run();
 }

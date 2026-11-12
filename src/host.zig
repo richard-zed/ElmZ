@@ -839,24 +839,30 @@ pub fn OwnedRunner(comptime App: type, comptime S: type, comptime M: type, compt
         /// Build everything from the app literal alone: `title` names the window and
         /// `size` sizes both the window and the canvas.
         pub fn init(
+            self: *Self,
             app: App,
             gpa: std.mem.Allocator,
             io: ?std.Io,
             env: ?*const std.process.Environ.Map,
-        ) !Self {
+        ) !void {
             const title = if (@hasField(App, "title")) app.title else "elmz";
-            var self: Self = undefined;
-            // Built IN PLACE: `asWindow()` keeps a pointer to the platform's own address,
-            // so a copy would leave `base.window.ptr` dangling.
+            // Built IN PLACE in the caller's storage: `asWindow()` keeps a pointer to
+            // the platform's own address, so returning Self by value would leave
+            // `base.window.ptr` pointing at a dead frame.
             self.plat = try Plat.init(title, app.size.w, app.size.h);
             errdefer self.plat.deinit();
             self.base = try Base.init(app, gpa, io, env, self.plat.asWindow());
-            return self;
         }
 
         pub fn deinit(self: *Self) void {
             self.base.deinit();
             self.plat.deinit();
+        }
+
+        pub fn destroy(self: *Self) void {
+            const gpa = self.base.gpa;
+            self.deinit();
+            gpa.destroy(self);
         }
 
         pub fn run(self: *Self) !Stats {

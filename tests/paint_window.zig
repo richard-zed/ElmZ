@@ -3,6 +3,7 @@
 const std = @import("std");
 const sdl = @import("platform_sdl3");
 const app = @import("paint.zig");
+const elmz = @import("elmz");
 
 pub fn main(init: std.process.Init) !void {
     // Same entry-point shape as the headless examples: the runtime supplies
@@ -16,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
     // and panics on a null entry. A launcher-supplied environment is not ours to
     // assume well-formed, and nothing about a GUI app's exit should depend on
     // stderr being usable. The window is the output.
-    var w = try elmz.init(app.app, sdl.Windows, init.gpa, init.io, init.environ_map);
-    defer w.deinit();
+    const w = try elmz.init(app.app, sdl.Windows, init.gpa, init.io, init.environ_map);
+    defer w.destroy();
     _ = try w.run();
 }

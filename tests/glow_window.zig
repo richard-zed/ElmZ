@@ -3,6 +3,7 @@
 const std = @import("std");
 const sdl = @import("platform_sdl3");
 const app = @import("glow.zig");
+const elmz = @import("elmz");
 
 pub fn main(init: std.process.Init) !void {
     // Same entry-point shape as the headless examples: the runtime supplies the
@@ -10,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
     // program. `init.io` is what the runner uses for theme polling.
     const gpa = init.gpa;
 
-    var w = try elmz.init(app.app, sdl.Windows, init.gpa, init.io, init.environ_map);
-    defer w.deinit();
+    const w = try elmz.init(app.app, sdl.Windows, init.gpa, init.io, init.environ_map);
+    defer w.destroy();
     _ = try w.run();
 }

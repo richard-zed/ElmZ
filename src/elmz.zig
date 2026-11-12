@@ -88,8 +88,8 @@ pub const Runner = host.Runner;
 /// One-call entry: builds the window from the app literal, then runs.
 ///
 ///     pub fn main(init: std.process.Init) !void {
-///         var r = try elmz.init(app, sdl.Windows, init.gpa, init.io, init.environ_map);
-///         defer r.deinit();
+///         const r = try elmz.init(app, sdl.Windows, init.gpa, init.io, init.environ_map);
+///         defer r.destroy();
 ///         _ = try r.run();
 ///     }
 ///
@@ -101,8 +101,12 @@ pub fn init(
     gpa: std.mem.Allocator,
     io: ?std.Io,
     env: ?*const std.process.Environ.Map,
-) !host.OwnedRunner(@TypeOf(app), @field(app, "Model"), @field(app, "Msg"), Plat) {
-    return host.OwnedRunner(@TypeOf(app), @field(app, "Model"), @field(app, "Msg"), Plat).init(app, gpa, io, env);
+) !*host.OwnedRunner(@TypeOf(app), @field(app, "Model"), @field(app, "Msg"), Plat) {
+    const R = host.OwnedRunner(@TypeOf(app), @field(app, "Model"), @field(app, "Msg"), Plat);
+    const self = try gpa.create(R);
+    errdefer gpa.destroy(self);
+    try self.init(app, gpa, io, env);
+    return self;
 }
 pub const HeadlessFonts = host.HeadlessFonts;
 pub const paintInto = host.paintInto;
