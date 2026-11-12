@@ -2257,6 +2257,7 @@ pub const Canvas = struct {
                     // queued, counted, and drawn as ordinary text.
                     r.borderedText(t.x, t.y, t.size, t.border_fill orelse t.fill, t.bytes, bw, t.clip);
                     r.setFace(t.face);
+                    r.setWeight(t.weight);
                     r.text(t.x, t.y, t.size, t.fill, t.bytes, t.clip);
                 } else if (t.stroke) |sw| {
                     r.strokedText(t.x, t.y, t.size, t.fill, t.bytes, sw, t.clip);
