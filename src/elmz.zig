@@ -2806,7 +2806,15 @@ pub fn Ui(comptime M: type) type {
         }
 
         pub fn button(self: *Self, o: ButtonOpts) *Elem {
-            const e = self.mk(.{ .button = .{ .label = o.label, .size = o.size } });
+            // Resolved here, not in `finish`: `finish` merges the style onto the
+            // ELEMENT, and the label is drawn from the button sub-struct, so a
+            // theme's `.weight` never reached it.
+            const st = self.resolveStyle(o);
+            const e = self.mk(.{ .button = .{
+                .label = o.label,
+                .size = o.size,
+                .weight = o.weight orelse (st.weight orelse 0),
+            } });
             // The click is an element fact, not a button fact: the generic
             // `on_press` hit path already registers it, so the button geometry
             // does not need to carry the message as well.
