@@ -2,22 +2,20 @@ const std = @import("std");
 const elmz = @import("elmz");
 const sdl = @import("platform_sdl3");
 
-pub const app = .{
-    .title = "elmz",
+const app = .{
+    .title = "ElmZ Examples",
     .size = .{ .w = 420, .h = 210 },
     .Model = Model,
-    .model = Model,
     .Msg = Msg,
     .update = update,
     .view = view,
-    .theme_path = @as(?[]const u8, "examples-theme.zon"),
 };
 
-pub const Msg = enum { dec, inc, reset };
+const Msg = enum { dec, inc, reset };
 
-pub const Model = struct {
-    count: i32 = 0,
-    presses: u32 = 0,
+const Model = struct {
+    count: i8 = 0,
+    presses: u8 = 0,
 };
 
 fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
@@ -31,40 +29,49 @@ fn update(m: *Model, msg: Msg) elmz.Action(Msg) {
 }
 
 fn view(m: *Model, ui: *elmz.Ui(Msg)) *elmz.Element(Msg) {
-    const base = "base";
-
-    const inc = ui.button(.{
-        .label = "+",
-        .msg = .inc,
-        .style = .{
-            .name = base,
-            .width = 56,
-            .margin_left = 0,
-        }
-    });
-    const dec = ui.button(.{
-        .label = "-",
-        .msg = .dec,
-        .style = .{
-            .name = base,
-            .width = 56,
-        }
-    });
-    const reset = ui.button(.{
-        .label = "reset",
-        .msg = .reset,
-        .style = .{
-            .name = base,
-            .width = 92,
-        },
-    });
     return ui.column(.{ .children = &.{
-        ui.text(.{ .label = "ELMZ", .style = .{ .name = base, .size = 22 }, .size = 22}),
-        ui.text(.{ .label = "an elm-shaped runtime, zig 0.16", .style = .{ .name = base, .size = 12}, .tone = .muted }),
-        ui.text(.{ .label = ui.fmt("{d}", .{m.count}), .style = .{ .name = base }}),
-        ui.row(.{ .children = &.{ inc, dec, reset }, .style = .{ .name = base }}),
+        ui.text(.{ .label = "ElmZ",
+            .style = .{
+                .name = "base",
+                .size = 24,
+            },
+        }),
+        ui.text(.{ .label = "an elm-shaped runtime, zig 0.17",
+            .style = .{
+                .name = "base",
+                .size = 12,
+                .tone = .muted,
+            }
+        }),
+        ui.text(.{ .label = ui.fmt("{d}", .{m.count}),
+            .style = .{
+                .name = "base",
+                .size = 18,
+            }
+        }),
+        ui.row(.{ .children = &.{
+            ui.button(.{ .label = "+", .msg = .inc,
+                .style = .{
+                    .name = "base",
+                    .width = 56,
+                    .margin_left = 0,
+                }
+            }),
+            ui.button(.{ .label = "-", .msg = .dec,
+                .style = .{
+                    .name = "base",
+                    .width = 56,
+                }
+            }),
+            ui.button(.{ .label = "reset", .msg = .reset,
+                .style = .{
+                    .name = "base",
+                    .width = 92,
+                },
+            }),
+        }}),
         ui.bar(.{ .value = @as(f32, @floatFromInt(m.count + 3)) / 8.0, .margin_top = 16 }),
-    }, .style = .{ .pad = 24 } });
+    }, .style = .{ .pad = 18 } });
 }
 
 pub fn main(init: std.process.Init) !void {
