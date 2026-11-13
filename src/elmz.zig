@@ -2648,6 +2648,8 @@ pub fn Ui(comptime M: type) type {
             label: []const u8,
             msg: M,
             size: f32 = 16,
+            /// Optional so a STYLE can supply it; 0 meant a theme's weight could never win.
+            weight: ?u16 = null,
             on_press: ?M = null,
             hover: ?Fill = null,
             pressed: ?Fill = null,
