@@ -1199,19 +1199,19 @@ pub fn runLoop(
                 pixelDim(size.h * density),
             );
 
-            // Every face the theme has resolved so far must be IN the canvas
-            // before the prims that name one are painted. `indexOf` loads a
-            // face lazily and hands back its index, so `face_lookup` could
-            // name index 1 while the canvas held only the primary: `facePtrAt`
-            // then returned the default face and a styled `.font`/`.weight`
-            // drew as the primary, silently, for every face. Cheap per frame:
-            // `setFontIndex` returns immediately once a slot is loaded.
-            if (font_reg) |*r| r.attachAll(canvas);
-
             const clock = opts.io;
             const t0 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
             frame = try rt.frame(size, canvas.renderer());
             const t1 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
+
+            // AFTER the frame, never before: `view` is what calls
+            // `face_lookup.resolve`, and `FontRegistry.indexOf` loads the face
+            // and appends it to `entries` at that moment. Attaching earlier
+            // left the registry empty, so the first frame painted prims naming
+            // a face the canvas did not hold -- `facePtrAt` fell back to the
+            // primary and the theme's `.font`/`.weight` only appeared on the
+            // next repaint. Cheap: `setFontIndex` returns once a slot is loaded.
+            if (font_reg) |*r| r.attachAll(canvas);
 
             if (!frameCoversCanvas(frame.?.prims, @floatFromInt(canvas.w), @floatFromInt(canvas.h)))
                 clearToTheme(canvas, &rt.ui);
