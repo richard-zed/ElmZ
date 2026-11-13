@@ -3091,7 +3091,6 @@ pub const Canvas = struct {
 
     /// Point the STICKY face at a variable instance of `weight`.
     pub fn setFaceWeight(self: *Self, weight: u16) void {
-        std.debug.print("elmz: setWeight w={d} cur_face={d} extra={d}\n", .{ weight, self.cur_face, self.extra_faces.items.len });
         // No early-return on `weight == cur_weight`: the sticky `cur_weight` is
         // cleared by `setFace`, but `font` can still hold a varied instance from
         // an earlier element, so the value matching proves nothing about `font`.
@@ -3169,12 +3168,8 @@ pub const Canvas = struct {
             if (index >= self.extra_faces.items.len) return;
             break :blk &self.extra_faces.items[index].face_base;
         };
-        if (!base.ok) {
-            std.debug.print("elmz: revary face {d} has no base\n", .{index});
-            return;
-        }
+        if (!base.ok) return;
         const slot = base;
-        std.debug.print("elmz: revary face {d} wi={?d} axes={d}\n", .{ index, wghtAxis(slot.*), slot.axisCount() });
 
         // `atCoords` takes coords in AXIS ORDER, so a one-element array sets
         // axis 0 -- which is `wght` only by luck. Roboto Flex declares twelve

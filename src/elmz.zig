@@ -2564,11 +2564,6 @@ pub fn Ui(comptime M: type) type {
             // style arrives last: `text()` runs before `finish` merges it, so a
             // face set at build time would be overwritten by the default.
             const st = e.style();
-            std.debug.print("elmz: style face={?d} weight={?d} geom={s} name={?s}\n", .{
-                st.face, st.weight,
-                @tagName(e.geometry),
-                style.refName(),
-            });
             if (st.face) |f| switch (e.geometry) {
                 .text => |*tx| tx.face = f,
                 // A button draws its own label, so a themed `.font` has to reach

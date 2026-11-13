@@ -1199,6 +1199,15 @@ pub fn runLoop(
                 pixelDim(size.h * density),
             );
 
+            // Every face the theme has resolved so far must be IN the canvas
+            // before the prims that name one are painted. `indexOf` loads a
+            // face lazily and hands back its index, so `face_lookup` could
+            // name index 1 while the canvas held only the primary: `facePtrAt`
+            // then returned the default face and a styled `.font`/`.weight`
+            // drew as the primary, silently, for every face. Cheap per frame:
+            // `setFontIndex` returns immediately once a slot is loaded.
+            if (font_reg) |*r| r.attachAll(canvas);
+
             const clock = opts.io;
             const t0 = if (clock) |c| std.Io.Timestamp.now(c, .awake).toNanoseconds() else 0;
             frame = try rt.frame(size, canvas.renderer());
