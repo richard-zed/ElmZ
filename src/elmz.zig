@@ -1018,7 +1018,7 @@ pub fn Element(comptime M: type) type {
             /// `face` is set through `Style.face`, never by a view: a style names a
             /// typeface, `Ui` resolves it against the registry and stores the INDEX here.
             text: struct { bytes: []const u8, size: f32, face: u16 = 0, weight: u16 = 0 },
-            button: struct { label: []const u8, size: f32, weight: u16 = 0 },
+            button: struct { label: []const u8, size: f32, face: u16 = 0, weight: u16 = 0 },
             bar: struct { value: f32 },
             /// Children share ONE origin, each displaced by its own `offset`.
             stack: struct { children: []const *Self },
@@ -1917,6 +1917,7 @@ pub fn Element(comptime M: type) type {
                     // Weight belongs to the face, so it is set before measuring:
                     // a heavier instance is wider, and measuring at the old
                     // weight would centre the label off by the difference.
+                    r.setFace(b.face);
                     r.setWeight(b.weight);
                     const ts = r.measureText(b.label, b.size);
                     r.text(
@@ -2565,6 +2566,9 @@ pub fn Ui(comptime M: type) type {
             const st = e.style();
             if (st.face) |f| switch (e.geometry) {
                 .text => |*tx| tx.face = f,
+                // A button draws its own label, so a themed `.font` has to reach
+                // its geometry too; without this a button always used face 0.
+                .button => |*bt| bt.face = f,
                 else => {},
             };
             // Same rule for the weight: it belongs to the face, and paint
@@ -2808,15 +2812,7 @@ pub fn Ui(comptime M: type) type {
         }
 
         pub fn button(self: *Self, o: ButtonOpts) *Elem {
-            // Resolved here, not in `finish`: `finish` merges the style onto the
-            // ELEMENT, and the label is drawn from the button sub-struct, so a
-            // theme's `.weight` never reached it.
-            const st = self.resolveStyle(o);
-            const e = self.mk(.{ .button = .{
-                .label = o.label,
-                .size = o.size,
-                .weight = o.weight orelse (st.weight orelse 0),
-            } });
+const e = self.mk(.{ .button = .{ .label = o.label, .size = o.size } });
             // The click is an element fact, not a button fact: the generic
             // `on_press` hit path already registers it, so the button geometry
             // does not need to carry the message as well.

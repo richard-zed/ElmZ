@@ -3091,7 +3091,9 @@ pub const Canvas = struct {
 
     /// Point the STICKY face at a variable instance of `weight`.
     pub fn setFaceWeight(self: *Self, weight: u16) void {
-        if (weight == self.cur_weight) return;
+        // No early-return on `weight == cur_weight`: the sticky `cur_weight` is
+        // cleared by `setFace`, but `font` can still hold a varied instance from
+        // an earlier element, so the value matching proves nothing about `font`.
         self.cur_weight = weight;
         self.revaryFace(self.cur_face);
     }
